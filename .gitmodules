@@ -1,0 +1,3 @@
+[submodule "refs/fairchem"]
+	path = refs/fairchem
+	url = git@github.com:facebookresearch/fairchem.git
