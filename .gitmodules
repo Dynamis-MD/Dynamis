@@ -1,3 +1,6 @@
 [submodule "refs/fairchem"]
 	path = refs/fairchem
 	url = git@github.com:facebookresearch/fairchem.git
+[submodule "refs/nvalchemi"]
+	path = refs/nvalchemi
+	url = https://github.com/NVIDIA/nvalchemi-toolkit-ops.git
