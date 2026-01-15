@@ -655,7 +655,6 @@ class eSCNMDBackbone(nn.Module, MOLEInterface):
 
         return set(no_wd_list)
 
-
 class MLP_EFS_Head(nn.Module, HeadInterface):
     def __init__(
         self,
@@ -688,6 +687,9 @@ class MLP_EFS_Head(nn.Module, HeadInterface):
         assert (
             not backbone.direct_forces
         ), "EFS head is only used for gradient-based forces/stress."
+        
+        # Profiler for backward pass timing (set externally)
+        self.profiler = None
 
     @conditional_grad(torch.enable_grad())
     def forward(
@@ -703,9 +705,17 @@ class MLP_EFS_Head(nn.Module, HeadInterface):
             stress_key = "stress"
 
         outputs = {}
+        
+        # Profile energy head forward
+        if self.profiler:
+            self.profiler.start("energy_head")
+        
         _input = emb["node_embedding"].narrow(1, 0, 1).squeeze(1)
         _output = self.energy_block(_input)
         node_energy = _output.view(-1, 1, 1)
+        
+        if self.profiler:
+            self.profiler.stop("energy_head")
         energy_part = torch.zeros(
             len(data["natoms"]), device=data["pos"].device, dtype=node_energy.dtype
         )
@@ -748,11 +758,18 @@ class MLP_EFS_Head(nn.Module, HeadInterface):
             )
 
         if self.regress_stress:
+            # Profile backward pass for stress/forces
+            if self.profiler:
+                self.profiler.start("backward_stress")
+            
             grads = torch.autograd.grad(
                 [energy_part.sum()],
                 [data["pos_original"], emb["displacement"]],
                 create_graph=self.training,
             )
+            
+            if self.profiler:
+                self.profiler.stop("backward_stress")
             if gp_utils.initialized():
                 grads = (
                     gp_utils.reduce_from_model_parallel_region(grads[0]),
@@ -792,6 +809,10 @@ class MLP_EFS_Head(nn.Module, HeadInterface):
                     local_energy_sum = energy_part.sum()
             else:
                 local_energy_sum = energy_part.sum()
+            
+            # Profile backward pass for forces
+            if self.profiler:
+                self.profiler.start("backward_force")
                 
             forces = (
                 -1
@@ -799,6 +820,9 @@ class MLP_EFS_Head(nn.Module, HeadInterface):
                     local_energy_sum, data["pos"], create_graph=self.training
                 )[0]
             )
+            
+            if self.profiler:
+                self.profiler.stop("backward_force")
             if gp_utils.initialized():
                 forces = gp_utils.reduce_from_model_parallel_region(forces)
             outputs[forces_key] = {"forces": forces} if self.wrap_property else forces

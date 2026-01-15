@@ -216,6 +216,13 @@ class FAIRChemCalculator(Calculator):
         if len(atoms) == 1 and sum(atoms.pbc) == 0:
             self.results = self._get_single_atom_energies(atoms)
         else:
+            # Get profiler if available (passed from DistributedCalculator)
+            profiler = getattr(self, '_profiler', None)
+            
+            # Profile: Atom to graph conversion
+            if profiler:
+                profiler.start("atom2graph")
+            
             # Convert using the current a2g object
             data_object = self.a2g(atoms)
             
@@ -226,7 +233,22 @@ class FAIRChemCalculator(Calculator):
 
             # Batch and predict
             batch = data_list_collater([data_object], otf_graph=True)
+            
+            if profiler:
+                profiler.stop("atom2graph")
+            
+            # Profile: Model prediction (includes forward + backward for forces)
+            if profiler:
+                profiler.start("predict")
+            
             pred = self.predictor.predict(batch)
+            
+            if profiler:
+                profiler.stop("predict")
+            
+            # Profile: Result transfer to CPU
+            if profiler:
+                profiler.start("result_transfer")
 
             # Collect the results into self.results
             self.results = {}
@@ -263,6 +285,9 @@ class FAIRChemCalculator(Calculator):
             if "atomic_energies" in pred:
                 self.results_raw["energies"] = pred["atomic_energies"]
                 self.results["energies"] = pred["atomic_energies"].detach().cpu().numpy()
+            
+            if profiler:
+                profiler.stop("result_transfer")
 
     def get_potential_energies(self, atoms=None):
         if self.calculation_required(atoms, ["energy"]):

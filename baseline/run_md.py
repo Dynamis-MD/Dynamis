@@ -45,6 +45,7 @@ class MDConfig:
 @dataclass
 class UMAConfig:
     model: str = "uma-s-1p1"
+    activation_checkpointing: bool = True
     compile: bool = False
     wigner_cuda: bool = True
     merge_mole: bool = True
@@ -186,6 +187,7 @@ def main(cfg: AppConfig) -> None:
     
     # Build calculator using pretrained_mlip API
     settings = inference_settings_turbo()
+    settings.activation_checkpointing = bool(cfg.uma.activation_checkpointing)
     settings.merge_mole = bool(cfg.uma.merge_mole)
     settings.wigner_cuda = cfg.uma.wigner_cuda
     settings.compile = bool(cfg.uma.compile)

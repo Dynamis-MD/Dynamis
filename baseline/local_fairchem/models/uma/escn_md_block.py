@@ -15,6 +15,7 @@ import torch.nn as nn
 from torch.profiler import record_function
 from typing_extensions import Literal
 
+
 from baseline.local_fairchem.common import gp_utils
 from baseline.local_fairchem.models.uma.nn.activation import (
     GateActivation,
@@ -208,10 +209,9 @@ class Edgewise(torch.nn.Module):
         # here we need to update the ac_start_idx of the mole layers under here for this chunking to
         # work properly with MoLE together
         set_mole_ac_start_index(self, ac_mole_start_idx)
-        # x_source = x_full[]
+        
         x_source = x_full[edge_index[0]]
         x_target = x_full[edge_index[1]]
-
         x_message = torch.cat((x_source, x_target), dim=2)
 
         with record_function("SO2Conv"):

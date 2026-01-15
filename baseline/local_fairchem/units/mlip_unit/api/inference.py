@@ -89,6 +89,11 @@ class InferenceSettings:
 
     edge_chunk_size: int | None = None
 
+    # Path to save/load torch.compile cache artifacts for distributed sharing.
+    # When set, rank 0 will save cache after compilation and other ranks will load it.
+    # This reduces compilation time for multi-rank distributed inference.
+    compile_cache_path: str | None = None
+
 
 # this is most general setting that works for most systems and models,
 # not optimized for speed

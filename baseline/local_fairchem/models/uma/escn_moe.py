@@ -307,6 +307,20 @@ class DatasetSpecificSingleHeadWrapper(nn.Module, HeadInterface):
 
         # keep track if this head has been merged or not
         self.merged_on_dataset = None
+        
+        # Profiler for backward pass timing (propagates to inner head)
+        self._profiler = None
+    
+    @property
+    def profiler(self):
+        return self._profiler
+    
+    @profiler.setter
+    def profiler(self, value):
+        self._profiler = value
+        # Propagate to inner head if it supports profiler
+        if hasattr(self.head, 'profiler'):
+            self.head.profiler = value
 
     def merge_MOLE_model(self, data):
         self.merged_on_dataset = data.dataset[0]

@@ -229,7 +229,8 @@ def coordinates_to_sfc_indices(coords: torch.Tensor, curve_type: str = "morton",
 
 
 def sfc_partition(coords: torch.Tensor, num_partitions: int, curve_type: str = "morton",
-                  device: Optional[torch.device] = None) -> Tuple[torch.Tensor, Dict[str, float]]:
+                  device: Optional[torch.device] = None,
+                  edge_counts: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Partition atoms using space-filling curve.
     
@@ -238,6 +239,8 @@ def sfc_partition(coords: torch.Tensor, num_partitions: int, curve_type: str = "
         num_partitions: Number of partitions
         curve_type: Type of curve ("morton" or "hilbert")
         device: Device to run computation on
+        edge_counts: Optional tensor of edge counts per atom. If provided,
+                    partition by edge cost instead of equal atom count.
         
     Returns:
         Tuple of (partition_labels, metadata)
@@ -260,30 +263,227 @@ def sfc_partition(coords: torch.Tensor, num_partitions: int, curve_type: str = "
     # Create partition assignments
     partition_id = torch.zeros(N, dtype=torch.long, device=device)
     
-    # Divide sorted atoms into roughly equal partitions
-    atoms_per_partition = N // num_partitions
-    remainder = N % num_partitions
-    
-    current_idx = 0
-    for p in range(num_partitions):
-        # Calculate partition size (distribute remainder among first partitions)
-        partition_size = atoms_per_partition + (1 if p < remainder else 0)
+    use_weighted = edge_counts is not None
+    if use_weighted:
+        # Weighted partitioning: partition by cumulative edge cost
+        edge_counts = edge_counts.to(device)
+        sorted_costs = edge_counts[sorted_indices].float()
+        cumulative_costs = sorted_costs.cumsum(dim=0)
+        total_cost = cumulative_costs[-1].item()
+        target_cost_per_partition = total_cost / num_partitions
         
-        # Assign atoms to this partition
-        end_idx = current_idx + partition_size
-        partition_id[sorted_indices[current_idx:end_idx]] = p
+        current_idx = 0
+        for p in range(num_partitions):
+            if p == num_partitions - 1:
+                partition_id[sorted_indices[current_idx:]] = p
+            else:
+                target = (p + 1) * target_cost_per_partition
+                mask = cumulative_costs >= target
+                if mask.any():
+                    end_idx = mask.nonzero()[0].item() + 1
+                else:
+                    end_idx = N
+                end_idx = max(end_idx, current_idx + 1)
+                partition_id[sorted_indices[current_idx:end_idx]] = p
+                current_idx = end_idx
+    else:
+        # Original: equal atom count partitioning
+        atoms_per_partition = N // num_partitions
+        remainder = N % num_partitions
         
-        current_idx = end_idx
+        current_idx = 0
+        for p in range(num_partitions):
+            partition_size = atoms_per_partition + (1 if p < remainder else 0)
+            end_idx = current_idx + partition_size
+            partition_id[sorted_indices[current_idx:end_idx]] = p
+            current_idx = end_idx
     
     partition_time = time.perf_counter() - start_time
     
     metadata = {
         "partition_time": partition_time,
-        "method": f"sfc_{curve_type}",
-        "curve_type": curve_type
+        "method": f"sfc_{curve_type}" + ("_weighted" if use_weighted else ""),
+        "curve_type": curve_type,
+        "weighted": use_weighted
     }
     
     return partition_id, metadata
+
+
+def distributed_sfc_partition(
+    local_coords: torch.Tensor,
+    num_partitions: int,
+    curve_type: str = "morton",
+    device: Optional[torch.device] = None,
+    local_edge_counts: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """
+    Distributed SFC partition: each rank computes local keys, all-gather keys only,
+    then each rank independently determines partition assignments.
+    
+    This reduces memory usage compared to gathering all atom data to rank 0.
+    
+    Args:
+        local_coords: Tensor of shape [N_local, 3] containing local coordinates
+        num_partitions: Number of partitions (typically world_size)
+        curve_type: Type of curve ("morton" or "hilbert")
+        device: Device to run computation on
+        local_edge_counts: Optional tensor of edge counts per local atom.
+                          If provided, partition by edge cost instead of atom count.
+        
+    Returns:
+        Tuple of (local_partition_id, metadata)
+        - local_partition_id: partition assignment for each LOCAL atom
+        - metadata: timing and method info
+    """
+    import torch.distributed as dist
+    
+    if device is None:
+        device = local_coords.device
+    
+    start_time = time.perf_counter()
+    local_coords = local_coords.to(device)
+    N_local = local_coords.size(0)
+    
+    # Check if distributed
+    if not dist.is_initialized() or dist.get_world_size() <= 1:
+        # Fall back to regular SFC partition
+        return sfc_partition(local_coords, num_partitions, curve_type, device)
+    
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    
+    # Step 1: Compute local SFC keys (no communication)
+    # Need to normalize using global min/max, so first exchange bounds
+    local_min = local_coords.min(dim=0)[0]
+    local_max = local_coords.max(dim=0)[0]
+    
+    # All-reduce to get global bounds
+    global_min = local_min.clone()
+    global_max = local_max.clone()
+    dist.all_reduce(global_min, op=dist.ReduceOp.MIN)
+    dist.all_reduce(global_max, op=dist.ReduceOp.MAX)
+    
+    # Normalize using global bounds
+    coords_range = global_max - global_min
+    coords_range = torch.where(coords_range > 0, coords_range, torch.ones_like(coords_range))
+    local_coords_normalized = (local_coords - global_min) / coords_range
+    
+    # Compute SFC keys for local atoms
+    if curve_type == "morton":
+        grid_size = 2**21
+        coords_int = (local_coords_normalized * (grid_size - 1)).long()
+        x, y, z = coords_int[:, 0], coords_int[:, 1], coords_int[:, 2]
+        local_keys = torch.zeros(N_local, dtype=torch.long, device=device)
+        for i in range(21):
+            x_bit = (x >> i) & 1
+            y_bit = (y >> i) & 1
+            z_bit = (z >> i) & 1
+            local_keys |= x_bit << (3*i)
+            local_keys |= y_bit << (3*i + 1)
+            local_keys |= z_bit << (3*i + 2)
+    else:  # hilbert
+        order = 10  # Increased from 7 for better resolution
+        grid_size = 2**order
+        coords_int = (local_coords_normalized * (grid_size - 1)).long().clamp(0, grid_size - 1)
+        local_keys = hilbert_curve_index_tensor(coords_int, order=order, normalize=False)
+    
+    # Step 2: All-gather keys from all ranks
+    # First exchange counts
+    local_count = torch.tensor([N_local], dtype=torch.long, device=device)
+    all_counts = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(world_size)]
+    dist.all_gather(all_counts, local_count)
+    counts = [c.item() for c in all_counts]
+    total_atoms = sum(counts)
+    
+    # Prepare buffers for all-gather
+    all_keys_list = [torch.zeros(c, dtype=torch.long, device=device) for c in counts]
+    dist.all_gather(all_keys_list, local_keys)
+    
+    # Concatenate all keys
+    all_keys = torch.cat(all_keys_list, dim=0)
+    
+    # Handle edge counts if provided (for weighted partitioning)
+    use_weighted = local_edge_counts is not None
+    if use_weighted:
+        all_edge_counts_list = [torch.zeros(c, dtype=torch.long, device=device) for c in counts]
+        dist.all_gather(all_edge_counts_list, local_edge_counts.to(device))
+        all_edge_counts = torch.cat(all_edge_counts_list, dim=0)
+    
+    # Step 3: Each rank independently determines global partition assignments
+    # Sort all keys to determine partition boundaries
+    sorted_indices = torch.argsort(all_keys)
+    
+    # Create global partition assignments
+    global_partition_id = torch.zeros(total_atoms, dtype=torch.long, device=device)
+    
+    if use_weighted:
+        # Weighted partitioning: partition by cumulative edge cost
+        sorted_costs = all_edge_counts[sorted_indices].float()
+        cumulative_costs = sorted_costs.cumsum(dim=0)
+        total_cost = cumulative_costs[-1].item()
+        target_cost_per_partition = total_cost / num_partitions
+        
+        current_idx = 0
+        for p in range(num_partitions):
+            if p == num_partitions - 1:
+                # Last partition gets remaining atoms
+                global_partition_id[sorted_indices[current_idx:]] = p
+            else:
+                # Find index where cumulative cost exceeds target
+                target = (p + 1) * target_cost_per_partition
+                # Binary search for efficiency
+                mask = cumulative_costs >= target
+                if mask.any():
+                    end_idx = mask.nonzero()[0].item() + 1
+                else:
+                    end_idx = total_atoms
+                end_idx = max(end_idx, current_idx + 1)  # At least 1 atom
+                global_partition_id[sorted_indices[current_idx:end_idx]] = p
+                current_idx = end_idx
+    else:
+        # Original: equal atom count partitioning
+        atoms_per_partition = total_atoms // num_partitions
+        remainder = total_atoms % num_partitions
+        
+        current_idx = 0
+        for p in range(num_partitions):
+            partition_size = atoms_per_partition + (1 if p < remainder else 0)
+            end_idx = current_idx + partition_size
+            global_partition_id[sorted_indices[current_idx:end_idx]] = p
+            current_idx = end_idx
+    
+    # Step 4: Extract partition IDs for local atoms
+    # The global_partition_id is indexed by global atom order (concatenated local arrays)
+    # We need to extract the portion for this rank
+    start_idx = sum(counts[:rank])
+    end_idx = start_idx + N_local
+    local_partition_id = global_partition_id[start_idx:end_idx]
+    
+    # Step 5: Compute send_counts_matrix for all ranks (eliminates extra all_to_all later)
+    # send_counts_matrix[sender, receiver] = number of atoms sender will send to receiver
+    send_counts_matrix = torch.zeros((world_size, world_size), dtype=torch.long, device=device)
+    offset = 0
+    for sender in range(world_size):
+        sender_count = counts[sender]
+        sender_partition_ids = global_partition_id[offset:offset + sender_count]
+        for receiver in range(world_size):
+            send_counts_matrix[sender, receiver] = (sender_partition_ids == receiver).sum()
+        offset += sender_count
+    
+    partition_time = time.perf_counter() - start_time
+    
+    metadata = {
+        "partition_time": partition_time,
+        "method": f"distributed_sfc_{curve_type}" + ("_weighted" if use_weighted else ""),
+        "curve_type": curve_type,
+        "total_atoms": total_atoms,
+        "local_atoms": N_local,
+        "weighted": use_weighted,
+        "send_counts_matrix": send_counts_matrix  # Added for optimization
+    }
+    
+    return local_partition_id, metadata
 
 
 def compute_sfc_edge_cut(edge_index: torch.Tensor, partition_id: torch.Tensor) -> int:
