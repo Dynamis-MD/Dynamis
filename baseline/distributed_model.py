@@ -5,6 +5,7 @@ import os
 from torch.profiler import record_function
 from typing import Dict, List, Tuple
 
+
 from baseline.local_fairchem.models.uma.escn_moe import eSCNMDMoeBackbone
 from baseline.local_fairchem.common.registry import registry
 from baseline.local_fairchem.models.uma.nn.mole_utils import (
@@ -24,6 +25,7 @@ class FeatureExchanger:
         self.send_map: Dict[int, torch.Tensor] = {} 
         self.recv_map: Dict[int, torch.Tensor] = {}
         self.recv_ghost_indices: Dict[int, torch.Tensor] = {} # Indices in local x_message to update
+        self.profiler = None  # Optional profiler for detailed timing
 
     def update_maps(self, send_map: Dict[int, torch.Tensor], recv_map: Dict[int, torch.Tensor], recv_ghost_indices: Dict[int, torch.Tensor]):
         """
@@ -45,8 +47,6 @@ class FeatureExchanger:
         """
         if self.world_size <= 1 or not self.recv_ghost_indices:
             return x
-        # if True:
-        #     return x
             
         # Handle arbitrary shapes (e.g. 3D tensors for spherical harmonics)
         original_shape = x.shape
@@ -141,7 +141,9 @@ class FeatureExchanger:
         else:
             x_flat = x
         
-        # 1. Prepare send buffers
+        # 1. Prepare send buffers (gather local features to send)
+        if self.profiler:
+            self.profiler.start("exchange_prepare_send")
         send_data = []
         send_splits = []
         
@@ -158,16 +160,24 @@ class FeatureExchanger:
         send_tensor = torch.cat(send_data, dim=0)
         if not send_tensor.is_contiguous():
             send_tensor = send_tensor.contiguous()
+        if self.profiler:
+            self.profiler.stop("exchange_prepare_send")
         
         # 2. Prepare recv buffer
+        if self.profiler:
+            self.profiler.start("exchange_prepare_recv")
         recv_splits = [0] * self.world_size
         for r, indices in self.recv_ghost_indices.items():
             recv_splits[r] = indices.size(0)
             
         total_recv = sum(recv_splits)
         recv_tensor = torch.empty((total_recv, x_flat.size(1)), device=x.device, dtype=x.dtype)
+        if self.profiler:
+            self.profiler.stop("exchange_prepare_recv")
         
         # 3. Start async all-to-all
+        if self.profiler:
+            self.profiler.start("exchange_async_a2a")
         work = dist.all_to_all_single(
             recv_tensor, 
             send_tensor, 
@@ -175,6 +185,8 @@ class FeatureExchanger:
             input_split_sizes=send_splits,
             async_op=True
         )
+        if self.profiler:
+            self.profiler.stop("exchange_async_a2a")
         
         return (work, recv_tensor, recv_splits, send_splits, original_shape, x_flat.size(1))
 
@@ -299,6 +311,13 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         # Initialize exchanger with dummy values, will be updated later
         self.exchanger = FeatureExchanger(rank=0, world_size=1) 
         self.num_local = 0
+        self.profiler = None  # CUDAEventProfiler for detailed timing
+    
+    def set_profiler(self, profiler):
+        """Set profiler for detailed model timing."""
+        self.profiler = profiler
+        # Also pass to exchanger for communication timing
+        self.exchanger.profiler = profiler
 
     def set_comm_maps(self, send_map, recv_ghost_indices, rank, world_size, interior_mask=None, enable_overlap=False):
         self.exchanger.rank = rank
@@ -435,8 +454,13 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         with record_function("get_displacement_and_cell"):
             displacement, orig_cell = self._get_displacement_and_cell(data_dict)
 
+        # Profile: generate_graph
+        if self.profiler:
+            self.profiler.start("generate_graph")
         with record_function("generate_graph"):
             graph_dict = self._generate_graph(data_dict)
+        if self.profiler:
+            self.profiler.stop("generate_graph")
             
         # DISTNNP OPTIMIZATION: Filter redundant edges early
         # This logic was originally in eSCNMD.forward but is REPLICATED here because
@@ -472,27 +496,32 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                  graph_dict["edge_distance"] = graph_dict["edge_distance"][mask]
                  
             if "edge_distance_vec" in graph_dict:
-                 graph_dict["edge_distance_vec"] = graph_dict["edge_distance_vec"][mask]
+                graph_dict["edge_distance_vec"] = graph_dict["edge_distance_vec"][mask]
 
-             # Cell offsets might be present?
             if "cell_offset" in graph_dict:
-                 graph_dict["cell_offset"] = graph_dict["cell_offset"][mask]
-            
-            post_edges = graph_dict["edge_index"].shape[1]
-                 
+                graph_dict["cell_offset"] = graph_dict["cell_offset"][mask]
+
         if graph_dict["edge_index"].numel() == 0:
              raise ValueError(
                 f"No edges found. Check cutoff {self.cutoff}."
             )
 
+        # Profile: wigner matrix computation
+        if self.profiler:
+            self.profiler.start("wigner")
         with record_function("obtain wigner"):
             (wigner_and_M_mapping, wigner_and_M_mapping_inv) = (
                 self._get_rotmat_and_wigner(
                     graph_dict["edge_distance_vec"],
                 )
             )
+        if self.profiler:
+            self.profiler.stop("wigner")
 
         # Initialize node embeddings
+        # Profile: atom_embedding
+        if self.profiler:
+            self.profiler.start("atom_embedding")
         with record_function("atom embedding"):
             x_message = torch.zeros(
                 data_dict["atomic_numbers"].shape[0],
@@ -502,6 +531,8 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                 dtype=data_dict["pos"].dtype,
             )
             x_message[:, 0, :] = self.sphere_embedding(data_dict["atomic_numbers"])
+        if self.profiler:
+            self.profiler.stop("atom_embedding")
 
         sys_node_embedding = csd_mixed_emb[data_dict["batch"]]
         x_message[:, 0, :] = x_message[:, 0, :] + sys_node_embedding
@@ -514,6 +545,9 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         self.log_MOLE_stats()
 
         # edge degree embedding
+        # Profile: edge_embedding
+        if self.profiler:
+            self.profiler.start("edge_embedding")
         with record_function("edge embedding"):
             dist_scaled = graph_dict["edge_distance"] / self.cutoff
             edge_envelope = self.envelope(dist_scaled).reshape(-1, 1, 1)
@@ -545,6 +579,8 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                 edge_envelope,
                 graph_dict["node_offset"],
             )
+        if self.profiler:
+            self.profiler.stop("edge_embedding")
 
         # Update spherical node embeddings (Message Passing Layers)
         # Prepare local_edge_index for efficient message passing
@@ -552,7 +588,11 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         # Edges where destination (edge_index[1]) is a ghost atom can be skipped.
         # This avoids redundant computation for ghost atoms since their features
         # are overwritten by exchange() in the next step/layer.
-        local_dest_mask = graph_dict["edge_index"][1] < self.num_local
+        
+        # Handle single-rank case: if num_local is 0 or not set, use all atoms
+        effective_num_local = self.num_local if self.num_local > 0 else data_dict["pos"].shape[0]
+        
+        local_dest_mask = graph_dict["edge_index"][1] < effective_num_local
         local_edge_index = graph_dict["edge_index"][:, local_dest_mask]
         
         # We also need to filter edge attributes accordingly
@@ -694,8 +734,18 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             else:
                 # === OPTIMIZED PATH: Overlap exchange with Wigner filtering ===
                 # Start async exchange first
+                # Profile: feature_exchange
+                # dist.barrier()
+                if self.profiler:
+                    self.profiler.start(f"feature_exchange_{i}")
                 with record_function(f"async_exchange_start {i}"):
                     exchange_handle = self.exchanger.async_exchange_start(x_message, self.num_local)
+                
+                # DEBUG:Wait for exchange to complete
+                # with record_function(f"async_exchange_wait {i}"):
+                #     x_message = self.exchanger.async_exchange_wait(exchange_handle, x_message)
+                # if self.profiler:
+                #     self.profiler.stop(f"feature_exchange_{i}")
                 
                 # Do Wigner filtering ONLY on first iteration (results don't change)
                 # This overlaps with async exchange on first iteration
@@ -731,8 +781,13 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                 # Wait for exchange to complete
                 with record_function(f"async_exchange_wait {i}"):
                     x_message = self.exchanger.async_exchange_wait(exchange_handle, x_message)
+                if self.profiler:
+                    self.profiler.stop(f"feature_exchange_{i}")
 
                 # Now run the block with updated ghost features
+                # Profile: mp_block
+                if self.profiler:
+                    self.profiler.start(f"mp_block_{i}")
                 with record_function(f"message passing {i}"):
                     x_message = self.blocks[i](
                         x_message,
@@ -746,6 +801,8 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                         sys_node_embedding=sys_node_embedding,
                         node_offset=graph_dict["node_offset"],
                     )
+                if self.profiler:
+                    self.profiler.stop(f"mp_block_{i}")
 
         # Final layer norm
         x_message = self.norm(x_message)

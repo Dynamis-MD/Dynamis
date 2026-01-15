@@ -32,8 +32,18 @@ from baseline.local_fairchem.graph.radius_graph_pbc import radius_graph_pbc_v2
 from baseline.distributed_model import DistributedESCNMDBackbone
 import torch._dynamo
 import torch._inductor
-from baseline.sfc import sfc_partition
+from baseline.sfc import sfc_partition, distributed_sfc_partition
 from ase.calculators.calculator import Calculator, all_changes
+
+# Import refactored modules
+from baseline.profiler import CUDAEventProfiler, StepProfiler, _ProfilerContext
+from baseline.halo_exchange import (
+    HaloExchanger, 
+    build_halo_maps, 
+    distributed_build_halo_maps,
+    _build_edges_cutoff_fairchem_raw
+)
+from baseline.distributed_calculator import DistributedCalculator
 
 
 # Configure torch inductor
@@ -58,7 +68,8 @@ class MDConfig:
 
 @dataclass
 class UMAConfig:
-    model: str = "uma-s-1p1" # ["uma-m-1p1", "uma-s-1p1"]
+    model: str = "uma-s-1p1" # ["uma-m-1p1", "uma-s-1p1"] or path to .pt Student model
+    activation_checkpointing: bool = True
     compile: bool = False
     wigner_cuda: bool = True
     merge_mole: bool = True
@@ -74,6 +85,8 @@ class MACEConfig:
 class ProfilerConfig:
     enabled: bool = False
     log_dir: str = "./profiler_logs"
+    torch_profiler: bool = False  # Enable PyTorch profiler for deep model analysis
+    torch_profiler_steps: int = 5  # Number of steps to profile (skip first 2 as warmup)
 
 @dataclass
 class DistConfig:
@@ -89,7 +102,7 @@ class DistConfig:
     save_partition: bool = True
     save_timeseries: bool = True
     merge_results: bool = True
-    gnn_layers: int = 4  # Number of GNN layers for halo depth
+    gnn_layers: int = 1  # Number of GNN layers for halo depth
     use_distributed_model: bool = True # Use distributed model with direct feature fetching
     overlap: bool = False  # Enable computation-communication overlap (experimental)
 
@@ -124,12 +137,14 @@ class Timer:
         end_time = time.time()
         print(f"[{self.name}] took {end_time - self.start_time:.4f}s")
 
+
 def dist_is_enabled() -> bool:
     return dist.is_available() and dist.is_initialized()
 
 def rank0_print(*args, **kwargs):
     if not dist_is_enabled() or dist.get_rank() == 0:
         print(*args, **kwargs)
+
 
 def dist_init_from_slurm(backend: Optional[str] = None) -> Tuple[int, int, int]:
     """Initialize torch.distributed using SLURM env if present."""
@@ -319,518 +334,129 @@ def _gather_all_atoms_to_rank0(a: ase.Atoms) -> Optional[Dict[str, np.ndarray]]:
     
     return result
 
-def build_halo_maps(
-    pos: torch.Tensor,
-    partition_id: torch.Tensor,
-    cutoff: float,
-    gnn_layers: int,
+
+def do_partition_and_redistribute(
+    local_pos: torch.Tensor,
+    local_vel: torch.Tensor,
+    local_Z: torch.Tensor,
+    local_gid: Optional[torch.Tensor],
     cell: torch.Tensor,
     pbc: torch.Tensor,
-    world_size: int
-) -> Tuple[List[Dict[int, torch.Tensor]], List[torch.Tensor]]:
+    cutoff: float,
+    ghost_cutoff_buffer: float,
+    partition_algorithm: str,
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    profiler: 'CUDAEventProfiler' = None
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, 
+           Optional[torch.Tensor], Dict[int, torch.Tensor], Dict[int, torch.Tensor], torch.Tensor]:
     """
-    Build halo exchange maps using Graph BFS.
+    Unified partition and redistribution logic for both initial partition and repartition.
+    
+    Steps:
+    1. distributed_sfc_partition to determine new partition
+    2. all_to_all redistribute atoms to new owners
+    3. distributed_build_halo_maps to build communication patterns (each rank independently)
+    
     Returns:
-        send_maps: list of dicts, where list[rank_s][rank_r] = tensor of local indices 
-                   that rank_s needs to send to rank_r.
-        interior_masks: list of boolean tensors (one per rank), where interior_masks[r][i] = True
-                        if local atom i of rank r has NO ghost neighbors (all neighbors are local).
+        new_pos, new_vel, new_Z, new_gid, send_map, recv_ghost_indices, interior_mask
     """
-    device = pos.device
-    num_atoms = pos.size(0)
+    N_local = local_pos.size(0)
+    has_gid = local_gid is not None
     
-    # 1. Build Base Graph (1-hop)
-    edge_index, _ = _build_edges_cutoff_fairchem_raw(pos, cutoff, cell, pbc)
-    edge_index = edge_index.to(device)
-                
-    # 2. Initialize Requirement Mask (N, WorldSize)
-    # needed_by[i, r] means atom i is needed by rank r
-    needed_by = torch.zeros((num_atoms, world_size), dtype=torch.bool, device=device)
+    # Step 1: Distributed SFC partition
+    if profiler:
+        profiler.start("sfc_partition")
     
-    # Initial state: each atom is needed by its owner rank
-    # partition_id is (N,)
-    # We can use scatter to set true
-    rows = torch.arange(num_atoms, device=device)
-    needed_by[rows, partition_id] = True
-    
-    # 3. BFS Propagation
-    src, dst = edge_index
-    
-    # For Layer-wise Feature Exchange, we only need 1-hop halo atoms.
-    # The multi-hop BFS is legacy logic for Ghost Zone computation and is removed.
-    
-    # Mark 1-hop neighbors as needed
-    # If edge is (src, dst), then src is a neighbor of dst.
-    # If dst is owned by rank R, then src is needed by rank R.
-    owner_dst = partition_id[dst]
-    needed_by[src, owner_dst] = True
-
-    # 4. Generate Send Maps
-    send_maps = [{} for _ in range(world_size)]
-    
-    for r_sender in range(world_size):
-        # Indices of atoms owned by r_sender
-        sender_global_indices = torch.nonzero(partition_id == r_sender).squeeze(-1)
-        
-        if len(sender_global_indices) == 0:
-            continue
-            
-        # Filter needed_by for these atoms
-        # shape: (Num_Local, WorldSize)
-        local_needed = needed_by[sender_global_indices]
-        
-        for r_receiver in range(world_size):
-            if r_sender == r_receiver:
-                continue
-            
-            # Which local atoms are needed by r_receiver?
-            # boolean mask of shape (Num_Local,)
-            mask = local_needed[:, r_receiver]
-            
-            if mask.any():
-                # Get local indices (indices into the sender's array)
-                send_indices = torch.nonzero(mask).squeeze(-1)
-                send_maps[r_sender][r_receiver] = send_indices.to(torch.int32).cpu()
-    
-    # 5. Compute Interior Masks
-    # Interior atom = local atom whose ALL neighbors are also local (same rank)
-    # i.e., atom i is interior if for all edges (j, i), partition_id[j] == partition_id[i]
-    interior_masks = []
-    
-    for r in range(world_size):
-        # Get indices of atoms owned by rank r
-        local_mask = (partition_id == r)
-        local_count = local_mask.sum().item()
-        
-        if local_count == 0:
-            interior_masks.append(torch.empty(0, dtype=torch.bool, device=device))
-            continue
-        
-        # For each local atom, check if any neighbor is from a different rank (ghost)
-        # Find edges where dst is owned by rank r
-        dst_is_local_r = (partition_id[dst] == r)
-        
-        # Among those edges, check if src is from a different rank
-        src_of_local_edges = src[dst_is_local_r]
-        dst_of_local_edges = dst[dst_is_local_r]
-        src_is_ghost = (partition_id[src_of_local_edges] != r)
-        
-        # Mark atoms that have at least one ghost neighbor as boundary
-        # has_ghost_neighbor[global_idx] = True if this atom has ghost neighbor
-        has_ghost_neighbor = torch.zeros(num_atoms, dtype=torch.bool, device=device)
-        boundary_atom_indices = dst_of_local_edges[src_is_ghost]
-        if boundary_atom_indices.numel() > 0:
-            has_ghost_neighbor.scatter_(0, boundary_atom_indices, True)
-        
-        # Interior = local AND NOT has_ghost_neighbor
-        # Extract only for this rank's atoms (in local indexing)
-        local_indices = torch.nonzero(local_mask).squeeze(-1)
-        interior_global = local_mask & ~has_ghost_neighbor
-        interior_local = interior_global[local_indices]
-        
-        interior_masks.append(interior_local.cpu())
-    
-    return send_maps, interior_masks
-
-
-def _build_edges_cutoff_fairchem_raw(pos: torch.Tensor, cutoff: float, cell: torch.Tensor, pbc: torch.Tensor):
-    """Helper to call fairchem graph builder and return edge_index."""    
-    # Ensure inputs are on device and correct type
-    if pos.device.type == 'cpu':
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        pos = pos.to(device)
-        cell = cell.to(device)
-        pbc = pbc.to(device)
+    if partition_algorithm == "simple":
+        # Simple partition: keep original assignment
+        local_partition_id = torch.full((N_local,), rank, dtype=torch.long, device=device)
+        # For simple partition, counts are straightforward
+        send_counts = torch.zeros(world_size, dtype=torch.long, device=device)
+        send_counts[rank] = N_local
+        recv_counts = send_counts.clone()  # Each rank keeps its own
     else:
-        device = pos.device
+        curve_type = "hilbert" if "hilbert" in partition_algorithm else "morton"
+        local_partition_id, metadata = distributed_sfc_partition(
+            local_coords=local_pos,
+            num_partitions=world_size,
+            curve_type=curve_type,
+            device=device
+        )
         
-    class SimpleData:
-        def __init__(self, pos, cell, pbc, natoms):
-            self.pos = pos
-            self.cell = cell.unsqueeze(0) # (1, 3, 3)
-            self.pbc = pbc.unsqueeze(0)   # (1, 3)
-            self.natoms = natoms
-            self.batch = torch.zeros(pos.size(0), dtype=torch.long, device=pos.device)
-
-    natoms = torch.tensor([pos.size(0)], dtype=torch.long, device=device)
-    data = SimpleData(pos, cell, pbc, natoms)
+        # Use pre-computed send_counts_matrix (eliminates all_to_all for counts!)
+        send_counts_matrix = metadata["send_counts_matrix"]
+        send_counts = send_counts_matrix[rank]  # Counts I send to each rank
+        recv_counts = send_counts_matrix[:, rank]  # Counts I receive from each rank
     
-    edge_index, cell_offsets, neighbors = radius_graph_pbc_v2(
-        data, cutoff, 1000, pbc=pbc # max_num_neighbors_threshold
+    if profiler:
+        profiler.stop("sfc_partition")
+    
+    # Step 2: Atom redistribution via all-to-all
+    if profiler:
+        profiler.start("atom_redistribute")
+    
+    send_counts_list = [int(c) for c in send_counts.tolist()]
+    recv_counts_list = [int(c) for c in recv_counts.tolist()]
+    total_recv = sum(recv_counts_list)
+    
+    # Sort local atoms by target rank for packing
+    sort_indices = torch.argsort(local_partition_id)
+    sorted_pos = local_pos[sort_indices]
+    sorted_vel = local_vel[sort_indices]
+    sorted_Z = local_Z[sort_indices]
+    sorted_gid = local_gid[sort_indices] if has_gid else None
+    
+    # Pack data: [pos(3) + vel(3) + Z(1) + gid(1)] = 8 floats per atom
+    packed_send = torch.cat([
+        sorted_pos,
+        sorted_vel,
+        sorted_Z.float().unsqueeze(1),
+        (sorted_gid.float().unsqueeze(1) if has_gid else torch.zeros(N_local, 1, device=device))
+    ], dim=1)  # [N_local, 8]
+    
+    # Prepare receive buffer
+    packed_recv = torch.zeros((total_recv, 8), dtype=torch.float32, device=device)
+    
+    # All-to-all exchange
+    dist.all_to_all_single(
+        packed_recv, packed_send,
+        output_split_sizes=recv_counts_list,
+        input_split_sizes=send_counts_list
     )
-    return edge_index, cell_offsets
-
-
-
-class HaloExchanger:
-    def __init__(self, rank: int, world_size: int, comm_map: Dict[int, torch.Tensor], device: torch.device):
-        self.rank = rank
-        self.world_size = world_size
-        self.comm_map = {r: indices.to(device) for r, indices in comm_map.items()} # Dict[target_rank, local_indices_to_send]
-        self.device = device
-        
-        # Pre-compute receive counts?
-        # We can exchange counts at the beginning of exchange, or pre-compute if static.
-        # Since comm_map is static between rebalances, we can pre-compute recv_counts.
-        # But here we only have send_map.
-        # We need to exchange counts once during init (or update_topology).
-        self.recv_counts = {}
-        self._exchange_counts()
-
-    def _exchange_counts(self):
-        """Exchange the number of atoms to be sent/received."""
-        if self.world_size <= 1:
-            return
-            
-        # Send counts to neighbors
-        send_counts = torch.zeros(self.world_size, dtype=torch.int32, device=self.device)
-        for r, indices in self.comm_map.items():
-            send_counts[r] = len(indices)
-            
-        # All-to-all to get recv counts
-        recv_counts_tensor = torch.zeros(self.world_size, dtype=torch.int32, device=self.device)
-        dist.all_to_all_single(recv_counts_tensor, send_counts)
-        
-        self.recv_counts = {}
-        for r in range(self.world_size):
-            c = recv_counts_tensor[r].item()
-            if c > 0:
-                self.recv_counts[r] = c
-                
-        # OPTIMIZATION: Pre-compute reduction indices for single index_add_
-        # Concatenate indices in order of ranks (matching recv_tensor structure in reduce_forces)
-        reduction_indices_list = []
-        for r in range(self.world_size):
-            if r in self.comm_map:
-                reduction_indices_list.append(self.comm_map[r])
-        
-        if reduction_indices_list:
-            self._reduction_indices = torch.cat(reduction_indices_list)
-        else:
-            self._reduction_indices = torch.empty(0, dtype=torch.long, device=self.device)
-
-    def exchange(self, atoms: ase.Atoms) -> Dict[str, torch.Tensor]:
-        """Exchange ghost atoms based on pre-computed map."""
-        if self.world_size <= 1:
-            return {}
-
-        # Prepare data
-        # OPTIMIZATION: Reuse GPU buffers instead of creating new tensors every step
-        num_atoms = len(atoms)
-        if not hasattr(self, '_pos_buffer') or self._pos_buffer.shape[0] != num_atoms:
-            self._pos_buffer = torch.empty((num_atoms, 3), dtype=torch.float32, device=self.device)
-            self._vel_buffer = torch.empty((num_atoms, 3), dtype=torch.float32, device=self.device)
-        
-        # Use copy_ for efficient in-place transfer
-        self._pos_buffer.copy_(torch.as_tensor(atoms.get_positions(), dtype=torch.float32))
-        self._vel_buffer.copy_(torch.as_tensor(atoms.get_velocities(), dtype=torch.float32))
-        pos = self._pos_buffer
-        vel = self._vel_buffer
-        
-        # OPTIMIZATION: Cache Z tensor (atomic numbers are static during MD)
-        if not hasattr(self, '_cached_Z') or self._cached_Z is None or self._cached_Z.shape[0] != num_atoms:
-            self._cached_Z = torch.tensor(atoms.get_atomic_numbers(), dtype=torch.int32, device=self.device)
-        Z = self._cached_Z
-        
-        # 1. Prepare Input Tensor (Packed)
-        # We need to order data by rank 0..world_size-1
-        input_chunks = []
-        input_split_sizes = []
-        
-        for r in range(self.world_size):
-            if r in self.comm_map:
-                indices = self.comm_map[r]
-                s_pos = pos[indices]
-                s_vel = vel[indices]
-                s_Z = Z[indices].float().unsqueeze(1)
-                packed = torch.cat([s_pos, s_vel, s_Z], dim=1)
-                input_chunks.append(packed)
-                input_split_sizes.append(packed.size(0))
-            else:
-                # Empty chunk with correct feature dim (7)
-                input_chunks.append(torch.empty((0, 7), dtype=torch.float32, device=self.device))
-                input_split_sizes.append(0)
-                
-        input_tensor = torch.cat(input_chunks, dim=0)
-        
-        # 2. Prepare Output Tensor
-        # We need output split sizes (recv counts)
-        output_split_sizes = []
-        for r in range(self.world_size):
-            output_split_sizes.append(self.recv_counts.get(r, 0))
-            
-        total_recv = sum(output_split_sizes)
-        output_tensor = torch.zeros((total_recv, 7), dtype=torch.float32, device=self.device)
-        
-        # 3. All-to-All
-        dist.all_to_all_single(output_tensor, input_tensor, output_split_sizes=output_split_sizes, input_split_sizes=input_split_sizes)
-        
-        # 4. Unpack
-        # Split output_tensor back into chunks
-        # torch.split returns a tuple of views
-        output_chunks = torch.split(output_tensor, output_split_sizes, dim=0)
-        
-        ghost_pos_list = []
-        ghost_vel_list = []
-        ghost_Z_list = []
-        
-        # We only care about chunks where we expected data (recv_counts > 0)
-        # But we need to iterate all chunks to match rank index
-        for r, chunk in enumerate(output_chunks):
-            if output_split_sizes[r] > 0:
-                ghost_pos_list.append(chunk[:, 0:3])
-                ghost_vel_list.append(chunk[:, 3:6])
-                ghost_Z_list.append(chunk[:, 6].long())
-        
-        if not ghost_pos_list:
-             return {}
-             
-        ghost_pos = torch.cat(ghost_pos_list, dim=0)
-        ghost_vel = torch.cat(ghost_vel_list, dim=0)
-        ghost_Z = torch.cat(ghost_Z_list, dim=0)
-        
-        return {
-            "pos": ghost_pos,
-            "vel": ghost_vel,
-            "Z": ghost_Z
-        }
-
-    def reduce_forces(self, local_forces, ghost_forces):
-        """
-        Redistribute ghost forces back to their owners and add to local forces.
-        """
-        if self.world_size <= 1:
-            return local_forces
-            
-        if ghost_forces is None:
-            return local_forces
-
-        # 1. Prepare Send Buffer (send ghost_forces back to owners)
-        # ghost_forces are already ordered by rank (same as recv order in exchange)
-        # Input splits (what we have) -> recv_counts
-        input_split_sizes = []
-        for r in range(self.world_size):
-            input_split_sizes.append(self.recv_counts.get(r, 0))
-            
-        send_tensor = ghost_forces
-        if not send_tensor.is_contiguous():
-            send_tensor = send_tensor.contiguous()
-            
-        # 2. Prepare Recv Buffer (receive forces for atoms we sent)
-        # Output splits (what we expect) -> send_counts (len(comm_map[r]))
-        output_split_sizes = []
-        send_counts = {}
-        total_recv = 0
-        for r in range(self.world_size):
-            count = len(self.comm_map.get(r, [])) if r in self.comm_map else 0
-            output_split_sizes.append(count)
-            send_counts[r] = count
-            total_recv += count
-            
-        recv_tensor = torch.zeros((total_recv, 3), dtype=local_forces.dtype, device=self.device)
-        
-        # 3. Exchange
-        dist.all_to_all_single(recv_tensor, send_tensor, 
-                               output_split_sizes=output_split_sizes, 
-                               input_split_sizes=input_split_sizes)
-        
-        # 4. Scatter to local forces
-        # OPTIMIZATION: Batched index_add_
-        if self._reduction_indices.numel() > 0:
-             local_forces.index_add_(0, self._reduction_indices, recv_tensor)
-                
-        return local_forces
-
-
-
-class DistributedCalculator(Calculator):
-    implemented_properties = ["energy", "forces"]
     
-    def __init__(self, calculator, cutoff: float, comm_map: Dict[int, torch.Tensor] = None, interior_mask: torch.Tensor = None, enable_overlap: bool = False):
-        super().__init__()
-        self.calculator = calculator
-        self.cutoff = cutoff
-        self.rank = dist.get_rank() if dist.is_initialized() else 0
-        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
-        
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.exchanger = HaloExchanger(self.rank, self.world_size, comm_map if comm_map else {}, device)
-        self.num_local = 0
-        
-        # Store interior mask and overlap flag for optimization
-        self.interior_mask = interior_mask.to(device) if interior_mask is not None else None
-        self.enable_overlap = enable_overlap
-        
-        # OPTIMIZATION: Cache comm maps to avoid rebuilding every step
-        self._cached_recv_ghost_indices = None
-        self._cached_device_send_map = None
-        self._cached_comm_map_version = -1  # Version counter to invalidate cache on update
-        self._comm_map_version = 0
-        
-        # OPTIMIZATION: Cache atomic numbers (they don't change during MD)
-        self._cached_local_Z_tensor = None
-        
-    def update_comm_map(self, comm_map: Dict[int, torch.Tensor], interior_mask: torch.Tensor = None):
-        self.exchanger = HaloExchanger(self.rank, self.world_size, comm_map, self.exchanger.device)
-        # Update interior mask
-        if interior_mask is not None:
-            self.interior_mask = interior_mask.to(self.exchanger.device)
-        # OPTIMIZATION: Invalidate cached comm maps
-        self._comm_map_version += 1
+    # Unpack received data
+    new_pos = packed_recv[:, 0:3].contiguous()
+    new_vel = packed_recv[:, 3:6].contiguous()
+    new_Z = packed_recv[:, 6].long()
+    new_gid = packed_recv[:, 7].long() if has_gid else None
+    
+    if profiler:
+        profiler.stop("atom_redistribute")
+    
+    # Step 3: Build halo maps using distributed version
+    if profiler:
+        profiler.start("build_halo_maps")
+    
+    # Each rank computes its own maps independently (more scalable)
+    ghost_cutoff = cutoff + ghost_cutoff_buffer
+    
+    send_map, recv_ghost_indices, interior_mask = distributed_build_halo_maps(
+        local_pos=new_pos,
+        cutoff=ghost_cutoff,
+        cell=cell,
+        pbc=pbc,
+        rank=rank,
+        world_size=world_size,
+        device=device
+    )
+    
+    if profiler:
+        profiler.stop("build_halo_maps")
+    
+    return new_pos, new_vel, new_Z, new_gid, send_map, recv_ghost_indices, interior_mask
 
-    def _prepare_combined_atoms(self, atoms: ase.Atoms) -> Tuple[ase.Atoms, Dict[str, torch.Tensor]]:
-        # 1. Exchange ghosts
-        ghosts = self.exchanger.exchange(atoms)
-        
-        self.num_local = len(atoms)
-        num_local = self.num_local
-        
-        # Update model comm maps (only rebuild if version changed)
-        model = self.calculator.predictor.model
-        if hasattr(model, "module"):
-            model = model.module
-        
-        if hasattr(model, "backbone") and hasattr(model.backbone, "set_comm_maps"):
-            if self._cached_comm_map_version != self._comm_map_version or self._cached_recv_ghost_indices is None:
-                recv_ghost_indices = {}
-                current_idx = num_local
-                
-                for r in range(self.world_size):
-                    count = self.exchanger.recv_counts.get(r, 0)
-                    if count > 0:
-                        indices = torch.arange(current_idx, current_idx + count, device=self.exchanger.device)
-                        recv_ghost_indices[r] = indices
-                        current_idx += count
-                
-                device_send_map = {r: idx.to(self.exchanger.device) for r, idx in self.exchanger.comm_map.items()}
-                
-                self._cached_recv_ghost_indices = recv_ghost_indices
-                self._cached_device_send_map = device_send_map
-                self._cached_comm_map_version = self._comm_map_version
-            
-            model.backbone.set_comm_maps(self._cached_device_send_map, self._cached_recv_ghost_indices, self.rank, self.world_size, self.interior_mask, self.enable_overlap)
-            model.backbone.num_local = num_local
-        
-        # 2. Build combined atoms
-        # OPTIMIZATION: Cache combined_atoms to avoid expensive object creation
-        if not hasattr(self, "_cached_combined_atoms"):
-             self._cached_combined_atoms = None
-             self._cached_num_ghosts = -1
-             self._cached_num_local = -1
-
-        num_ghosts = 0
-        if ghosts:
-            ghost_pos = ghosts["pos"].cpu().numpy()
-            ghost_Z = ghosts["Z"].cpu().numpy()
-            num_ghosts = len(ghost_pos)
-
-        # Check if cache is valid
-        # We also need to check if atoms length changed (rebalance or just different atoms object)
-        cache_valid = False
-        if (self._cached_combined_atoms is not None and 
-            self._cached_num_local == len(atoms) and 
-            self._cached_num_ghosts == num_ghosts):
-            cache_valid = True
-        
-        if cache_valid:
-            combined_atoms = self._cached_combined_atoms
-            # Update local part (in-place)
-            combined_atoms.positions[:len(atoms)] = atoms.get_positions()
-            # Cell/PBC usually constant in NVE/NVT but might change in NPT.
-            # Safe to update them (cheap).
-            combined_atoms.cell[:] = atoms.get_cell()
-            
-            # Update ghost part
-            if num_ghosts > 0:
-                combined_atoms.positions[len(atoms):] = ghost_pos
-                # Z updates if needed (usually static, but safe to update)
-                combined_atoms.numbers[len(atoms):] = ghost_Z
-                
-        else:
-            # Rebuild cache
-            if ghosts:
-                combined_atoms = atoms.copy()
-                combined_atoms.extend(ase.Atoms(numbers=ghost_Z, positions=ghost_pos))
-                combined_atoms.set_cell(atoms.get_cell())
-                combined_atoms.set_pbc(atoms.get_pbc())
-            else:
-                combined_atoms = atoms.copy()
-
-            self._cached_combined_atoms = combined_atoms
-            self._cached_num_local = len(atoms)
-            self._cached_num_ghosts = num_ghosts
-        
-        return combined_atoms, ghosts
-        
-
-    def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
-        super().calculate(atoms, properties, system_changes)
-        
-        if atoms is None:
-            atoms = self.atoms
-            
-        combined_atoms, ghosts = self._prepare_combined_atoms(atoms)
-        
-        # Run calculation on combined atoms
-        combined_atoms.calc = self.calculator
-        self.calculator.num_local = self.num_local
-        
-        # Calculate forces
-        all_forces_tensor = None
-        if hasattr(self.calculator, "results_raw") and "forces" in self.calculator.results_raw:
-            if self.calculator.calculation_required(combined_atoms, ["forces"]):
-                self.calculator.calculate(combined_atoms, ["forces"], [])
-            all_forces_tensor = self.calculator.results_raw.get("forces")
-
-        if all_forces_tensor is None:
-            all_forces = self.calculator.get_forces(combined_atoms)
-            if isinstance(all_forces, np.ndarray):
-                all_forces_tensor = torch.from_numpy(all_forces).to(self.exchanger.device)
-            else:
-                all_forces_tensor = all_forces
-            
-        local_forces = all_forces_tensor[:self.num_local]
-        
-        if ghosts:
-            ghost_forces = all_forces_tensor[self.num_local:]
-            local_forces = self.exchanger.reduce_forces(local_forces, ghost_forces)
-            
-        self.results["forces"] = local_forces.cpu().numpy()
-        
-        # Calculate energy
-        energies = self.calculator.get_potential_energies(combined_atoms)
-        
-        if isinstance(energies, torch.Tensor):
-            local_energy_tensor = energies[:self.num_local].sum().to(dtype=torch.float64)
-            global_energy_tensor = local_energy_tensor.clone()
-            dist.all_reduce(global_energy_tensor, op=dist.ReduceOp.SUM)
-            
-            self.results['energy'] = global_energy_tensor.item()
-            self.results['local_energy'] = local_energy_tensor.item()
-        else:
-            local_energy_sum = np.sum(energies[:self.num_local])
-            self.results['local_energy'] = local_energy_sum
-            energy_tensor = torch.tensor([local_energy_sum], dtype=torch.float64, device=self.exchanger.device)
-            dist.all_reduce(energy_tensor, op=dist.ReduceOp.SUM)
-            self.results['energy'] = energy_tensor.item()
-
-    def get_potential_energies(self, atoms=None):
-        # Delegate to the inner calculator
-        # We assume atoms is the same as self.atoms (which is local_atoms)
-        # The inner calculator has results for combined_atoms (local + ghosts)
-        # We should return energies for all atoms in the inner calculator's results
-        # The caller (verify_forces.py) will handle slicing/gathering.
-        
-        if self.calculation_required(atoms, ["energy"]):
-             # We can't easily trigger a full distributed calc from here without atoms being passed correctly
-             # But usually calculate() has already been called.
-             pass
-             
-        # Check if inner calculator has energies
-        if hasattr(self.calculator, "results") and "energies" in self.calculator.results:
-            return self.calculator.results["energies"]
-        else:
-            raise PropertyNotImplementedError("energies property not implemented by the inner calculator")
 
 # -----------------------------------------------------------------------------
 # Main Distributed Simulation Logic
@@ -856,316 +482,229 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
     rebalance_interval = cfg.dist.rebalance_interval
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Rank0 reads full system
-    if rank == 0:
-        full_atoms = ase.io.read(cfg.input_file)
-        # Set cell if needed
-        current_cell_lengths = full_atoms.get_cell().lengths()
-        if not (current_cell_lengths > 0).all() and cell_size > 0:
-            full_atoms.set_cell([cell_size] * 3)
-        full_atoms.set_pbc([True] * 3)
-        
-        ase.md.velocitydistribution.MaxwellBoltzmannDistribution(full_atoms, temperature_K=temperature_K)
-        
-        positions = full_atoms.get_positions().astype(np.float32)
-        velocities = full_atoms.get_velocities().astype(np.float32)
-        numbers = full_atoms.get_atomic_numbers().astype(np.int32)
-        
-        rank0_print(f"Partitioning into {world_size} ranks using {cfg.dist.partition_algorithm}...")
-        
-        # Prepare data on device
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        pos_tensor = torch.from_numpy(positions).to(device)
-        vel_tensor = torch.from_numpy(velocities).to(device)
-        Z_tensor = torch.from_numpy(numbers).to(device)
-        if cfg.dist.use_gid:
-            global_ids = np.arange(len(numbers), dtype=np.int64)
-            gid_tensor = torch.from_numpy(global_ids).to(device)
-        
-        if world_size > 1:
-            if cfg.dist.partition_algorithm == "simple":
-                # Simple partition: just split atoms sequentially, preserves original order
-                # Useful for comparison testing with serial version
-                n_atoms = len(numbers)
-                atoms_per_rank = n_atoms // world_size
-                partition_id = torch.zeros(n_atoms, dtype=torch.long, device=device)
-                for r in range(world_size):
-                    start_idx = r * atoms_per_rank
-                    end_idx = (r + 1) * atoms_per_rank if r < world_size - 1 else n_atoms
-                    partition_id[start_idx:end_idx] = r
-            else:
-                # Use SFC partition
-                curve_type = "hilbert" if "hilbert" in cfg.dist.partition_algorithm else "morton"
-                partition_id, _ = sfc_partition(pos_tensor, world_size, curve_type=curve_type, device=device)
-        else:
-            partition_id = torch.zeros(len(numbers), dtype=torch.long, device=device)
-            
-        # Build tensors per rank using GPU masking
-        fields_per_rank: Dict[str, List[torch.Tensor]] = {
-            "pos": [], "vel": [], "Z": []
-        }
-        
-        for r in range(world_size):
-            mask = (partition_id == r)
-            fields_per_rank["pos"].append(pos_tensor[mask])
-            fields_per_rank["vel"].append(vel_tensor[mask])
-            fields_per_rank["Z"].append(Z_tensor[mask])
-            if cfg.dist.use_gid:
-                fields_per_rank.setdefault("gid", []).append(gid_tensor[mask])
-        
-        cell = torch.from_numpy(np.asarray(full_atoms.get_cell().array, dtype=np.float32)).to(device)
-        pbc = torch.tensor([bool(x) for x in full_atoms.get_pbc()], dtype=torch.int64).to(device)
-        
-        # Build initial halo maps
-        if world_size > 1:
-            rank0_print(f"Building initial halo maps for {cfg.dist.gnn_layers} GNN layers...")
-            # Rebuild halo maps
-            # If using distributed model, we only need 1-hop halo for graph construction
-            halo_gnn_layers = 1 if cfg.dist.use_distributed_model else cfg.dist.gnn_layers
-            # Ghost cutoff includes buffer to avoid FP edge cases
-            ghost_cutoff = cfg.dist.cutoff + cfg.dist.ghost_cutoff_buffer
-            
-            all_comm_maps, all_interior_masks = build_halo_maps(
-                pos=pos_tensor,
-                partition_id=partition_id,
-                cutoff=ghost_cutoff,
-                gnn_layers=halo_gnn_layers,
-                cell=cell,
-                pbc=pbc,
-                world_size=world_size
-            )
-            # Log interior/boundary stats
-            for r, mask in enumerate(all_interior_masks):
-                if mask.numel() > 0:
-                    interior_count = mask.sum().item()
-                    total_count = mask.numel()
-                    rank0_print(f"  Rank {r}: {interior_count}/{total_count} interior atoms ({100*interior_count/total_count:.1f}%)")
-        else:
-            all_comm_maps = None
-            all_interior_masks = None
-            
-    else:
-        fields_per_rank = {
-            "pos": [torch.zeros((1, 3), dtype=torch.float32)] * world_size,
-            "vel": [torch.zeros((1, 3), dtype=torch.float32)] * world_size,
-            "Z": [torch.zeros((1,), dtype=torch.int32)] * world_size,
-        }
-        if cfg.dist.use_gid:
-            fields_per_rank["gid"] = [torch.zeros((1,), dtype=torch.int64)] * world_size
-        cell = torch.empty((3, 3), dtype=torch.float32)
-        pbc = torch.empty((3,), dtype=torch.int64)
-
-    # Broadcast cell and pbc
-    if world_size > 1:
-        cell = _broadcast_tensor(cell, src=0)
-        pbc = _broadcast_tensor(pbc, src=0)
+    # === DISTRIBUTED INITIAL LOADING ===
+    # All ranks read the xyz file and each loads a portion of atoms
+    # Then use distributed_sfc_partition for consistent behavior with rebalance
     
-    cell_np = cell.detach().cpu().numpy()
-    pbc_tuple = tuple(bool(int(x)) for x in pbc.detach().cpu().numpy().tolist())
-
-    # Broadcast initial payload
-    if world_size > 1 and dist_is_enabled():
-        dtype_map = {"pos": torch.float32, "vel": torch.float32, "Z": torch.int32}
-        if cfg.dist.use_gid:
-            dtype_map["gid"] = torch.int64
-        payload = _concat_per_rank_and_broadcast(fields_per_rank, dtype_map)
-        local_atoms = _build_local_atoms_from_payload(payload, cell_np, pbc_tuple)
-        # Initialize charge and spin for OMOL task
-        local_atoms.info["charge"] = 0
-        local_atoms.info["spin"] = 1
-        
-        # Distribute initial comm_maps and interior_masks
-        my_comm_map_container = [None]
-        dist.scatter_object_list(my_comm_map_container, all_comm_maps if rank == 0 else [], src=0)
-        my_comm_map = my_comm_map_container[0]
-        
-        my_interior_mask_container = [None]
-        dist.scatter_object_list(my_interior_mask_container, all_interior_masks if rank == 0 else [], src=0)
-        my_interior_mask = my_interior_mask_container[0]
-        
+    # All ranks read the full file to get metadata
+    full_atoms = ase.io.read(cfg.input_file)
+    n_atoms_total = len(full_atoms)
+    
+    # Set cell if needed
+    current_cell_lengths = full_atoms.get_cell().lengths()
+    if not (current_cell_lengths > 0).all() and cell_size > 0:
+        full_atoms.set_cell([cell_size] * 3)
+    full_atoms.set_pbc([True] * 3)
+    
+    # Get cell and pbc (all ranks have this)
+    cell_np = np.asarray(full_atoms.get_cell().array, dtype=np.float32)
+    pbc_tuple = tuple(bool(x) for x in full_atoms.get_pbc())
+    cell = torch.from_numpy(cell_np).to(device)
+    pbc = torch.tensor([int(x) for x in pbc_tuple], dtype=torch.int64).to(device)
+    
+    # Each rank loads a portion of atoms (initial simple split before SFC)
+    atoms_per_rank = n_atoms_total // world_size
+    start_idx = rank * atoms_per_rank
+    end_idx = (rank + 1) * atoms_per_rank if rank < world_size - 1 else n_atoms_total
+    
+    # Extract local portion
+    positions = full_atoms.get_positions().astype(np.float32)[start_idx:end_idx]
+    numbers = full_atoms.get_atomic_numbers().astype(np.int32)[start_idx:end_idx]
+    
+    # Initialize velocities on rank 0, then broadcast need for consistency
+    if rank == 0:
+        # Generate velocities for all atoms
+        ase.md.velocitydistribution.MaxwellBoltzmannDistribution(full_atoms, temperature_K=temperature_K)
+        all_velocities = full_atoms.get_velocities().astype(np.float32)
     else:
-        if rank == 0:
-            local_atoms = ase.Atoms(numbers=numbers.tolist(), positions=positions)
-            local_atoms.set_cell(cell_np)
-            local_atoms.set_pbc(list(pbc_tuple))
-            local_atoms.set_velocities(velocities)
-            if cfg.dist.use_gid:
-                local_atoms.new_array("global_id", global_ids)
-            
-            # Initialize charge and spin for OMOL task
-            local_atoms.info["charge"] = 0
-            local_atoms.info["spin"] = 1
-        else:
-            local_atoms = ase.Atoms(cell=cell_np, pbc=list(pbc_tuple))
-            # Initialize charge and spin for OMOL task
-            local_atoms.info["charge"] = 0
-            local_atoms.info["spin"] = 1
-        
-        my_comm_map = {}
+        all_velocities = np.zeros((n_atoms_total, 3), dtype=np.float32)
+    
+    # Broadcast velocities from rank 0 for consistency
+    if world_size > 1:
+        all_velocities_tensor = torch.from_numpy(all_velocities).to(device)
+        _broadcast_tensor(all_velocities_tensor, src=0)
+        velocities = all_velocities_tensor[start_idx:end_idx].cpu().numpy()
+    else:
+        velocities = all_velocities[start_idx:end_idx]
+    
+    rank0_print(f"Partitioning into {world_size} ranks using {cfg.dist.partition_algorithm} (distributed)...")
+    
+    # Prepare local data on device
+    local_pos = torch.from_numpy(positions).to(device)
+    local_vel = torch.from_numpy(velocities).to(device)
+    local_Z = torch.from_numpy(numbers).to(device)
+    N_local = local_pos.size(0)
+    
+    if cfg.dist.use_gid:
+        # Global IDs for this rank's portion
+        local_gid = torch.arange(start_idx, end_idx, dtype=torch.int64, device=device)
+    else:
+        local_gid = None
+    
+    # === DISTRIBUTED PARTITION AND REDISTRIBUTE ===
+    rank0_print(f"Partitioning into {world_size} ranks using {cfg.dist.partition_algorithm} (distributed)...")
+    
+    if world_size > 1:
+        (local_pos, local_vel, local_Z, local_gid, 
+         my_send_map, my_recv_indices, my_interior_mask) = do_partition_and_redistribute(
+            local_pos=local_pos,
+            local_vel=local_vel,
+            local_Z=local_Z,
+            local_gid=local_gid,
+            cell=cell,
+            pbc=pbc,
+            cutoff=cfg.dist.cutoff,
+            ghost_cutoff_buffer=cfg.dist.ghost_cutoff_buffer,
+            partition_algorithm=cfg.dist.partition_algorithm,
+            rank=rank,
+            world_size=world_size,
+            device=device
+        )
+        N_local = local_pos.size(0)
+        print(f"  Rank {rank}: {my_interior_mask.sum().item()}/{N_local} interior atoms ({100*my_interior_mask.sum().item()/N_local:.1f}%)")
+    else:
+        my_send_map = {}
+        my_recv_indices = {}
         my_interior_mask = None
 
-    # Wrap calculator with DistributedCalculator if distributed
+    cell_np = cell.cpu().numpy()
+    pbc_tuple = tuple(bool(int(x)) for x in pbc.cpu().numpy().tolist())
+
+    # Build local_atoms from distributed data
+    local_atoms = ase.Atoms(
+        numbers=local_Z.cpu().numpy().tolist(),
+        positions=local_pos.cpu().numpy()
+    )
+    local_atoms.set_cell(cell_np)
+    local_atoms.set_pbc(list(pbc_tuple))
+    local_atoms.set_velocities(local_vel.cpu().numpy())
+    if cfg.dist.use_gid and local_gid is not None:
+        local_atoms.new_array("global_id", local_gid.cpu().numpy())
+    
+    # Initialize charge and spin for OMOL task
+    local_atoms.info["charge"] = 0
+    local_atoms.info["spin"] = 1
+
+    # Wrap calculator with DistributedCalculator (even for single rank for consistent profiling)
     if world_size > 1 and dist_is_enabled():
-        calc = DistributedCalculator(calc, cutoff, comm_map=my_comm_map, interior_mask=my_interior_mask, enable_overlap=cfg.dist.overlap)
+        # Build my_comm_map in expected format: {recv_rank: indices_to_send}
+        # my_recv_indices tells us where to place received ghost data
+        calc = DistributedCalculator(
+            calc, 
+            cutoff, 
+            comm_map=my_send_map, 
+            interior_mask=my_interior_mask, 
+            enable_overlap=cfg.dist.overlap,
+            recv_ghost_indices=my_recv_indices
+        )
     else:
-        # For single rank, we might still want the wrapper for consistency or just use raw
-        pass
+        # Single rank: still wrap with DistributedCalculator for consistent profiling path
+        calc = DistributedCalculator(
+            calc, 
+            cutoff, 
+            comm_map={},  # No comm map for single rank
+            interior_mask=None, 
+            enable_overlap=False,
+            recv_ghost_indices={}
+        )
     
     local_atoms.calc = calc
+    
+    # === PROFILER SETUP ===
+    step_profiler = StepProfiler(enabled=cfg.profiler.enabled, rank=rank)
+    if isinstance(calc, DistributedCalculator):
+        calc.set_profiler(step_profiler)
+    else:
+        # Single-rank case: set profiler directly on FAIRChemCalculator
+        calc._profiler = step_profiler
+        # Also wire profiler to model backbone for detailed timing
+        model = calc.predictor.model
+        if hasattr(model, "module"):
+            model = model.module
+        if hasattr(model, "backbone") and hasattr(model.backbone, "set_profiler"):
+            model.backbone.set_profiler(step_profiler)
     
     # 5. Run MD
     # We need to run MD for total_steps
     # But we need to rebalance every rebalance_interval
     
     total_done = 0
+    
+    # Print initial energy before MD starts
+    init_energy = local_atoms.get_potential_energy()
+    rank0_print(f"Step 0 (initial): Total Energy = {init_energy:.4f} eV")
+    
+
     while total_done < total_steps:
+        start_time = time.time()
         steps_to_run = min(rebalance_interval, total_steps - total_done)
         # Rebalance / Partitioning
         if world_size > 1 and (total_done % cfg.dist.rebalance_interval == 0):
-            # 1. Gather all atoms to Rank 0
-            # We need current positions/velocities/Z/gid
-            # Note: local_atoms might have ghost atoms attached if we just stepped?
-            # No, ASE MD step updates positions of atoms object. 
-            # If we used DistributedCalculator, it filters results, so atoms object only has local atoms updated?
-            # Wait, DistributedCalculator.get_forces returns forces for local atoms.
-            # ASE updates local atoms.
-            # So local_atoms contains only local atoms.
+            # ============================================
+            # DISTRIBUTED REBALANCE using unified function
+            # ============================================
             
-            # 1. Gather all atoms to Rank 0
-            gathered = _gather_all_atoms_to_rank0(local_atoms)
+            # Get local atom data
+            local_pos = torch.tensor(local_atoms.get_positions(), dtype=torch.float32, device=device)
+            local_vel = torch.tensor(local_atoms.get_velocities(), dtype=torch.float32, device=device)
+            local_Z = torch.tensor(local_atoms.get_atomic_numbers(), dtype=torch.int32, device=device)
+            has_gid = "global_id" in local_atoms.arrays
+            local_gid = torch.tensor(local_atoms.get_array("global_id"), dtype=torch.int64, device=device) if has_gid else None
             
-            # 2. Partition on Rank 0
-            partition_id = None
-            all_comm_maps = None
+            # Call unified partition and redistribute function
+            (new_pos, new_vel, new_Z, new_gid, 
+             my_send_map, my_recv_indices, my_interior_mask) = do_partition_and_redistribute(
+                local_pos=local_pos,
+                local_vel=local_vel,
+                local_Z=local_Z,
+                local_gid=local_gid,
+                cell=cell,
+                pbc=pbc,
+                cutoff=cfg.dist.cutoff,
+                ghost_cutoff_buffer=cfg.dist.ghost_cutoff_buffer,
+                partition_algorithm=cfg.dist.partition_algorithm,
+                rank=rank,
+                world_size=world_size,
+                device=device,
+                profiler=step_profiler
+            )
             
-            if rank == 0:
-                # Reconstruct global state
-                pos_all = torch.from_numpy(gathered["pos"]).to(device)
-                vel_all = torch.from_numpy(gathered["vel"]).to(device)
-                Z_all = torch.from_numpy(gathered["Z"]).to(device)
-                gid_all = torch.from_numpy(gathered["gid"]).to(device) if gathered.get("gid") is not None else None
-                
-                # Partition
-                if cfg.dist.partition_algorithm == "simple":
-                    # Simple partition: just split atoms sequentially (skip SFC)
-                    n_atoms = pos_all.shape[0]
-                    atoms_per_rank = n_atoms // world_size
-                    partition_id = torch.zeros(n_atoms, dtype=torch.long, device=device)
-                    for r in range(world_size):
-                        start_idx = r * atoms_per_rank
-                        end_idx = (r + 1) * atoms_per_rank if r < world_size - 1 else n_atoms
-                        partition_id[start_idx:end_idx] = r
-                else:
-                    curve_type = "hilbert" if "hilbert" in cfg.dist.partition_algorithm else "morton"
-                    partition_id, _ = sfc_partition(
-                        coords=pos_all,
-                        num_partitions=world_size,
-                        curve_type=curve_type,
-                        device=device
-                    )
-                partition_id = partition_id.to(dtype=torch.int32)
-                
-                # Build Halo Maps (Graph BFS)
-                # We need cell and pbc
-                cell_tensor = torch.tensor(local_atoms.get_cell().array, dtype=torch.float32, device=device)
-                pbc_tensor = torch.tensor(local_atoms.get_pbc(), dtype=torch.bool, device=device)
-                
-                rank0_print(f"Building halo maps for {cfg.dist.gnn_layers} GNN layers...")
-                ghost_cutoff = cutoff + cfg.dist.ghost_cutoff_buffer
-                all_comm_maps, all_interior_masks = build_halo_maps(
-                    pos_all, 
-                    partition_id, 
-                    ghost_cutoff, 
-                    cfg.dist.gnn_layers, 
-                    cell_tensor, 
-                    pbc_tensor, 
-                    world_size
-                )
-                
-            # 3. Broadcast Partitioning and Maps
-            # Distribute comm_maps and interior_masks
-            my_comm_map = [None]
-            dist.scatter_object_list(my_comm_map, all_comm_maps if rank == 0 else [], src=0)
-            my_comm_map = my_comm_map[0]
-            
-            my_interior_mask = [None]
-            dist.scatter_object_list(my_interior_mask, all_interior_masks if rank == 0 else [], src=0)
-            my_interior_mask = my_interior_mask[0]
-            
-            # Update calculator with new map and interior_mask
+            # Update calculator with new maps
             if isinstance(calc, DistributedCalculator):
-                calc.update_comm_map(my_comm_map, my_interior_mask)
+                calc.exchanger = HaloExchanger(
+                    rank, world_size, my_send_map, device, 
+                    recv_ghost_indices=my_recv_indices
+                )
+                calc.interior_mask = my_interior_mask.to(device) if my_interior_mask is not None else None
+                # CRITICAL: Invalidate caches after repartition
+                calc._cached_local_Z_tensor = None
+                calc._cached_combined_atoms = None
+                calc._cached_num_local = None
+                calc._cached_num_ghosts = None
+                calc._comm_map_version += 1  # Invalidate comm map cache
             
-            # Distribute atoms (pos, vel, Z, gid)
-            
-            if rank == 0:
-                pos_global = torch.from_numpy(gathered["pos"]).to(device)
-                vel_global = torch.from_numpy(gathered["vel"]).to(device)
-                Z_global = torch.from_numpy(gathered["Z"]).to(device)
-                gid_global = torch.from_numpy(gathered["gid"]).to(device) if gathered.get("gid") is not None else torch.empty(0, device=device)
-            else:
-                # We need to know N to allocate buffers
-                # Broadcast N
-                n_tensor = torch.tensor([0], dtype=torch.int64, device=device)
-                _broadcast_tensor(n_tensor, src=0)
-                N = n_tensor.item()
-                
-                pos_global = torch.zeros((N, 3), dtype=torch.float32, device=device)
-                vel_global = torch.zeros((N, 3), dtype=torch.float32, device=device)
-                Z_global = torch.zeros((N,), dtype=torch.int32, device=device)
-                gid_global = torch.zeros((N,), dtype=torch.int64, device=device) # Or empty
-                partition_id = torch.zeros((N,), dtype=torch.int32, device=device)
-
-            # Broadcast data
-            if rank == 0:
-                n_tensor = torch.tensor([len(pos_global)], dtype=torch.int64, device=device)
-                _broadcast_tensor(n_tensor, src=0)
-                
-            _broadcast_tensor(pos_global, src=0)
-            _broadcast_tensor(vel_global, src=0)
-            _broadcast_tensor(Z_global, src=0)
-            _broadcast_tensor(partition_id, src=0)
-            # Handle gid
-            # Check if gid exists
-            has_gid = torch.tensor([1 if gid_global.numel() > 0 else 0], device=device)
-            _broadcast_tensor(has_gid, src=0)
-            if has_gid.item():
-                if rank != 0:
-                    gid_global = torch.zeros((pos_global.size(0),), dtype=torch.int64, device=device)
-                _broadcast_tensor(gid_global, src=0)
-            
-            
-            # 4. Update Local Atoms
-            # Slice using partition_id
-            mask = (partition_id == rank)
-            
-            local_pos = pos_global[mask].cpu().numpy()
-            local_vel = vel_global[mask].cpu().numpy()
-            local_Z = Z_global[mask].cpu().numpy()
-            
-            local_atoms = ase.Atoms(numbers=local_Z, positions=local_pos, velocities=local_vel)
+            # Update local atoms
+            local_atoms = ase.Atoms(
+                numbers=new_Z.cpu().numpy(),
+                positions=new_pos.cpu().numpy(),
+                velocities=new_vel.cpu().numpy()
+            )
             local_atoms.set_cell(cell_np)
             local_atoms.set_pbc(list(pbc_tuple))
             
-            if has_gid.item():
-                local_gid = gid_global[mask].cpu().numpy()
-                local_atoms.set_array("global_id", local_gid)
+            if has_gid and new_gid is not None:
+                local_atoms.set_array("global_id", new_gid.cpu().numpy())
             
             # Initialize charge and spin for OMOL task
             local_atoms.info["charge"] = 0
             local_atoms.info["spin"] = 1
-
-                
+            
             # Re-attach calculator
             local_atoms.calc = calc
             
-            # Update dyn atoms
-            # The dyn object is created inside the loop, so it will pick up the new local_atoms
-            # No explicit update needed here, just ensure the next dyn.run() uses the new local_atoms.
-            # The loop structure needs to be adjusted to create dyn *after* repartitioning.
-            # Let's move the dyn creation inside the loop.
-            
-        # Simulation step
+
+        # Simulation step - create dyn each episode (MDLogger holds atoms reference)
+        # MDLogger holds atoms reference at creation time. Moving dyn outside loop causes slowdown. Overhead of recreating dyn is negligible.
         dyn = ase.md.langevin.Langevin(local_atoms, timestep, temperature_K=temperature_K, friction=friction)
         
         def output_cb():
@@ -1177,16 +716,92 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
         dyn.attach(output_cb, interval=traj_interval)
         dyn.attach(ase.md.MDLogger(dyn, local_atoms, md_log_path), interval=log_interval)
         
-        start_time = time.time()
-        dyn.run(steps=cfg.md.steps_per_episode) # Run for one step
+        # Start profiling for this episode
+        step_profiler.start_episode()
+        
+        # PyTorch Profiler for deep model analysis (first episode only)
+        use_torch_profiler = (cfg.profiler.torch_profiler and total_done == 0 and rank == 0)
+        if use_torch_profiler:
+            from torch.profiler import profile, ProfilerActivity, schedule
+            
+            profiler_dir = os.path.join(output_dir, "torch_profiler")
+            os.makedirs(profiler_dir, exist_ok=True)
+            
+            rank0_print(f"PyTorch Profiler enabled. Output: {profiler_dir}")
+            
+            # Profile with warmup
+            prof_schedule = schedule(
+                wait=0,  # No wait
+                warmup=2,  # First 2 steps are warmup
+                active=cfg.profiler.torch_profiler_steps,  # Active profiling
+                repeat=1
+            )
+            
+            with profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                schedule=prof_schedule,
+                on_trace_ready=lambda p: p.export_chrome_trace(
+                    os.path.join(profiler_dir, f"trace_step_{p.step_num}.json")
+                ),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=False,
+            ) as prof:
+                for step_i in range(min(cfg.md.steps_per_episode, 2 + cfg.profiler.torch_profiler_steps)):
+                    dyn.run(steps=1)
+                    step_profiler.step_done()
+                    prof.step()
+                
+                # Print aggregated stats
+                rank0_print("\n===== PyTorch Profiler: Top 20 CUDA Operations =====")
+                rank0_print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+                
+                # Save table to file
+                with open(os.path.join(profiler_dir, "profiler_summary.txt"), "w") as f:
+                    f.write("===== Top 20 CUDA Operations =====\n")
+                    f.write(prof.key_averages().table(sort_by="cuda_time_total", row_limit=50))
+                    f.write("\n\n===== Top 20 CPU Operations =====\n")
+                    f.write(prof.key_averages().table(sort_by="cpu_time_total", row_limit=50))
+            
+            # Run remaining steps without profiler
+            remaining_steps = cfg.md.steps_per_episode - (2 + cfg.profiler.torch_profiler_steps)
+            if remaining_steps > 0:
+                for step_i in range(remaining_steps):
+                    dyn.run(steps=1)
+                    step_profiler.step_done()
+        else:
+            # Normal execution without PyTorch profiler
+            # Run step-by-step to properly record profiler timing for each step
+            if step_profiler.enabled:
+                for step_i in range(cfg.md.steps_per_episode):
+                    dyn.run(steps=1)
+                    step_profiler.step_done()  # Accumulate per-step times
+            else:
+                dyn.run(steps=cfg.md.steps_per_episode)
+        
         if dist_is_enabled():
             dist.barrier()
         run_time = time.time() - start_time
+        
+        # Report profiling for this episode (only rank 0 prints to stdout)
+        if rank == 0:
+            step_profiler.report()
+        
+        # Save profiling results to CSV for ALL ranks
+        current_episode = total_done // cfg.md.steps_per_episode
+        step_profiler.save_to_csv(output_dir, episode=current_episode)
         
         # Get energy and forces for this step
         step_energy = local_atoms.get_potential_energy()  # This is global energy
         step_forces = local_atoms.get_forces()
         step_positions = local_atoms.get_positions()
+        # Get per-atom energies from Student (must be done right after forces, before any other calculation)
+        # For StudentModelCalculator, energies are stored directly in calc.results
+        # For DistributedCalculator wrapping StudentModelCalculator, need to access inner calculator
+        inner_calc = local_atoms.calc
+        if hasattr(inner_calc, 'calculator'):  # DistributedCalculator wraps inner calc
+            inner_calc = inner_calc.calculator
+        step_energies = inner_calc.results.get('energies', None) if hasattr(inner_calc, 'results') else None
         
         # Get local energy for this rank (for trajectory NPZ)
         calc = local_atoms.calc
@@ -1207,12 +822,10 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
         if global_id is not None:
             save_dict['global_id'] = global_id
         np.savez(traj_data_path, **save_dict)
-        
-        rank0_print(f"Step {total_done}: Total Energy = {step_energy:.4f} eV")
-        
         total_done += cfg.md.steps_per_episode
+        rank0_print(f"Step {total_done}: Total Energy = {step_energy:.4f} eV")
         rank0_print(f"Ran {cfg.md.steps_per_episode} steps in {run_time:.2f}s. (perf: {cfg.md.steps_per_episode/run_time:.2f} steps/s, {total_done}/{total_steps})")
-
+        
     
     if dist_is_enabled():
         dist.barrier()
@@ -1283,30 +896,51 @@ def setup_calculator(cfg, rank, world_size, device="cuda", use_barrier=True):
         from mace.calculators import mace_mp
         calc = mace_mp(model=cfg.mace.model, default_dtype=cfg.mace.default_dtype, device=device)
     else:
-        settings = inference_settings_turbo()
-        settings.merge_mole = bool(cfg.uma.merge_mole)
-        settings.wigner_cuda = cfg.uma.wigner_cuda
-        settings.compile = bool(cfg.uma.compile)
-        
-        rank0_print(f"Merge Mole: {settings.merge_mole}")
-        rank0_print(f"Wigner CUDA: {settings.wigner_cuda}")
-        rank0_print(f"Torch Compile: {settings.compile}")
-        
-        if settings.compile:
-            torch._dynamo.config.cache_size_limit = cfg.uma.dynamo_cache_size
-
-        with Timer(f"Setting up calculator ({cfg.uma.model})"):
+        # Check if using Student model (file path ending with .pt)
+        if str(cfg.uma.model).endswith(".pt"):
+            with Timer(f"Setting up Student model ({cfg.uma.model})"):
+                model_path = cfg.uma.model
+                if not os.path.isabs(model_path):
+                    model_path = os.path.join(os.path.dirname(__file__), "..", model_path)
+                
+                rank0_print(f"Loading Student model from: {model_path}")
+                student = StudentModel.load(model_path, device=device)
+                
+                # Create StudentModelCalculator (defined below)
+                calc = StudentModelCalculator(student, cutoff=student.cutoff)
+                rank0_print(f"Student model loaded: {student.config.name}")
+                rank0_print(f"  Params: {student.num_params:,}")
+                rank0_print(f"  Cutoff: {student.cutoff}")
+        else:
+            # Standard UMA model loading
+            settings = inference_settings_turbo()
+            settings.activation_checkpointing = cfg.uma.activation_checkpointing
+            settings.merge_mole = bool(cfg.uma.merge_mole)
+            settings.wigner_cuda = cfg.uma.wigner_cuda
+            settings.compile = bool(cfg.uma.compile)
+            settings.compile_cache_path = cfg.uma.cache_path  # Distributed compile cache sharing
             
-            overrides = {}
-            if cfg.dist.use_distributed_model:
-                # Override backbone to use distributed version
-                overrides = {"backbone": {"model": "distributed_escnmd_backbone"}}
-                rank0_print(f"Overriding model backbone to distributed_escnmd_backbone")
+            rank0_print(f"Merge Mole: {settings.merge_mole}")
+            rank0_print(f"Wigner CUDA: {settings.wigner_cuda}")
+            rank0_print(f"Torch Compile: {settings.compile}")
+            rank0_print(f"Compile Cache Path: {settings.compile_cache_path}")
+            
+            if settings.compile:
+                torch._dynamo.config.cache_size_limit = cfg.uma.dynamo_cache_size
 
-            predictor = pretrained_mlip.get_predict_unit(cfg.uma.model, device=device, inference_settings=settings, overrides=overrides)
-            calc = FAIRChemCalculator(predictor, task_name="omol")
-            if dist_is_enabled() and use_barrier:
-                dist.barrier()
+            with Timer(f"Setting up calculator ({cfg.uma.model})"):
+                
+                overrides = {}
+                if cfg.dist.use_distributed_model:
+                    # Override backbone to use distributed version
+                    overrides = {"backbone": {"model": "distributed_escnmd_backbone"}}
+                    rank0_print(f"Overriding model backbone to distributed_escnmd_backbone")
+
+                predictor = pretrained_mlip.get_predict_unit(cfg.uma.model, device=device, inference_settings=settings, overrides=overrides)
+                calc = FAIRChemCalculator(predictor, task_name="omol")
+                
+        if dist_is_enabled() and use_barrier:
+            dist.barrier()
     return calc
 
 cs = ConfigStore.instance()
