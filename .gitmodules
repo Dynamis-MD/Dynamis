@@ -4,3 +4,7 @@
 [submodule "refs/nvalchemi"]
 	path = refs/nvalchemi
 	url = https://github.com/NVIDIA/nvalchemi-toolkit-ops.git
+[submodule "refs/dgraph"]
+	path = refs/dgraph
+	url = https://github.com/szaman19/DGraph
+	branch = lsc-ogb
