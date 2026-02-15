@@ -10,6 +10,8 @@ import torch
 import numpy as np
 from typing import List, Tuple, Dict, Optional
 import time
+import torch.distributed as dist
+from baseline.nccl_debug import log_nccl_call
 
 
 def hilbert_curve_index_tensor(coords: torch.Tensor, order: int = 7, normalize: bool = True) -> torch.Tensor:
@@ -361,7 +363,9 @@ def distributed_sfc_partition(
     # All-reduce to get global bounds
     global_min = local_min.clone()
     global_max = local_max.clone()
+    log_nccl_call(__file__, 365, "all_reduce_min")
     dist.all_reduce(global_min, op=dist.ReduceOp.MIN)
+    log_nccl_call(__file__, 367, "all_reduce_max")
     dist.all_reduce(global_max, op=dist.ReduceOp.MAX)
     
     # Normalize using global bounds
@@ -392,12 +396,14 @@ def distributed_sfc_partition(
     # First exchange counts
     local_count = torch.tensor([N_local], dtype=torch.long, device=device)
     all_counts = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(world_size)]
+    log_nccl_call(__file__, 397, "all_gather_counts")
     dist.all_gather(all_counts, local_count)
     counts = [c.item() for c in all_counts]
     total_atoms = sum(counts)
     
     # Prepare buffers for all-gather
     all_keys_list = [torch.zeros(c, dtype=torch.long, device=device) for c in counts]
+    log_nccl_call(__file__, 403, "all_gather_keys")
     dist.all_gather(all_keys_list, local_keys)
     
     # Concatenate all keys
@@ -407,6 +413,7 @@ def distributed_sfc_partition(
     use_weighted = local_edge_counts is not None
     if use_weighted:
         all_edge_counts_list = [torch.zeros(c, dtype=torch.long, device=device) for c in counts]
+        log_nccl_call(__file__, 413, "all_gather_edge_counts")
         dist.all_gather(all_edge_counts_list, local_edge_counts.to(device))
         all_edge_counts = torch.cat(all_edge_counts_list, dim=0)
     

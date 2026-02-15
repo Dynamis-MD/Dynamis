@@ -126,10 +126,16 @@ class MLIPPredictUnit(PredictUnit[AtomicData], MLIPPredictUnitProtocol):
         atom_refs: dict | None = None,
         assert_on_nans: bool = False,
     ):
+        import os
+        _rank = os.environ.get("SLURM_PROCID", "?")
+        # print(f"[DEBUG] Rank {_rank}: MLIPPredictUnit.__init__ START, file={__file__}", flush=True)
+        
         super().__init__()
         device = str(device)
         os.environ[CURRENT_DEVICE_TYPE_STR] = device
+        # print(f"[DEBUG] Rank {_rank}: device={device}, inference_model_path={inference_model_path}", flush=True)
 
+        # print(f"[DEBUG] Rank {_rank}: set_seed({seed})...", flush=True)
         self.set_seed(seed)
         # note these are different from the element references used for model training
         self.atom_refs = (
@@ -173,14 +179,19 @@ class MLIPPredictUnit(PredictUnit[AtomicData], MLIPPredictUnitProtocol):
                 "The wigner_cuda flag is deprecated and will be removed in future versions."
             )
 
+        # print(f"[DEBUG] Rank {_rank}: Calling load_inference_model...", flush=True)
         self.model, checkpoint = load_inference_model(
             inference_model_path, use_ema=True, overrides=overrides
         )
+        # print(f"[DEBUG] Rank {_rank}: load_inference_model completed", flush=True)
+        
+        # print(f"[DEBUG] Rank {_rank}: Instantiating tasks from checkpoint...", flush=True)
         tasks = [
             hydra.utils.instantiate(task_config)
             for task_config in checkpoint.tasks_config
         ]
         self.tasks = {t.name: t for t in tasks}
+        # print(f"[DEBUG] Rank {_rank}: Tasks instantiated: {list(self.tasks.keys())}", flush=True)
 
         self._dataset_to_tasks = get_dataset_to_tasks_map(self.tasks.values())
         assert set(self._dataset_to_tasks.keys()).issubset(
@@ -197,8 +208,11 @@ class MLIPPredictUnit(PredictUnit[AtomicData], MLIPPredictUnitProtocol):
                  self.device = get_device_for_local_rank()
         else:
              self.device = "cpu"
+        # print(f"[DEBUG] Rank {_rank}: Final device={self.device}", flush=True)
 
+        # print(f"[DEBUG] Rank {_rank}: Calling model.eval()...", flush=True)
         self.model.eval()
+        # print(f"[DEBUG] Rank {_rank}: model.eval() completed", flush=True)
 
         self.lazy_model_intialized = False
         self.inference_settings = inference_settings
@@ -215,6 +229,7 @@ class MLIPPredictUnit(PredictUnit[AtomicData], MLIPPredictUnitProtocol):
             )
         
         self._dataset_cache = {}
+        # print(f"[DEBUG] Rank {_rank}: MLIPPredictUnit.__init__ END", flush=True)
 
     @property
     def direct_forces(self) -> bool:

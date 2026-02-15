@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 import ase
 from typing import Dict, List, Optional, Tuple
+from baseline.nccl_debug import log_nccl_call
 
 from baseline.local_fairchem.graph.radius_graph_pbc import radius_graph_pbc_v2
 
@@ -181,12 +182,14 @@ def distributed_build_halo_maps(
     # Step 1: All-gather positions to get full graph
     local_count = torch.tensor([N_local], dtype=torch.long, device=device)
     all_counts = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(world_size)]
+    log_nccl_call(__file__, 185, "all_gather_counts")
     dist.all_gather(all_counts, local_count)
     counts = [c.item() for c in all_counts]
     total_atoms = sum(counts)
     
     # All-gather positions
     all_pos_list = [torch.zeros((c, 3), dtype=torch.float32, device=device) for c in counts]
+    log_nccl_call(__file__, 191, "all_gather_pos")
     dist.all_gather(all_pos_list, local_pos.contiguous())
     full_pos = torch.cat(all_pos_list, dim=0)
     
@@ -314,6 +317,7 @@ class HaloExchanger:
             
         # All-to-all to get recv counts
         recv_counts_tensor = torch.zeros(self.world_size, dtype=torch.int32, device=self.device)
+        log_nccl_call(__file__, 318, "all_to_all_exchange_counts")
         dist.all_to_all_single(recv_counts_tensor, send_counts)
         
         self.recv_counts = {}
@@ -333,6 +337,36 @@ class HaloExchanger:
             self._reduction_indices = torch.cat(reduction_indices_list)
         else:
             self._reduction_indices = torch.empty(0, dtype=torch.long, device=self.device)
+        
+        # === Area 4: Pre-compute split sizes and concatenated send indices ===
+        # For exchange:
+        self._send_split_sizes = []
+        send_indices_list = []
+        for r in range(self.world_size):
+            if r in self.comm_map and len(self.comm_map[r]) > 0:
+                self._send_split_sizes.append(len(self.comm_map[r]))
+                send_indices_list.append(self.comm_map[r])
+            else:
+                self._send_split_sizes.append(0)
+        if send_indices_list:
+            self._cached_send_indices = torch.cat(send_indices_list)
+        else:
+            self._cached_send_indices = None
+        
+        self._recv_split_sizes = []
+        for r in range(self.world_size):
+            self._recv_split_sizes.append(self.recv_counts.get(r, 0))
+        self._total_recv = sum(self._recv_split_sizes)
+        
+        # For reduce_forces:
+        self._force_send_splits = self._recv_split_sizes  # We send back what we received
+        self._force_recv_splits = []
+        total_force_recv = 0
+        for r in range(self.world_size):
+            count = len(self.comm_map[r]) if r in self.comm_map else 0
+            self._force_recv_splits.append(count)
+            total_force_recv += count
+        self._total_force_recv = total_force_recv
 
     def exchange(self, atoms: ase.Atoms) -> Dict[str, torch.Tensor]:
         """Exchange ghost atoms based on pre-computed map."""
@@ -357,62 +391,31 @@ class HaloExchanger:
             self._cached_Z = torch.tensor(atoms.get_atomic_numbers(), dtype=torch.int32, device=self.device)
         Z = self._cached_Z
         
-        # 1. Prepare Input Tensor (Packed)
-        # We need to order data by rank 0..world_size-1
-        input_chunks = []
-        input_split_sizes = []
+        # === Area 4: Fused halo packing using pre-computed indices ===
+        if self._cached_send_indices is not None:
+            s_pos = pos[self._cached_send_indices]     # [total_send, 3]
+            s_vel = vel[self._cached_send_indices]     # [total_send, 3]
+            s_Z = Z[self._cached_send_indices].float().unsqueeze(1)  # [total_send, 1]
+            input_tensor = torch.cat([s_pos, s_vel, s_Z], dim=1)  # [total_send, 7]
+        else:
+            input_tensor = torch.empty((0, 7), dtype=torch.float32, device=self.device)
         
-        for r in range(self.world_size):
-            if r in self.comm_map:
-                indices = self.comm_map[r]
-                s_pos = pos[indices]
-                s_vel = vel[indices]
-                s_Z = Z[indices].float().unsqueeze(1)
-                packed = torch.cat([s_pos, s_vel, s_Z], dim=1)
-                input_chunks.append(packed)
-                input_split_sizes.append(packed.size(0))
-            else:
-                # Empty chunk with correct feature dim (7)
-                input_chunks.append(torch.empty((0, 7), dtype=torch.float32, device=self.device))
-                input_split_sizes.append(0)
-                
-        input_tensor = torch.cat(input_chunks, dim=0)
-        
-        # 2. Prepare Output Tensor
-        # We need output split sizes (recv counts)
-        output_split_sizes = []
-        for r in range(self.world_size):
-            output_split_sizes.append(self.recv_counts.get(r, 0))
-            
-        total_recv = sum(output_split_sizes)
-        output_tensor = torch.zeros((total_recv, 7), dtype=torch.float32, device=self.device)
+        # 2. Prepare Output Tensor using pre-computed sizes
+        output_tensor = torch.zeros((self._total_recv, 7), dtype=torch.float32, device=self.device)
         
         # 3. All-to-All
-        dist.all_to_all_single(output_tensor, input_tensor, output_split_sizes=output_split_sizes, input_split_sizes=input_split_sizes)
+        log_nccl_call(__file__, 392, "all_to_all_exchange_ghosts")
+        dist.all_to_all_single(output_tensor, input_tensor, 
+                               output_split_sizes=self._recv_split_sizes, 
+                               input_split_sizes=self._send_split_sizes)
         
         # 4. Unpack
-        # Split output_tensor back into chunks
-        # torch.split returns a tuple of views
-        output_chunks = torch.split(output_tensor, output_split_sizes, dim=0)
+        if self._total_recv == 0:
+            return {}
         
-        ghost_pos_list = []
-        ghost_vel_list = []
-        ghost_Z_list = []
-        
-        # We only care about chunks where we expected data (recv_counts > 0)
-        # But we need to iterate all chunks to match rank index
-        for r, chunk in enumerate(output_chunks):
-            if output_split_sizes[r] > 0:
-                ghost_pos_list.append(chunk[:, 0:3])
-                ghost_vel_list.append(chunk[:, 3:6])
-                ghost_Z_list.append(chunk[:, 6].long())
-        
-        if not ghost_pos_list:
-             return {}
-             
-        ghost_pos = torch.cat(ghost_pos_list, dim=0)
-        ghost_vel = torch.cat(ghost_vel_list, dim=0)
-        ghost_Z = torch.cat(ghost_Z_list, dim=0)
+        ghost_pos = output_tensor[:, 0:3]
+        ghost_vel = output_tensor[:, 3:6]
+        ghost_Z = output_tensor[:, 6].long()
         
         return {
             "pos": ghost_pos,
@@ -426,42 +429,64 @@ class HaloExchanger:
         """
         if self.world_size <= 1:
             return local_forces
-            
+        
+        # CRITICAL: All ranks must participate in all_to_all_single!
         if ghost_forces is None:
-            return local_forces
+            ghost_forces = torch.zeros((0, 3), dtype=local_forces.dtype, device=self.device)
 
-        # 1. Prepare Send Buffer (send ghost_forces back to owners)
-        # ghost_forces are already ordered by rank (same as recv order in exchange)
-        # Input splits (what we have) -> recv_counts
-        input_split_sizes = []
-        for r in range(self.world_size):
-            input_split_sizes.append(self.recv_counts.get(r, 0))
-            
         send_tensor = ghost_forces
         if not send_tensor.is_contiguous():
             send_tensor = send_tensor.contiguous()
             
-        # 2. Prepare Recv Buffer (receive forces for atoms we sent)
-        # Output splits (what we expect) -> send_counts (len(comm_map[r]))
-        output_split_sizes = []
-        send_counts = {}
-        total_recv = 0
-        for r in range(self.world_size):
-            count = len(self.comm_map.get(r, [])) if r in self.comm_map else 0
-            output_split_sizes.append(count)
-            send_counts[r] = count
-            total_recv += count
-            
-        recv_tensor = torch.zeros((total_recv, 3), dtype=local_forces.dtype, device=self.device)
+        recv_tensor = torch.zeros((self._total_force_recv, 3), dtype=local_forces.dtype, device=self.device)
         
-        # 3. Exchange
+        # Exchange using pre-computed splits
+        log_nccl_call(__file__, 463, "all_to_all_reduce_forces")
         dist.all_to_all_single(recv_tensor, send_tensor, 
-                               output_split_sizes=output_split_sizes, 
-                               input_split_sizes=input_split_sizes)
+                               output_split_sizes=self._force_recv_splits, 
+                               input_split_sizes=self._force_send_splits)
         
-        # 4. Scatter to local forces
-        # OPTIMIZATION: Batched index_add_
+        # Scatter to local forces
         if self._reduction_indices.numel() > 0:
              local_forces.index_add_(0, self._reduction_indices, recv_tensor)
                 
+        return local_forces
+    
+    def reduce_forces_start(self, local_forces, ghost_forces):
+        """
+        Area 4: Start async force reduction. Returns handle for reduce_forces_wait.
+        """
+        if self.world_size <= 1:
+            return None
+        
+        if ghost_forces is None:
+            ghost_forces = torch.zeros((0, 3), dtype=local_forces.dtype, device=self.device)
+
+        send_tensor = ghost_forces
+        if not send_tensor.is_contiguous():
+            send_tensor = send_tensor.contiguous()
+            
+        recv_tensor = torch.zeros((self._total_force_recv, 3), dtype=local_forces.dtype, device=self.device)
+        
+        log_nccl_call(__file__, 463, "all_to_all_reduce_forces_async")
+        work = dist.all_to_all_single(recv_tensor, send_tensor, 
+                                       output_split_sizes=self._force_recv_splits, 
+                                       input_split_sizes=self._force_send_splits,
+                                       async_op=True)
+        
+        return (work, recv_tensor, local_forces)
+    
+    def reduce_forces_wait(self, handle):
+        """
+        Area 4: Wait for async force reduction and scatter results.
+        """
+        if handle is None:
+            return None
+        
+        work, recv_tensor, local_forces = handle
+        work.wait()
+        
+        if self._reduction_indices.numel() > 0:
+            local_forces.index_add_(0, self._reduction_indices, recv_tensor)
+        
         return local_forces

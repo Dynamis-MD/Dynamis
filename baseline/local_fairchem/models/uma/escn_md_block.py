@@ -32,6 +32,13 @@ from baseline.local_fairchem.models.uma.nn.so3_layers import SO3_Linear
 if TYPE_CHECKING:
     from baseline.local_fairchem.models.uma.common.so3 import CoefficientMapping, SO3_Grid
 
+try:
+    from baseline.local_fairchem.models.uma.nn.wigner_triton import wigner_bmm
+    TRITON_WIGNER_AVAILABLE = True
+except ImportError as e:
+    print(f"DEBUG: Failed to import wigner_triton in escn_md_block: {e}", flush=True)
+    TRITON_WIGNER_AVAILABLE = False
+
 
 def set_mole_ac_start_index(module: nn.Module, index: int) -> None:
     for submodule in module.modules():
@@ -54,8 +61,11 @@ class Edgewise(torch.nn.Module):
         # activation_checkpoint_chunk_size size edge blocks
         activation_checkpoint_chunk_size: int | None,
         act_type: Literal["gate", "s2"] = "gate",
+        use_triton_wigner: bool = False,
     ):
         super().__init__()
+
+        self.use_triton_wigner = use_triton_wigner and TRITON_WIGNER_AVAILABLE
 
         self.sphere_channels = sphere_channels
         self.hidden_channels = hidden_channels
@@ -216,7 +226,10 @@ class Edgewise(torch.nn.Module):
 
         with record_function("SO2Conv"):
             # Rotate the irreps to align with the edge
-            x_message = torch.bmm(wigner_and_M_mapping, x_message)
+            if self.use_triton_wigner:
+                x_message = wigner_bmm(wigner_and_M_mapping, x_message)
+            else:
+                x_message = torch.bmm(wigner_and_M_mapping, x_message)
 
             # SO2 convolution
             x_message, x_0_gating = self.so2_conv_1(x_message, x_edge)
@@ -229,7 +242,10 @@ class Edgewise(torch.nn.Module):
             x_message = x_message * edge_envelope
 
             # Rotate back the irreps
-            x_message = torch.bmm(wigner_and_M_mapping_inv, x_message)
+            if self.use_triton_wigner:
+                x_message = wigner_bmm(wigner_and_M_mapping_inv, x_message)
+            else:
+                x_message = torch.bmm(wigner_and_M_mapping_inv, x_message)
 
         # Compute the sum of the incoming neighboring messages for each target node
         new_embedding = torch.zeros(
@@ -336,7 +352,9 @@ class eSCNMD_Block(torch.nn.Module):
         norm_type: Literal["layer_norm", "layer_norm_sh", "rms_norm_sh"],
         act_type: Literal["gate", "s2"],
         ff_type: Literal["spectral", "grid"],
+
         activation_checkpoint_chunk_size: int | None,
+        use_triton_wigner: bool = False,
     ) -> None:
         super().__init__()
         self.sphere_channels = sphere_channels
@@ -359,6 +377,7 @@ class eSCNMD_Block(torch.nn.Module):
             cutoff=cutoff,
             act_type=act_type,
             activation_checkpoint_chunk_size=activation_checkpoint_chunk_size,
+            use_triton_wigner=use_triton_wigner,
         )
 
         self.norm_2 = get_normalization_layer(

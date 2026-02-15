@@ -15,6 +15,8 @@ if __name__ == "__main__" or "dist_md" in __file__:
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
+from baseline.nccl_debug import log_nccl_call
+
 import ase
 import ase.io
 import ase.md
@@ -50,6 +52,8 @@ from baseline.distributed_calculator import DistributedCalculator
 torch._inductor.config.triton.cudagraphs = False
 torch._inductor.config.triton.cudagraph_trees = False
 torch._inductor.config.triton.cudagraph_skip_dynamic_graphs = True
+# Force Inductor to use g++ instead of Cray Wrapper (CC) which causes linker errors
+torch._inductor.config.cpp.cxx = ["g++"]
 
 # -----------------------------------------------------------------------------
 # Configuration Classes
@@ -72,6 +76,7 @@ class UMAConfig:
     activation_checkpointing: bool = True
     compile: bool = False
     wigner_cuda: bool = True
+    use_triton_wigner: bool = True  # Enable optimized Triton kernel by default
     merge_mole: bool = True
     cache_path: Optional[str] = None
     dynamo_cache_size: int = 64
@@ -105,6 +110,8 @@ class DistConfig:
     gnn_layers: int = 1  # Number of GNN layers for halo depth
     use_distributed_model: bool = True # Use distributed model with direct feature fetching
     overlap: bool = False  # Enable computation-communication overlap (experimental)
+    hierarchical: bool = False  # Enable hierarchical aggregation (Area 2 / PXN)
+    edge_weighted_partition: bool = False  # Partition by edge count for balanced compute
 
 @dataclass
 class AppConfig:
@@ -162,7 +169,23 @@ def dist_init_from_slurm(backend: Optional[str] = None) -> Tuple[int, int, int]:
         os.makedirs(init_dir, exist_ok=True)
         init_file = os.path.join(init_dir, f"pg_{job_id}.init")
         init_method = f"file://{init_file}"
-        dist.init_process_group(backend=backend, init_method=init_method, rank=rank, world_size=world_size)
+        # Force set device to LOCAL_RANK *before* init_process_group to prevent NCCL device mismatch
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            print(f"Rank (local) {local_rank}: Set device to cuda:{local_rank}", flush=True)
+
+        # Prepare kwargs
+        init_kwargs = {
+            "backend": backend,
+            "init_method": init_method,
+            "rank": rank,
+            "world_size": world_size
+        }
+        # Add device_id for NCCL backend if supported (PyTorch 2.1+) to avoid "device unknown" warning
+        if backend == "nccl" and torch.cuda.is_available():
+             init_kwargs["device_id"] = torch.device(f"cuda:{local_rank}")
+
+        dist.init_process_group(**init_kwargs)
 
     return rank, world_size, local_rank
 
@@ -194,16 +217,19 @@ def _broadcast_tensor(t: torch.Tensor, src: int = 0) -> torch.Tensor:
     if backend == "gloo" and t.device.type != 'cpu':
         # Gloo requires CPU tensors
         t_cpu = t.cpu()
+        log_nccl_call(__file__, 218, "broadcast_gloo")
         dist.broadcast(t_cpu, src=src)
         t.copy_(t_cpu)
     elif backend == "nccl" and t.device.type == 'cpu':
         # NCCL requires CUDA tensors
         device = torch.device("cuda", torch.cuda.current_device())
         t_cuda = t.to(device)
+        log_nccl_call(__file__, 224, "broadcast_nccl")
         dist.broadcast(t_cuda, src=src)
         t.copy_(t_cuda.cpu())
     else:
         # Backend and device are compatible
+        log_nccl_call(__file__, 228, "broadcast_direct")
         dist.broadcast(t, src=src)
     return t
 
@@ -299,26 +325,31 @@ def _gather_all_atoms_to_rank0(a: ase.Atoms) -> Optional[Dict[str, np.ndarray]]:
     # Exchange counts first
     local_count = torch.tensor([len(a)], dtype=torch.int64, device=device)
     all_counts = [torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)]
+    log_nccl_call(__file__, 323, "all_gather_counts")
     dist.all_gather(all_counts, local_count)
     counts = [c.item() for c in all_counts]
     total = sum(counts)
     
     # Gather positions
     pos_list = [torch.zeros((c, 3), dtype=torch.float32, device=device) for c in counts]
+    log_nccl_call(__file__, 329, "all_gather_pos")
     dist.all_gather(pos_list, local_pos)
     
     # Gather velocities
     vel_list = [torch.zeros((c, 3), dtype=torch.float32, device=device) for c in counts]
+    log_nccl_call(__file__, 333, "all_gather_vel")
     dist.all_gather(vel_list, local_vel)
     
     # Gather atomic numbers
     Z_list = [torch.zeros(c, dtype=torch.int32, device=device) for c in counts]
+    log_nccl_call(__file__, 337, "all_gather_Z")
     dist.all_gather(Z_list, local_Z)
     
     # Gather global_id if present
     gid_list = None
     if has_gid:
         gid_list = [torch.zeros(c, dtype=torch.int64, device=device) for c in counts]
+        log_nccl_call(__file__, 343, "all_gather_gid")
         dist.all_gather(gid_list, local_gid)
     
     if rank != 0:
@@ -348,7 +379,8 @@ def do_partition_and_redistribute(
     rank: int,
     world_size: int,
     device: torch.device,
-    profiler: 'CUDAEventProfiler' = None
+    profiler: 'CUDAEventProfiler' = None,
+    edge_weighted: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, 
            Optional[torch.Tensor], Dict[int, torch.Tensor], Dict[int, torch.Tensor], torch.Tensor]:
     """
@@ -359,11 +391,53 @@ def do_partition_and_redistribute(
     2. all_to_all redistribute atoms to new owners
     3. distributed_build_halo_maps to build communication patterns (each rank independently)
     
+    Args:
+        edge_weighted: If True, partition by edge count for balanced compute workload.
+    
     Returns:
         new_pos, new_vel, new_Z, new_gid, send_map, recv_ghost_indices, interior_mask
     """
     N_local = local_pos.size(0)
     has_gid = local_gid is not None
+    
+    # Step 0: Compute local edge counts if edge-weighted partitioning is enabled
+    local_edge_counts = None
+    if edge_weighted and partition_algorithm != "simple":
+        # Build local graph to count edges per atom
+        # We need to all_gather positions first to build consistent graph
+        local_count = torch.tensor([N_local], dtype=torch.long, device=device)
+        all_counts = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(world_size)]
+        dist.all_gather(all_counts, local_count)
+        counts = [c.item() for c in all_counts]
+        
+        # All-gather positions
+        all_pos_list = [torch.zeros((c, 3), dtype=torch.float32, device=device) for c in counts]
+        dist.all_gather(all_pos_list, local_pos.contiguous())
+        full_pos = torch.cat(all_pos_list, dim=0)
+        
+        # Build edges on full graph
+        edge_index, _ = _build_edges_cutoff_fairchem_raw(full_pos, cutoff, cell, pbc)
+        edge_index = edge_index.to(device)
+        
+        # Count edges per atom (dst-based, as compute is on dst atoms)
+        # Only count edges where dst is a local atom of this rank
+        my_start = sum(counts[:rank])
+        my_end = my_start + N_local
+        
+        # Mask for edges where dst is in my local range
+        dst_is_local = (edge_index[1] >= my_start) & (edge_index[1] < my_end)
+        my_dst_global = edge_index[1][dst_is_local]
+        my_dst_local = my_dst_global - my_start
+        
+        # Count edges per local atom
+        local_edge_counts = torch.zeros(N_local, dtype=torch.long, device=device)
+        local_edge_counts.scatter_add_(0, my_dst_local, torch.ones(my_dst_local.shape[0], dtype=torch.long, device=device))
+        
+        if rank == 0:
+            total_edges = edge_index.shape[1]
+            edge_min, edge_max = local_edge_counts.min().item(), local_edge_counts.max().item()
+            edge_mean = local_edge_counts.float().mean().item()
+            print(f"Edge-weighted partition: {total_edges} total edges, per-atom edges min={edge_min}, max={edge_max}, mean={edge_mean:.1f}")
     
     # Step 1: Distributed SFC partition
     if profiler:
@@ -382,7 +456,8 @@ def do_partition_and_redistribute(
             local_coords=local_pos,
             num_partitions=world_size,
             curve_type=curve_type,
-            device=device
+            device=device,
+            local_edge_counts=local_edge_counts  # Pass edge counts for weighted partition
         )
         
         # Use pre-computed send_counts_matrix (eliminates all_to_all for counts!)
@@ -420,6 +495,7 @@ def do_partition_and_redistribute(
     packed_recv = torch.zeros((total_recv, 8), dtype=torch.float32, device=device)
     
     # All-to-all exchange
+    log_nccl_call(__file__, 488, "all_to_all_atom_redistribute")
     dist.all_to_all_single(
         packed_recv, packed_send,
         output_split_sizes=recv_counts_list,
@@ -558,7 +634,8 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
             partition_algorithm=cfg.dist.partition_algorithm,
             rank=rank,
             world_size=world_size,
-            device=device
+            device=device,
+            edge_weighted=cfg.dist.edge_weighted_partition
         )
         N_local = local_pos.size(0)
         print(f"  Rank {rank}: {my_interior_mask.sum().item()}/{N_local} interior atoms ({100*my_interior_mask.sum().item()/N_local:.1f}%)")
@@ -586,6 +663,35 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
     local_atoms.info["spin"] = 1
 
     # Wrap calculator with DistributedCalculator (even for single rank for consistent profiling)
+    
+    # === Create hierarchical process groups if requested ===
+    hierarchical_params = None
+    if cfg.dist.hierarchical and world_size > 1 and dist_is_enabled():
+        local_world_size = torch.cuda.device_count()  # 4 on Delta
+        num_nodes = world_size // local_world_size
+        if num_nodes > 1:
+            rank0_print(f"Creating hierarchical process groups: {num_nodes} nodes, {local_world_size} GPUs/node")
+            # Create intra-node groups
+            intra_group = None
+            for n in range(num_nodes):
+                ranks = list(range(n * local_world_size, (n + 1) * local_world_size))
+                g = dist.new_group(ranks)
+                if rank in ranks:
+                    intra_group = g
+            # Create inter-node group (master = last rank on each node)
+            master_ranks = [(n + 1) * local_world_size - 1 for n in range(num_nodes)]
+            inter_group = dist.new_group(master_ranks)
+            
+            hierarchical_params = {
+                'intra_group': intra_group,
+                'inter_group': inter_group,
+                'local_rank': local_rank,
+                'local_world_size': local_world_size,
+            }
+            rank0_print(f"  Master ranks: {master_ranks}, this rank is {'MASTER' if rank in master_ranks else 'worker'}")
+        else:
+            rank0_print("Hierarchical mode requested but only 1 node detected, falling back to flat exchange")
+    
     if world_size > 1 and dist_is_enabled():
         # Build my_comm_map in expected format: {recv_rank: indices_to_send}
         # my_recv_indices tells us where to place received ghost data
@@ -595,7 +701,8 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
             comm_map=my_send_map, 
             interior_mask=my_interior_mask, 
             enable_overlap=cfg.dist.overlap,
-            recv_ghost_indices=my_recv_indices
+            recv_ghost_indices=my_recv_indices,
+            hierarchical_params=hierarchical_params
         )
     else:
         # Single rank: still wrap with DistributedCalculator for consistent profiling path
@@ -666,7 +773,8 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
                 rank=rank,
                 world_size=world_size,
                 device=device,
-                profiler=step_profiler
+                profiler=step_profiler,
+                edge_weighted=cfg.dist.edge_weighted_partition
             )
             
             # Update calculator with new maps
@@ -780,6 +888,7 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
                 dyn.run(steps=cfg.md.steps_per_episode)
         
         if dist_is_enabled():
+            log_nccl_call(__file__, 860, "barrier_episode_end")
             dist.barrier()
         run_time = time.time() - start_time
         
@@ -828,6 +937,7 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
         
     
     if dist_is_enabled():
+        log_nccl_call(__file__, 908, "barrier_final")
         dist.barrier()
         dist.destroy_process_group()
 
@@ -891,8 +1001,11 @@ def merge_mole_with_global_data(predictor, global_atoms, charge=0, spin=1, datas
     print(f"Rank {rank}: MOLE merge complete!", flush=True)
 
 def setup_calculator(cfg, rank, world_size, device="cuda", use_barrier=True):
-    print(f"Rank {rank}: Building calculator...")
+    # print(f"[DEBUG] Rank {rank}: setup_calculator START, file={__file__}, line={sys._getframe().f_lineno}", flush=True)
+    # print(f"[DEBUG] Rank {rank}: backend={cfg.backend}, device={device}", flush=True)
+    
     if cfg.backend == "mace":
+        # print(f"[DEBUG] Rank {rank}: Loading MACE model...", flush=True)
         from mace.calculators import mace_mp
         calc = mace_mp(model=cfg.mace.model, default_dtype=cfg.mace.default_dtype, device=device)
     else:
@@ -913,6 +1026,7 @@ def setup_calculator(cfg, rank, world_size, device="cuda", use_barrier=True):
                 rank0_print(f"  Cutoff: {student.cutoff}")
         else:
             # Standard UMA model loading
+            # print(f"[DEBUG] Rank {rank}: Building inference_settings_turbo...", flush=True)
             settings = inference_settings_turbo()
             settings.activation_checkpointing = cfg.uma.activation_checkpointing
             settings.merge_mole = bool(cfg.uma.merge_mole)
@@ -928,6 +1042,7 @@ def setup_calculator(cfg, rank, world_size, device="cuda", use_barrier=True):
             if settings.compile:
                 torch._dynamo.config.cache_size_limit = cfg.uma.dynamo_cache_size
 
+            # print(f"[DEBUG] Rank {rank}: Preparing overrides...", flush=True)
             with Timer(f"Setting up calculator ({cfg.uma.model})"):
                 
                 overrides = {}
@@ -936,11 +1051,28 @@ def setup_calculator(cfg, rank, world_size, device="cuda", use_barrier=True):
                     overrides = {"backbone": {"model": "distributed_escnmd_backbone"}}
                     rank0_print(f"Overriding model backbone to distributed_escnmd_backbone")
 
+                # Inject Triton Wigner config into backbone
+                if "backbone" not in overrides:
+                    overrides["backbone"] = {}
+                overrides["backbone"]["use_triton_wigner"] = cfg.uma.use_triton_wigner
+                if cfg.uma.use_triton_wigner:
+                     rank0_print(f"Enabled Triton Wigner Kernel Optimization")
+
+                # print(f"[DEBUG] Rank {rank}: Calling pretrained_mlip.get_predict_unit...", flush=True)
                 predictor = pretrained_mlip.get_predict_unit(cfg.uma.model, device=device, inference_settings=settings, overrides=overrides)
-                calc = FAIRChemCalculator(predictor, task_name="omol")
+                # print(f"[DEBUG] Rank {rank}: get_predict_unit returned successfully", flush=True)
                 
-        if dist_is_enabled() and use_barrier:
-            dist.barrier()
+                # print(f"[DEBUG] Rank {rank}: Creating FAIRChemCalculator...", flush=True)
+                calc = FAIRChemCalculator(predictor, task_name="omol")
+                # print(f"[DEBUG] Rank {rank}: FAIRChemCalculator created successfully", flush=True)
+                
+    if dist_is_enabled() and use_barrier:
+        # print(f"[DEBUG] Rank {rank}: Entering dist.barrier() after calculator setup...", flush=True)
+        log_nccl_call(__file__, 1040, "barrier_setup_calc")
+        dist.barrier()
+        # print(f"[DEBUG] Rank {rank}: dist.barrier() completed", flush=True)
+    
+    # print(f"[DEBUG] Rank {rank}: setup_calculator END", flush=True)
     return calc
 
 cs = ConfigStore.instance()
