@@ -4,7 +4,6 @@
 [submodule "refs/nvalchemi"]
 	path = refs/nvalchemi
 	url = https://github.com/NVIDIA/nvalchemi-toolkit-ops.git
-[submodule "refs/dgraph"]
-	path = refs/dgraph
-	url = https://github.com/szaman19/DGraph
-	branch = lsc-ogb
+[submodule "refs/batmobile"]
+	path = refs/batmobile
+	url = https://github.com/Infatoshi/batmobile.git

@@ -46,14 +46,21 @@ def load_predict_unit(
     Returns:
         A MLIPPredictUnit instance ready for inference
     """
+    import os
+    rank = os.environ.get("SLURM_PROCID", "?")
+    # print(f"[DEBUG] Rank {rank}: load_predict_unit START, file={__file__}", flush=True)
+    # print(f"[DEBUG] Rank {rank}: path={path}, device={device}, workers={workers}", flush=True)
 
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logging.warning(f"device was not explicitly set, using {device=}.")
 
+    # print(f"[DEBUG] Rank {rank}: Calling guess_inference_settings...", flush=True)
     inference_settings = guess_inference_settings(inference_settings)
     overrides = overrides or {"backbone": {"always_use_pbc": False}}
+    
     if workers > 1:
+        # print(f"[DEBUG] Rank {rank}: Creating ParallelMLIPPredictUnit (workers={workers})...", flush=True)
         from baseline.local_fairchem.units.mlip_unit.predict import ParallelMLIPPredictUnit
 
         return ParallelMLIPPredictUnit(
@@ -65,10 +72,13 @@ def load_predict_unit(
             num_workers=workers,
         )
     else:
-        return MLIPPredictUnit(
+        # print(f"[DEBUG] Rank {rank}: Creating MLIPPredictUnit...", flush=True)
+        result = MLIPPredictUnit(
             path,
             device=device,
             inference_settings=inference_settings,
             overrides=overrides,
             atom_refs=atom_refs,
         )
+        # print(f"[DEBUG] Rank {rank}: MLIPPredictUnit created successfully", flush=True)
+        return result

@@ -30,11 +30,19 @@ def load_inference_model(
     return_checkpoint: bool = True,
     strict: bool = True,
 ) -> tuple[torch.nn.Module, MLIPInferenceCheckpoint] | torch.nn.Module:
+    import os
+    _rank = os.environ.get("SLURM_PROCID", "?")
+    # print(f"[DEBUG] Rank {_rank}: load_inference_model START, file={__file__}", flush=True)
+    # print(f"[DEBUG] Rank {_rank}: checkpoint_location={checkpoint_location}", flush=True)
+    
+    # print(f"[DEBUG] Rank {_rank}: Calling torch.load()...", flush=True)
     checkpoint: MLIPInferenceCheckpoint = torch.load(
         checkpoint_location, map_location="cpu", weights_only=False
     )
+    # print(f"[DEBUG] Rank {_rank}: torch.load() completed", flush=True)
 
     if overrides is not None:
+        # print(f"[DEBUG] Rank {_rank}: Updating config with overrides...", flush=True)
         checkpoint.model_config = update_configs(checkpoint.model_config, overrides)
 
     # Patch config targets to point to baseline.local_fairchem
@@ -49,11 +57,15 @@ def load_inference_model(
             for v in cfg:
                 patch_config_targets(v)
     
+    # print(f"[DEBUG] Rank {_rank}: Patching config targets...", flush=True)
     patch_config_targets(checkpoint.model_config)
 
+    # print(f"[DEBUG] Rank {_rank}: Calling hydra.utils.instantiate(model_config)...", flush=True)
     model = hydra.utils.instantiate(checkpoint.model_config)
+    # print(f"[DEBUG] Rank {_rank}: hydra.utils.instantiate completed", flush=True)
     
     if use_ema:
+        # print(f"[DEBUG] Rank {_rank}: Building EMA model (torch.optim.swa_utils.AveragedModel)...", flush=True)
         model = torch.optim.swa_utils.AveragedModel(model)
         model_dict = model.state_dict()
         ema_state_dict = checkpoint.ema_state_dict
@@ -62,22 +74,28 @@ def load_inference_model(
         del model_dict["n_averaged"]
         del ema_state_dict["n_averaged"]
 
+        # print(f"[DEBUG] Rank {_rank}: Matching state dict...", flush=True)
         matched_dict = match_state_dict(model_dict, ema_state_dict)
 
         matched_dict["n_averaged"] = n_averaged
 
+        # print(f"[DEBUG] Rank {_rank}: Loading EMA state dict...", flush=True)
         missing_keys, unexpected_keys = load_state_dict(model, matched_dict, strict=False)
         if missing_keys:
             logging.warning(f"Missing keys when loading EMA weights: {missing_keys[:10]}...")
         if unexpected_keys:
             logging.warning(f"Unexpected keys when loading EMA weights: {unexpected_keys[:10]}...")
+        # print(f"[DEBUG] Rank {_rank}: EMA state dict loaded", flush=True)
     else:
+        # print(f"[DEBUG] Rank {_rank}: Loading model state dict (non-EMA)...", flush=True)
         missing_keys, unexpected_keys = load_state_dict(model, checkpoint.model_state_dict, strict=False)
         if missing_keys:
             logging.warning(f"Missing keys when loading weights: {missing_keys[:10]}...")
         if unexpected_keys:
             logging.warning(f"Unexpected keys when loading weights: {unexpected_keys[:10]}...")
+        # print(f"[DEBUG] Rank {_rank}: Model state dict loaded", flush=True)
 
+    # print(f"[DEBUG] Rank {_rank}: load_inference_model END", flush=True)
     return (model, checkpoint) if return_checkpoint is True else model
 
 

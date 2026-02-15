@@ -25,9 +25,19 @@ from fairchem.core.calculate.ase_calculator import FAIRChemCalculator
 from fairchem.core.calculate.pretrained_mlip import get_predict_unit
 from fairchem.core.units.mlip_unit.api.inference import inference_settings_turbo
 
+# Import profiler from same directory
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+from profiler import CUDAEventProfiler
 
-# Disable triton cudagraph caching for dynamic graphs
+
+# Configure torch inductor
+torch._inductor.config.triton.cudagraphs = False
+torch._inductor.config.triton.cudagraph_trees = False
 torch._inductor.config.triton.cudagraph_skip_dynamic_graphs = True
+# Force Inductor to use g++ instead of Cray Wrapper (CC) which causes linker errors
+torch._inductor.config.cpp.cxx = ["g++"]
 
 
 @dataclass
@@ -55,19 +65,25 @@ class UMAConfig:
 
 
 @dataclass
+class ProfilerConfig:
+    enabled: bool = False
+
+
+@dataclass
 class AppConfig:
     input_file: str = ""
     output_dir: str = "./results"
     prefix: str = "serial_md"
     md: MDConfig = field(default_factory=MDConfig)
     uma: UMAConfig = field(default_factory=UMAConfig)
+    profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
 
 
 cs = ConfigStore.instance()
 cs.store(name="config", node=AppConfig)
 
 
-def run_serial_md(calc, cfg: AppConfig) -> None:
+def run_serial_md(calc, cfg: AppConfig, profiler: CUDAEventProfiler = None) -> None:
     """
     Run serial (single-GPU) MD simulation.
     Saves trajectory data (positions, energies, forces) to NPZ files each step.
@@ -133,7 +149,19 @@ def run_serial_md(calc, cfg: AppConfig) -> None:
         dyn.attach(ase.md.MDLogger(dyn, atoms, md_log_path), interval=cfg.md.log_interval)
         
         start_time = time.time()
-        dyn.run(steps=cfg.md.steps_per_episode)
+        
+        # Start profiling for this episode
+        if profiler:
+            profiler.start_episode()
+        
+        # Run step-by-step for profiling
+        if profiler and profiler.enabled:
+            for step_i in range(cfg.md.steps_per_episode):
+                dyn.run(steps=1)
+                profiler.step_done()
+        else:
+            dyn.run(steps=cfg.md.steps_per_episode)
+        
         run_time = time.time() - start_time
         
         # Get and save trajectory data
@@ -161,6 +189,10 @@ def run_serial_md(calc, cfg: AppConfig) -> None:
         step += cfg.md.steps_per_episode
         total_done += cfg.md.steps_per_episode
         print(f"Ran {cfg.md.steps_per_episode} steps in {run_time:.2f}s. (perf: {cfg.md.steps_per_episode/run_time:.2f} steps/s, {total_done}/{cfg.md.total_steps})")
+        
+        # Print profiling report for this episode
+        if profiler:
+            profiler.report()
     
     total_time = time.time() - total_started
     print(f"\nSerial MD completed!")
@@ -205,8 +237,15 @@ def main(cfg: AppConfig) -> None:
     calc = FAIRChemCalculator(predictor, task_name="omol")
     print(f"[Setting up calculator ({cfg.uma.model})] took {time.time() - start_time:.4f}s")
     
+    # Setup profiler
+    profiler = CUDAEventProfiler(enabled=cfg.profiler.enabled, rank=0)
+    
+    # Set profiler on predictor if it supports it (ParallelMLIPPredictUnit)
+    if hasattr(predictor, 'set_profiler'):
+        predictor.set_profiler(profiler)
+    
     # Run MD
-    run_serial_md(calc, cfg)
+    run_serial_md(calc, cfg, profiler=profiler)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import torch.distributed as dist
 import ase
 from typing import Dict, Tuple, Optional
 from ase.calculators.calculator import Calculator, all_changes, PropertyNotImplementedError
+from baseline.nccl_debug import log_nccl_call
 
 from baseline.profiler import CUDAEventProfiler, StepProfiler
 from baseline.halo_exchange import HaloExchanger
@@ -23,7 +24,8 @@ class DistributedCalculator(Calculator):
     
     def __init__(self, calculator, cutoff: float, comm_map: Dict[int, torch.Tensor] = None, 
                  interior_mask: torch.Tensor = None, enable_overlap: bool = False,
-                 recv_ghost_indices: Dict[int, torch.Tensor] = None):
+                 recv_ghost_indices: Dict[int, torch.Tensor] = None,
+                 hierarchical_params: dict = None):
         super().__init__()
         self.calculator = calculator
         self.cutoff = cutoff
@@ -43,6 +45,9 @@ class DistributedCalculator(Calculator):
         # Store interior mask and overlap flag for optimization
         self.interior_mask = interior_mask.to(device) if interior_mask is not None else None
         self.enable_overlap = enable_overlap
+        
+        # Hierarchical aggregation params (Area 2 / PXN)
+        self.hierarchical_params = hierarchical_params
         
         # OPTIMIZATION: Cache comm maps to avoid rebuilding every step
         self._cached_recv_ghost_indices = None
@@ -103,7 +108,7 @@ class DistributedCalculator(Calculator):
                 self._cached_device_send_map = device_send_map
                 self._cached_comm_map_version = self._comm_map_version
             
-            model.backbone.set_comm_maps(self._cached_device_send_map, self._cached_recv_ghost_indices, self.rank, self.world_size, self.interior_mask, self.enable_overlap)
+            model.backbone.set_comm_maps(self._cached_device_send_map, self._cached_recv_ghost_indices, self.rank, self.world_size, self.interior_mask, self.enable_overlap, self.hierarchical_params)
             model.backbone.num_local = num_local
             # Wire profiler to model backbone for detailed timing
             if hasattr(model.backbone, 'set_profiler'):
@@ -205,18 +210,18 @@ class DistributedCalculator(Calculator):
             
         local_forces = all_forces_tensor[:self.num_local]
         
-        # Profile: Force reduction
-        if ghosts:
+        # === Area 4: Overlap force_reduction with energy_allreduce ===
+        # Both are independent collective operations. Start force reduction async,
+        # compute energy while it runs, then wait for both.
+        force_handle = None
+        if self.world_size > 1:
             if self.profiler:
                 self.profiler.start("force_reduction")
-            ghost_forces = all_forces_tensor[self.num_local:]
-            local_forces = self.exchanger.reduce_forces(local_forces, ghost_forces)
-            if self.profiler:
-                self.profiler.stop("force_reduction")
-            
-        self.results["forces"] = local_forces.cpu().numpy()
+            ghost_forces = all_forces_tensor[self.num_local:] if ghosts else None
+            # Start async force reduction (all_to_all_single)
+            force_handle = self.exchanger.reduce_forces_start(local_forces, ghost_forces)
         
-        # Calculate energy
+        # Calculate energy (overlaps with force_reduction all_to_all)
         energies = self.calculator.get_potential_energies(combined_atoms)
         
         # Profile: Energy all-reduce
@@ -227,6 +232,7 @@ class DistributedCalculator(Calculator):
             local_energy_tensor = energies[:self.num_local].sum().to(dtype=torch.float64)
             global_energy_tensor = local_energy_tensor.clone()
             if dist.is_initialized():
+                log_nccl_call(__file__, 235, "all_reduce_energy_tensor")
                 dist.all_reduce(global_energy_tensor, op=dist.ReduceOp.SUM)
             
             self.results['energy'] = global_energy_tensor.item()
@@ -236,6 +242,7 @@ class DistributedCalculator(Calculator):
             self.results['local_energy'] = local_energy_sum
             if dist.is_initialized():
                 energy_tensor = torch.tensor([local_energy_sum], dtype=torch.float64, device=self.exchanger.device)
+                log_nccl_call(__file__, 245, "all_reduce_energy_numpy")
                 dist.all_reduce(energy_tensor, op=dist.ReduceOp.SUM)
                 self.results['energy'] = energy_tensor.item()
             else:
@@ -243,6 +250,14 @@ class DistributedCalculator(Calculator):
         
         if self.profiler:
             self.profiler.stop("energy_allreduce")
+        
+        # Wait for force reduction to complete (if started)
+        if force_handle is not None:
+            local_forces = self.exchanger.reduce_forces_wait(force_handle)
+            if self.profiler:
+                self.profiler.stop("force_reduction")
+            
+        self.results["forces"] = local_forces.cpu().numpy()
 
     def get_potential_energies(self, atoms=None):
         # Delegate to the inner calculator

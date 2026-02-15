@@ -43,6 +43,14 @@ from baseline.local_fairchem.models.uma.nn.radial import GaussianSmearing, Polyn
 from baseline.local_fairchem.models.uma.nn.so3_layers import SO3_Linear
 from baseline.local_fairchem.models.utils.irreps import cg_change_mat, irreps_sum
 
+from baseline.local_fairchem.models.utils.irreps import cg_change_mat, irreps_sum
+
+try:
+    from baseline.local_fairchem.models.uma.nn.wigner_triton import wigner_bmm
+    TRITON_WIGNER_AVAILABLE = True
+except ImportError:
+    TRITON_WIGNER_AVAILABLE = False
+
 from .escn_md_block import eSCNMD_Block
 
 if TYPE_CHECKING:
@@ -134,6 +142,7 @@ class eSCNMDBackbone(nn.Module, MOLEInterface):
         radius_pbc_version: int = 1,
         always_use_pbc: bool = True,
         edge_chunk_size: int | None = None,
+        use_triton_wigner: bool = False,
     ) -> None:
         super().__init__()
         self.max_num_elements = max_num_elements
@@ -272,6 +281,11 @@ class eSCNMDBackbone(nn.Module, MOLEInterface):
         self.act_type = act_type
         self.ff_type = ff_type
 
+        self.use_triton_wigner = use_triton_wigner
+        if self.use_triton_wigner and not TRITON_WIGNER_AVAILABLE:
+            logging.warning("Triton Wigner kernel requested but not available/installable. Falling back to original.")
+            self.use_triton_wigner = False
+
         # Initialize the blocks for each layer
         self.blocks = nn.ModuleList()
         for _ in range(self.num_layers):
@@ -288,6 +302,7 @@ class eSCNMDBackbone(nn.Module, MOLEInterface):
                 self.act_type,
                 self.ff_type,
                 activation_checkpoint_chunk_size=activation_checkpoint_chunk_size,
+                use_triton_wigner=self.use_triton_wigner,
             )
             self.blocks.append(block)
 
@@ -300,7 +315,12 @@ class eSCNMDBackbone(nn.Module, MOLEInterface):
         coefficient_index = self.SO3_grid["lmax_lmax"].mapping.coefficient_idx(
             self.lmax, self.mmax
         )
+        coefficient_index = self.SO3_grid["lmax_lmax"].mapping.coefficient_idx(
+            self.lmax, self.mmax
+        )
         self.register_buffer("coefficient_index", coefficient_index, persistent=False)
+        
+
 
     def _get_rotmat_and_wigner(
         self, edge_distance_vecs: torch.Tensor
@@ -323,6 +343,24 @@ class eSCNMDBackbone(nn.Module, MOLEInterface):
         if self.mmax != self.lmax:
             wigner = wigner.index_select(1, self.coefficient_index)
             wigner_inv = wigner_inv.index_select(2, self.coefficient_index)
+
+        if self.use_triton_wigner and wigner.is_cuda and self.mappingReduced.to_m.is_cuda:
+            # Optimized path using Triton kernel
+            # Ensure dtypes match (autocast might change wigner dtype)
+            to_m = self.mappingReduced.to_m.to(device=wigner.device, dtype=wigner.dtype)
+            
+            # wigner_and_M_mapping = to_m @ wigner
+            # shape: [9, 9] @ [E, 9, 9] -> needs batch dim broadcast or special handling
+            # Our kernel handles [E, 9, 9] @ [E, 9, C].
+            # Here we need a slightly different operation: [M, K] @ [E, K, N] -> [E, M, N]
+            # Since to_m is constant small matrix, let's keep using einsum for the mapping part
+            # as it is very fast (broadcasting) and not the bottleneck.
+            # The bottleneck is applying this wigner matrix to features later in the block.
+            # WAIT: The profiling showed _get_rotmat_and_wigner itself is fast (3.4ms).
+            # The bottleneck is `wigner` application in `mp_block`.
+            # So we don't need to optimize THIS function with Triton, 
+            # we need to optimize WHERE `wigner_and_M_mapping` IS USED.
+            pass
 
         wigner_and_M_mapping = torch.einsum(
             "mk,nkj->nmj", self.mappingReduced.to_m.to(device=wigner.device, dtype=wigner.dtype), wigner
