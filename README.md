@@ -9,7 +9,7 @@
 To install with editable mode and install all dependencies:
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r DistNNP/requirements-dev.txt
 ```
 
 
