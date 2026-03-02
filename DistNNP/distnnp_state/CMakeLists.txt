@@ -26,9 +26,24 @@ find_package(CUDAToolkit REQUIRED)
 set(CUDA_TOOLKIT_ROOT_DIR "${CUDAToolkit_ROOT}" CACHE PATH "" FORCE)
 set(CUDA_INCLUDE_DIRS "${CUDAToolkit_INCLUDE_DIRS}" CACHE PATH "" FORCE)
 
+
+if (TORCH_LIBRARY)
+  get_filename_component(TORCH_LIB_DIR "${TORCH_LIBRARY}" DIRECTORY)
+endif ()
+
+find_library(TORCH_PYTHON_LIBRARY
+  torch_python
+  HINTS
+  ${TORCH_LIB_DIR}
+  $ENV{Python_SITELIB}/torch/lib64
+  $ENV{Python_SITELIB}/torch/lib
+  NO_DEFAULT_PATH)
+
+find_library(TORCH_PYTHON_LIBRARY torch_python REQUIRED)
+
+
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(Torch REQUIRED)
-find_package(pybind11 REQUIRED)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
@@ -41,22 +56,43 @@ python_add_library(distnnp_state_impl
 target_include_directories(distnnp_state_impl
     PRIVATE
     include
+    ${TORCH_INCLUDE_DIRS}
 )
 
+# torch_python provides pybind11 type_casters for at::Tensor and must be
+# linked explicitly — it is not included in ${TORCH_LIBRARIES}.
+# Do not link standalone pybind11::module here: torch bundles its own
+# pybind11 and mixing the two causes ABI conflicts (undefined type_caster
+# symbols at import time).
 target_link_libraries(distnnp_state_impl
     PRIVATE
-    pybind11::module
     ${TORCH_LIBRARIES}
+    torch
+    ${TORCH_PYTHON_LIBRARY}
 )
 
-# Install the compiled extension
-install(TARGETS distnnp_state_impl DESTINATION distnnp_state)
+set_target_properties(distnnp_state_impl
+    PROPERTIES
+    FILE_SET HEADERS
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
+    CUDA_EXTENSIONS OFF
+
+    INSTALL_RPATH_USE_LINK_PATH ON
+)
+
+install(TARGETS distnnp_state_impl
+LIBRARY DESTINATION .)
 
 # Manually install the type marker and stubs if they exist
 install(FILES
     "src/distnnp_state/py.typed"
     "src/distnnp_state/distnnp_state.pyi"
-    DESTINATION distnnp_state
+    DESTINATION .
     OPTIONAL
 )
 
