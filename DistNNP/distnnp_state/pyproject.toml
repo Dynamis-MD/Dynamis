@@ -1,26 +1,22 @@
 [build-system]
 requires = ["scikit-build-core>=0.5", "pybind11"]
-build-backend = "scikit-build-core.build"
+build-backend = "scikit_build_core.build"
 
 [project]
-name = "your_package_name"
+name = "distnnp_state"
 version = "0.1.0"
-description = "A C++ extension with automated stubs"
+description = "C++ extension for distnnp state management"
+readme = "README.md"
+requires-python = ">=3.8"
 dependencies = []
-# Ensure your package is recognized as type-hinted
-dynamic = ["version"]
 
 [tool.scikit-build]
-# This ensures scikit-build-core looks for files in the right place
-wheel.expand-build-vars = true
 cmake.build-type = "Release"
 
-[tool.scikit-build.wheel]
-# This tells the wheel to include .pyi files and the py.typed marker
-# even if they aren't explicitly listed in CMake
-packages = ["src/your_package_name"]
-install-dir = "your_package_name"
 
-# If you want to force inclusion of specific files
+[tool.scikit-build.wheel]
+packages = ["src/distnnp_state"]
+install-dir = "distnnp_state"
+
 [tool.scikit-build.sdist]
-include = ["src/your_package_name/*.pyi", "src/your_package_name/py.typed"]
+include = ["src/distnnp_state/*.pyi", "src/distnnp_state/py.typed"]
