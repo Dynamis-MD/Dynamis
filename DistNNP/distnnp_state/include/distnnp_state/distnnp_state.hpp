@@ -25,8 +25,8 @@ namespace distnnp_state
         torch::Tensor partition_indices; // Tensor of shape [num_local_atoms] containing global atom indices for this partition
         torch::Tensor local_atom_positions; // Tensor of shape [num_local_atoms, 3] containing local atomic positions for this partition
         torch::Tensor local_atom_velocities; // Tensor of shape [num_local_atoms, 3] containing local atomic velocities for this partition
-        torch::tensor global_send_recv_matrix; // Tensor of shape [world_size, world_size] containing the number of atoms to send from each rank to every other rank
-        torch::tensor halo_map;
+        torch::Tensor global_send_recv_matrix; // Tensor of shape [world_size, world_size] containing the number of atoms to send from each rank to every other rank
+        torch::Tensor halo_map; // Tensor of shape sum(global_send_recv_matrix[global_rank]) containing the global atom indices of the halo atoms that this partition needs to receive from other ranks
     };
     
     struct DistNNPState
@@ -34,8 +34,7 @@ namespace distnnp_state
       // Distributed environment information
       DistEnvironment dist_env;
 
-      // Molecular system information
-      
+      // Molecular system information      
       MolecularInfo global_molecular_info; // Contains global atom information for the entire system
       
       // Partitioned data information
