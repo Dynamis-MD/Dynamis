@@ -1,5 +1,5 @@
 [build-system]
-requires = ["scikit-build-core>=0.5", "pybind11"]
+requires = ["scikit-build-core>=0.5"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -11,11 +11,12 @@ requires-python = ">=3.8"
 dependencies = []
 
 [tool.scikit-build]
-cmake.build-type = "Release"
+build-dir = "skbuild"
 
 
 [tool.scikit-build.wheel]
 packages = ["src/distnnp_state"]
+expand-macos-universal-tags = true
 install-dir = "distnnp_state"
 
 [tool.scikit-build.sdist]
