@@ -36,7 +36,7 @@ try:
     from baseline.local_fairchem.models.uma.nn.wigner_triton import wigner_bmm
     TRITON_WIGNER_AVAILABLE = True
 except ImportError as e:
-    print(f"DEBUG: Failed to import wigner_triton in escn_md_block: {e}", flush=True)
+    pass  # wigner_triton not available, will use torch.bmm fallback
     TRITON_WIGNER_AVAILABLE = False
 
 
@@ -434,6 +434,61 @@ class eSCNMD_Block(torch.nn.Module):
             )
             x = x + x_res
 
+        x_res = x
+        x = self.norm_2(x)
+
+        with record_function("atomwise"):
+            x = self.atom_wise(x)
+            x = x + x_res
+
+        return x
+
+    def forward_edge_wise_only(
+        self,
+        x,
+        x_edge,
+        edge_distance,
+        edge_index,
+        wigner_and_M_mapping,
+        wigner_and_M_mapping_inv,
+        edge_envelope,
+        total_atoms_across_gp_ranks,
+        sys_node_embedding=None,
+        node_offset: int = 0,
+    ):
+        """Run norm_1 + edge_wise + first residual only (no atom_wise).
+
+        Used in overlap mode: interior and boundary edge_wise run separately,
+        results are merged, then a single atom_wise runs on the merged tensor.
+        This avoids duplicating atom_wise (O(N)) across both calls.
+        """
+        x_res = x
+        x = self.norm_1(x)
+
+        if sys_node_embedding is not None:
+            x[:, 0, :] = x[:, 0, :] + sys_node_embedding
+
+        with record_function("edgewise"):
+            x = self.edge_wise(
+                x,
+                x_edge,
+                edge_distance,
+                edge_index,
+                wigner_and_M_mapping,
+                wigner_and_M_mapping_inv,
+                edge_envelope,
+                total_atoms_across_gp_ranks=total_atoms_across_gp_ranks,
+                node_offset=node_offset,
+            )
+            x = x + x_res
+
+        return x
+
+    def forward_atom_wise_only(self, x):
+        """Run norm_2 + atom_wise + second residual only.
+
+        Called once on the merged edge_wise results in overlap mode.
+        """
         x_res = x
         x = self.norm_2(x)
 

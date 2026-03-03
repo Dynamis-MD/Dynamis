@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.nn as nn
-import torch.distributed as dist
+
 from torch.profiler import record_function
 
 from baseline.local_fairchem.common import gp_utils
@@ -41,8 +41,6 @@ from baseline.local_fairchem.models.uma.nn.layer_norm import (
 from baseline.local_fairchem.models.uma.nn.mole_utils import MOLEInterface
 from baseline.local_fairchem.models.uma.nn.radial import GaussianSmearing, PolynomialEnvelope
 from baseline.local_fairchem.models.uma.nn.so3_layers import SO3_Linear
-from baseline.local_fairchem.models.utils.irreps import cg_change_mat, irreps_sum
-
 from baseline.local_fairchem.models.utils.irreps import cg_change_mat, irreps_sum
 
 try:
@@ -315,16 +313,13 @@ class eSCNMDBackbone(nn.Module, MOLEInterface):
         coefficient_index = self.SO3_grid["lmax_lmax"].mapping.coefficient_idx(
             self.lmax, self.mmax
         )
-        coefficient_index = self.SO3_grid["lmax_lmax"].mapping.coefficient_idx(
-            self.lmax, self.mmax
-        )
         self.register_buffer("coefficient_index", coefficient_index, persistent=False)
         
 
 
     def _get_rotmat_and_wigner(
         self, edge_distance_vecs: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         Jd_buffers = [
             getattr(self, f"Jd_{l}").to(edge_distance_vecs.device).type(edge_distance_vecs.dtype)
             for l in range(self.lmax + 1)
@@ -344,24 +339,8 @@ class eSCNMDBackbone(nn.Module, MOLEInterface):
             wigner = wigner.index_select(1, self.coefficient_index)
             wigner_inv = wigner_inv.index_select(2, self.coefficient_index)
 
-        if self.use_triton_wigner and wigner.is_cuda and self.mappingReduced.to_m.is_cuda:
-            # Optimized path using Triton kernel
-            # Ensure dtypes match (autocast might change wigner dtype)
-            to_m = self.mappingReduced.to_m.to(device=wigner.device, dtype=wigner.dtype)
-            
-            # wigner_and_M_mapping = to_m @ wigner
-            # shape: [9, 9] @ [E, 9, 9] -> needs batch dim broadcast or special handling
-            # Our kernel handles [E, 9, 9] @ [E, 9, C].
-            # Here we need a slightly different operation: [M, K] @ [E, K, N] -> [E, M, N]
-            # Since to_m is constant small matrix, let's keep using einsum for the mapping part
-            # as it is very fast (broadcasting) and not the bottleneck.
-            # The bottleneck is applying this wigner matrix to features later in the block.
-            # WAIT: The profiling showed _get_rotmat_and_wigner itself is fast (3.4ms).
-            # The bottleneck is `wigner` application in `mp_block`.
-            # So we don't need to optimize THIS function with Triton, 
-            # we need to optimize WHERE `wigner_and_M_mapping` IS USED.
-            pass
-
+        # Triton optimization is applied where wigner_and_M_mapping is USED (in mp_block),
+        # not here — this einsum is fast (3.4ms) and not the bottleneck.
         wigner_and_M_mapping = torch.einsum(
             "mk,nkj->nmj", self.mappingReduced.to_m.to(device=wigner.device, dtype=wigner.dtype), wigner
         )
@@ -799,7 +778,7 @@ class MLP_EFS_Head(nn.Module, HeadInterface):
             # Profile backward pass for stress/forces
             if self.profiler:
                 self.profiler.start("backward_stress")
-            
+
             grads = torch.autograd.grad(
                 [energy_part.sum()],
                 [data["pos_original"], emb["displacement"]],
