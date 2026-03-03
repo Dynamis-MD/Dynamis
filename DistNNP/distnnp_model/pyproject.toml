@@ -1,0 +1,23 @@
+[build-system]
+requires = ["scikit-build-core>=0.5"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "distnnp_model"
+version = "0.0.1"
+description = "NNP models wrapped with DistNNP distributed primitives"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
+
+[tool.scikit-build]
+build-dir = "skbuild"
+
+
+[tool.scikit-build.wheel]
+packages = ["src/distnnp_model"]
+expand-macos-universal-tags = true
+install-dir = "distnnp_model"
+
+[tool.scikit-build.sdist]
+include = ["src/distnnp_model/*.pyi", "src/distnnp_model/py.typed"]
