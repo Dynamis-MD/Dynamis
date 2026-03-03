@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25.0)
 
 project(
-    distnnp_state
+    distnnp_model
     VERSION 0.1.0
     DESCRIPTION "A distributed state management library for neural network potentials"
     HOMEPAGE_URL "https://github.com/szaman19/DistNNP"
@@ -50,7 +50,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 python_add_library(distnnp_model_impl
     MODULE
     WITH_SOABI
-    src/distnnp_state_bindings.cpp
+    src/distnnp_model_bindings.cpp
 )
 
 target_include_directories(distnnp_model_impl
@@ -85,13 +85,12 @@ set_target_properties(distnnp_model_impl
     INSTALL_RPATH_USE_LINK_PATH ON
 )
 
-install(TARGETS distnnp_model_impl
-LIBRARY DESTINATION .)
+install(TARGETS distnnp_model_impl DESTINATION .)
 
 # Manually install the type marker and stubs if they exist
 install(FILES
-    "src/distnnp_state/py.typed"
-    "src/distnnp_state/distnnp_state.pyi"
+    "src/distnnp_model/py.typed"
+    "src/distnnp_model/distnnp_model.pyi"
     DESTINATION .
     OPTIONAL
 )
