@@ -39,7 +39,7 @@ From the `distnnp_integrator/` directory:
 pip install -e .
 ```
 
-The C++ extension is compiled and the `.so` placed in `src/distnnp_integrator/`. CMake build artefacts go to `build/`. Re-run `pip install -e .` after any C++ or CUDA change.
+The C++ extension is compiled and the `.so` placed in `build/`. CMake build artefacts go to `build/` as well. Re-run `pip install -e .` after any C++ or CUDA change.
 
 ### Running tests
 
