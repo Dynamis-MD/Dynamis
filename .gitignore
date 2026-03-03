@@ -213,3 +213,13 @@ __marimo__/
 
 # Distribution initialization
 .dist_init/
+
+# CMake build files
+CMakeCache.txt
+CMakeFiles/
+.ninja*
+build/
+cmake_install.cmake
+CMakeInit.txt
+.skbuild*
+build.ninja
