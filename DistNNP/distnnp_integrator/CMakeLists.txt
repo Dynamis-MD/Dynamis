@@ -86,8 +86,7 @@ set_target_properties(distnnp_integrator_impl
     INSTALL_RPATH_USE_LINK_PATH ON
 )
 
-install(TARGETS distnnp_integrator_impl
-LIBRARY DESTINATION .)
+install(TARGETS distnnp_integrator_impl DESTINATION .)
 
 # Manually install the type marker and stubs if they exist
 install(FILES
