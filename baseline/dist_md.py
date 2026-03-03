@@ -15,7 +15,7 @@ if __name__ == "__main__" or "dist_md" in __file__:
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
-from baseline.nccl_debug import log_nccl_call
+
 
 import ase
 import ase.io
@@ -34,15 +34,17 @@ from baseline.local_fairchem.graph.radius_graph_pbc import radius_graph_pbc_v2
 from baseline.distributed_model import DistributedESCNMDBackbone
 import torch._dynamo
 import torch._inductor
-from baseline.sfc import sfc_partition, distributed_sfc_partition
+from baseline.sfc import sfc_partition, distributed_sfc_partition, distributed_kdtree_partition, distributed_pca_slab_partition
 from ase.calculators.calculator import Calculator, all_changes
 
 # Import refactored modules
 from baseline.profiler import CUDAEventProfiler, StepProfiler, _ProfilerContext
 from baseline.halo_exchange import (
-    HaloExchanger, 
-    build_halo_maps, 
+    HaloExchanger,
+    RingExchanger,
+    build_halo_maps,
     distributed_build_halo_maps,
+    distributed_build_ring_halo_maps,
     _build_edges_cutoff_fairchem_raw
 )
 from baseline.distributed_calculator import DistributedCalculator
@@ -92,6 +94,7 @@ class ProfilerConfig:
     log_dir: str = "./profiler_logs"
     torch_profiler: bool = False  # Enable PyTorch profiler for deep model analysis
     torch_profiler_steps: int = 5  # Number of steps to profile (skip first 2 as warmup)
+    measure_bw: bool = False  # Measure NCCL all_to_all bandwidth with barrier+CUDA events
 
 @dataclass
 class DistConfig:
@@ -99,7 +102,8 @@ class DistConfig:
     backend: str = "nccl"
     cutoff: float = 6.0
     ghost_cutoff_buffer: float = 0.5  # Extra distance for ghost node selection to avoid FP edge cases
-    partition_algorithm: str = "sfc_morton" # ["sfc_morton", "sfc_hilbert", "simple"]
+    partition_algorithm: str = "sfc_morton" # ["sfc_morton", "sfc_hilbert", "simple", "kdtree", "pca_slab"]
+    ring_exchange: bool = False  # Use ring topology (isend/irecv with rank n-1, n+1) instead of all_to_all
     k_partition: Optional[int] = None
     rebalance_interval: int = 100
     rebalance_threshold: float = 0.2
@@ -112,6 +116,9 @@ class DistConfig:
     overlap: bool = False  # Enable computation-communication overlap (experimental)
     hierarchical: bool = False  # Enable hierarchical aggregation (Area 2 / PXN)
     edge_weighted_partition: bool = False  # Partition by edge count for balanced compute
+    per_node_partition: bool = False  # Partition by node (not GPU) for NVSHMEM architecture
+    use_nvshmem: bool = False  # Use NVSHMEM for inter-node feature exchange (requires per_node_partition)
+    differentiable_exchange: bool = True  # Differentiable feature exchange (correct ghost gradients, adds L backward all_to_all)
 
 @dataclass
 class AppConfig:
@@ -217,19 +224,19 @@ def _broadcast_tensor(t: torch.Tensor, src: int = 0) -> torch.Tensor:
     if backend == "gloo" and t.device.type != 'cpu':
         # Gloo requires CPU tensors
         t_cpu = t.cpu()
-        log_nccl_call(__file__, 218, "broadcast_gloo")
+
         dist.broadcast(t_cpu, src=src)
         t.copy_(t_cpu)
     elif backend == "nccl" and t.device.type == 'cpu':
         # NCCL requires CUDA tensors
         device = torch.device("cuda", torch.cuda.current_device())
         t_cuda = t.to(device)
-        log_nccl_call(__file__, 224, "broadcast_nccl")
+
         dist.broadcast(t_cuda, src=src)
         t.copy_(t_cuda.cpu())
     else:
         # Backend and device are compatible
-        log_nccl_call(__file__, 228, "broadcast_direct")
+
         dist.broadcast(t, src=src)
     return t
 
@@ -325,31 +332,31 @@ def _gather_all_atoms_to_rank0(a: ase.Atoms) -> Optional[Dict[str, np.ndarray]]:
     # Exchange counts first
     local_count = torch.tensor([len(a)], dtype=torch.int64, device=device)
     all_counts = [torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)]
-    log_nccl_call(__file__, 323, "all_gather_counts")
+
     dist.all_gather(all_counts, local_count)
     counts = [c.item() for c in all_counts]
     total = sum(counts)
     
     # Gather positions
     pos_list = [torch.zeros((c, 3), dtype=torch.float32, device=device) for c in counts]
-    log_nccl_call(__file__, 329, "all_gather_pos")
+
     dist.all_gather(pos_list, local_pos)
     
     # Gather velocities
     vel_list = [torch.zeros((c, 3), dtype=torch.float32, device=device) for c in counts]
-    log_nccl_call(__file__, 333, "all_gather_vel")
+
     dist.all_gather(vel_list, local_vel)
     
     # Gather atomic numbers
     Z_list = [torch.zeros(c, dtype=torch.int32, device=device) for c in counts]
-    log_nccl_call(__file__, 337, "all_gather_Z")
+
     dist.all_gather(Z_list, local_Z)
     
     # Gather global_id if present
     gid_list = None
     if has_gid:
         gid_list = [torch.zeros(c, dtype=torch.int64, device=device) for c in counts]
-        log_nccl_call(__file__, 343, "all_gather_gid")
+
         dist.all_gather(gid_list, local_gid)
     
     if rank != 0:
@@ -380,8 +387,9 @@ def do_partition_and_redistribute(
     world_size: int,
     device: torch.device,
     profiler: 'CUDAEventProfiler' = None,
-    edge_weighted: bool = True
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, 
+    edge_weighted: bool = True,
+    ring_exchange: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
            Optional[torch.Tensor], Dict[int, torch.Tensor], Dict[int, torch.Tensor], torch.Tensor]:
     """
     Unified partition and redistribution logic for both initial partition and repartition.
@@ -450,6 +458,33 @@ def do_partition_and_redistribute(
         send_counts = torch.zeros(world_size, dtype=torch.long, device=device)
         send_counts[rank] = N_local
         recv_counts = send_counts.clone()  # Each rank keeps its own
+    elif "pca_slab" in partition_algorithm:
+        local_partition_id, metadata = distributed_pca_slab_partition(
+            local_coords=local_pos,
+            num_partitions=world_size,
+            device=device,
+            local_edge_counts=local_edge_counts,
+        )
+        send_counts_matrix = metadata["send_counts_matrix"]
+        send_counts = send_counts_matrix[rank]
+        recv_counts = send_counts_matrix[:, rank]
+        if rank == 0:
+            print(f"PCA slab partition: dir={[f'{v:.3f}' for v in metadata['principal_dir']]}, "
+                  f"min_slab_thickness={metadata['min_slab_thickness']:.2f}, "
+                  f"cutoff={cutoff:.2f}")
+            if metadata['min_slab_thickness'] < cutoff:
+                print(f"  WARNING: min slab thickness ({metadata['min_slab_thickness']:.2f}) < cutoff ({cutoff:.2f}), "
+                      f"ring exchange may miss some neighbors!")
+    elif "kdtree" in partition_algorithm:
+        local_partition_id, metadata = distributed_kdtree_partition(
+            local_coords=local_pos,
+            num_partitions=world_size,
+            device=device,
+            local_edge_counts=local_edge_counts,
+        )
+        send_counts_matrix = metadata["send_counts_matrix"]
+        send_counts = send_counts_matrix[rank]
+        recv_counts = send_counts_matrix[:, rank]
     else:
         curve_type = "hilbert" if "hilbert" in partition_algorithm else "morton"
         local_partition_id, metadata = distributed_sfc_partition(
@@ -459,7 +494,7 @@ def do_partition_and_redistribute(
             device=device,
             local_edge_counts=local_edge_counts  # Pass edge counts for weighted partition
         )
-        
+
         # Use pre-computed send_counts_matrix (eliminates all_to_all for counts!)
         send_counts_matrix = metadata["send_counts_matrix"]
         send_counts = send_counts_matrix[rank]  # Counts I send to each rank
@@ -495,7 +530,7 @@ def do_partition_and_redistribute(
     packed_recv = torch.zeros((total_recv, 8), dtype=torch.float32, device=device)
     
     # All-to-all exchange
-    log_nccl_call(__file__, 488, "all_to_all_atom_redistribute")
+
     dist.all_to_all_single(
         packed_recv, packed_send,
         output_split_sizes=recv_counts_list,
@@ -517,6 +552,201 @@ def do_partition_and_redistribute(
     
     # Each rank computes its own maps independently (more scalable)
     ghost_cutoff = cutoff + ghost_cutoff_buffer
+
+    if ring_exchange:
+        send_map, recv_ghost_indices, interior_mask = distributed_build_ring_halo_maps(
+            local_pos=new_pos,
+            cutoff=ghost_cutoff,
+            cell=cell,
+            pbc=pbc,
+            rank=rank,
+            world_size=world_size,
+            device=device
+        )
+    else:
+        send_map, recv_ghost_indices, interior_mask = distributed_build_halo_maps(
+            local_pos=new_pos,
+            cutoff=ghost_cutoff,
+            cell=cell,
+            pbc=pbc,
+            rank=rank,
+            world_size=world_size,
+            device=device
+        )
+    
+    if profiler:
+        profiler.stop("build_halo_maps")
+    
+    return new_pos, new_vel, new_Z, new_gid, send_map, recv_ghost_indices, interior_mask
+
+
+def do_per_node_partition_and_redistribute(
+    local_pos: torch.Tensor,
+    local_vel: torch.Tensor,
+    local_Z: torch.Tensor,
+    local_gid: Optional[torch.Tensor],
+    cell: torch.Tensor,
+    pbc: torch.Tensor,
+    cutoff: float,
+    ghost_cutoff_buffer: float,
+    partition_algorithm: str,
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    profiler: 'CUDAEventProfiler' = None,
+    edge_weighted: bool = True
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
+           Optional[torch.Tensor], Dict[int, torch.Tensor], Dict[int, torch.Tensor], 
+           torch.Tensor, Dict]:
+    """
+    Per-node partition and redistribution (Strategy B).
+    
+    SFC partitions into num_nodes (not world_size) partitions.
+    Atoms are redistributed to correct nodes, then evenly split within each node.
+    Halo maps only track inter-node ghosts.
+    
+    Returns:
+        new_pos, new_vel, new_Z, new_gid, 
+        send_map (inter-node only), recv_ghost_indices (inter-node only),
+        interior_mask (node-level), per_node_info dict
+    """
+    gpus_per_node = torch.cuda.device_count()  # 4 on Delta
+    num_nodes = world_size // gpus_per_node
+    node_id = rank // gpus_per_node
+    local_gpu_id = rank % gpus_per_node
+    N_local = local_pos.size(0)
+    has_gid = local_gid is not None
+    
+    if num_nodes < 2:
+        # Single node: do regular partition for atom redistribution, but return
+        # EMPTY comm_maps because per-node mode uses all_gather for intra-node atoms
+        # (no inter-node ghosts in single-node case)
+        result = do_partition_and_redistribute(
+            local_pos, local_vel, local_Z, local_gid,
+            cell, pbc, cutoff, ghost_cutoff_buffer,
+            partition_algorithm, rank, world_size, device, profiler, edge_weighted,
+            ring_exchange=False,
+        )
+
+        # Unpack result to get redistributed atoms (ignore comm_maps from regular partition)
+        new_pos, new_vel, new_Z, new_gid, _, _, interior_mask = result
+
+        # In single-node per-node mode: no inter-node ghosts, so empty comm_maps
+        # All atoms within the node are shared via all_gather, not ghost exchange
+        empty_send_map = {}
+        empty_recv_indices = {}
+
+        # For single-node, all atoms are "interior" since there are no inter-node boundaries
+        # Each GPU's atoms are interior to the node
+        interior_mask = torch.ones(new_pos.size(0), dtype=torch.bool, device=device)
+
+        # Calculate node_atom_counts for single node case using NEW positions (after redistribution)
+        local_count = torch.tensor([new_pos.size(0)], dtype=torch.long, device=device)
+        all_counts = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(world_size)]
+        dist.all_gather(all_counts, local_count)
+
+        per_node_info = {
+            'gpus_per_node': gpus_per_node,
+            'num_nodes': 1,
+            'node_id': 0,
+            'local_gpu_id': local_gpu_id,
+            'node_atom_counts': [c.item() for c in all_counts],
+        }
+
+        return new_pos, new_vel, new_Z, new_gid, empty_send_map, empty_recv_indices, interior_mask, per_node_info
+    
+    # ======================================================================
+    # Step 1: SFC partition into num_nodes partitions
+    # ======================================================================
+    if profiler:
+        profiler.start("sfc_partition")
+    
+    # Each GPU calls distributed partition with num_nodes partitions
+    # The partition_id now represents which NODE the atom should go to
+    if "kdtree" in partition_algorithm:
+        local_node_partition_id, metadata = distributed_kdtree_partition(
+            local_coords=local_pos,
+            num_partitions=num_nodes,
+            device=device,
+            local_edge_counts=None,
+        )
+    else:
+        curve_type = "hilbert" if "hilbert" in partition_algorithm else "morton"
+        local_node_partition_id, metadata = distributed_sfc_partition(
+            local_coords=local_pos,
+            num_partitions=num_nodes,
+            curve_type=curve_type,
+            device=device,
+            local_edge_counts=None,  # Skip edge weighting for now
+        )
+    
+    # Convert node partition_id to GPU rank: each atom goes to the first GPU of target node
+    # Then we'll scatter within node
+    # For all_to_all, target_rank = node_id * gpus_per_node + local_gpu_id
+    # But all_to_all needs per-rank split, so we route all atoms for a node to that node's GPU 
+    # with the same local_gpu_id as sender (round-robin load balance across node GPUs)
+    local_target_rank = local_node_partition_id * gpus_per_node + local_gpu_id
+    
+    # Compute send counts for all_to_all (per rank)
+    send_counts = torch.bincount(local_target_rank.long(), minlength=world_size).to(dtype=torch.long)
+    
+    # Transpose send_counts via all_to_all to get recv_counts
+    recv_counts = torch.zeros(world_size, dtype=torch.long, device=device)
+
+    dist.all_to_all_single(recv_counts, send_counts)
+    
+    if profiler:
+        profiler.stop("sfc_partition")
+    
+    # ======================================================================
+    # Step 2: Atom redistribution via all-to-all
+    # ======================================================================
+    if profiler:
+        profiler.start("atom_redistribute")
+    
+    send_counts_list = [int(c) for c in send_counts.tolist()]
+    recv_counts_list = [int(c) for c in recv_counts.tolist()]
+    total_recv = sum(recv_counts_list)
+    
+    # Sort by target rank
+    sort_indices = torch.argsort(local_target_rank)
+    sorted_pos = local_pos[sort_indices]
+    sorted_vel = local_vel[sort_indices]
+    sorted_Z = local_Z[sort_indices]
+    sorted_gid = local_gid[sort_indices] if has_gid else None
+    
+    # Pack: [pos(3) + vel(3) + Z(1) + gid(1)] = 8 floats per atom
+    packed_send = torch.cat([
+        sorted_pos,
+        sorted_vel,
+        sorted_Z.float().unsqueeze(1),
+        (sorted_gid.float().unsqueeze(1) if has_gid else torch.zeros(N_local, 1, device=device))
+    ], dim=1)
+    
+    packed_recv = torch.zeros((total_recv, 8), dtype=torch.float32, device=device)
+    
+
+    dist.all_to_all_single(
+        packed_recv, packed_send,
+        output_split_sizes=recv_counts_list,
+        input_split_sizes=send_counts_list
+    )
+    
+    new_pos = packed_recv[:, 0:3].contiguous()
+    new_vel = packed_recv[:, 3:6].contiguous()
+    new_Z = packed_recv[:, 6].long()
+    new_gid = packed_recv[:, 7].long() if has_gid else None
+    
+    if profiler:
+        profiler.stop("atom_redistribute")
+    
+    # ======================================================================
+    # Step 3: Build node-aware halo maps (only inter-node ghosts)
+    # ======================================================================
+    if profiler:
+        profiler.start("build_halo_maps")
+    
+    ghost_cutoff = cutoff + ghost_cutoff_buffer
     
     send_map, recv_ghost_indices, interior_mask = distributed_build_halo_maps(
         local_pos=new_pos,
@@ -525,13 +755,46 @@ def do_partition_and_redistribute(
         pbc=pbc,
         rank=rank,
         world_size=world_size,
-        device=device
+        device=device,
+        per_node_partition=True,
+        gpus_per_node=gpus_per_node
     )
     
     if profiler:
         profiler.stop("build_halo_maps")
     
-    return new_pos, new_vel, new_Z, new_gid, send_map, recv_ghost_indices, interior_mask
+    # ======================================================================
+    # Step 4: Compute node atom counts (needed for intra-node all_gather)
+    # ======================================================================
+    # Gather atom counts from all GPUs in this node
+    my_count = torch.tensor([new_pos.size(0)], dtype=torch.long, device=device)
+    # Use all_gather on the global group and filter to get per-node counts
+    all_counts = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(world_size)]
+
+    dist.all_gather(all_counts, my_count)
+    
+    node_start_rank = node_id * gpus_per_node
+    node_atom_counts = [all_counts[node_start_rank + i].item() for i in range(gpus_per_node)]
+    
+    per_node_info = {
+        'gpus_per_node': gpus_per_node,
+        'num_nodes': num_nodes,
+        'node_id': node_id,
+        'local_gpu_id': local_gpu_id,
+        'node_atom_counts': node_atom_counts,  # [N_gpu0, N_gpu1, N_gpu2, N_gpu3]
+        'num_local_on_gpu': new_pos.size(0),
+    }
+    
+    if rank == 0:
+        total_node_atoms = sum(node_atom_counts)
+        n_inter_ghosts = sum(len(v) for v in recv_ghost_indices.values())
+        print(f"Per-node partition: {num_nodes} nodes, {gpus_per_node} GPUs/node")
+        print(f"  Node 0: {total_node_atoms} atoms, {n_inter_ghosts} inter-node ghosts")
+        print(f"  GPU atom counts: {node_atom_counts}")
+        int_count = interior_mask.sum().item()
+        print(f"  Interior atoms (node-level): {int_count}/{new_pos.size(0)} ({100*int_count/new_pos.size(0):.1f}%)")
+    
+    return new_pos, new_vel, new_Z, new_gid, send_map, recv_ghost_indices, interior_mask, per_node_info
 
 
 # -----------------------------------------------------------------------------
@@ -603,8 +866,6 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
     else:
         velocities = all_velocities[start_idx:end_idx]
     
-    rank0_print(f"Partitioning into {world_size} ranks using {cfg.dist.partition_algorithm} (distributed)...")
-    
     # Prepare local data on device
     local_pos = torch.from_numpy(positions).to(device)
     local_vel = torch.from_numpy(velocities).to(device)
@@ -617,27 +878,72 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
     else:
         local_gid = None
     
+    # === DATA PARALLEL PROCESS GROUPS ===
+    # Setup process groups early if per_node_partition is enabled
+    intra_group = None
+    per_node_params = None
+    
+    if cfg.dist.per_node_partition and world_size > 1 and dist_is_enabled():
+        gpus_per_node = torch.cuda.device_count()
+        num_nodes = world_size // gpus_per_node
+        node_id = rank // gpus_per_node
+        
+        # Create intra-node groups
+        for n in range(num_nodes):
+            ranks = list(range(n * gpus_per_node, (n + 1) * gpus_per_node))
+            g = dist.new_group(ranks)
+            if rank in ranks:
+                intra_group = g
+        
+        rank0_print(f"Per-node partitioning enabled: {num_nodes} nodes, {gpus_per_node} GPUs/node")
+
     # === DISTRIBUTED PARTITION AND REDISTRIBUTE ===
     rank0_print(f"Partitioning into {world_size} ranks using {cfg.dist.partition_algorithm} (distributed)...")
     
     if world_size > 1:
-        (local_pos, local_vel, local_Z, local_gid, 
-         my_send_map, my_recv_indices, my_interior_mask) = do_partition_and_redistribute(
-            local_pos=local_pos,
-            local_vel=local_vel,
-            local_Z=local_Z,
-            local_gid=local_gid,
-            cell=cell,
-            pbc=pbc,
-            cutoff=cfg.dist.cutoff,
-            ghost_cutoff_buffer=cfg.dist.ghost_cutoff_buffer,
-            partition_algorithm=cfg.dist.partition_algorithm,
-            rank=rank,
-            world_size=world_size,
-            device=device,
-            edge_weighted=cfg.dist.edge_weighted_partition
-        )
+        if cfg.dist.per_node_partition:
+             (local_pos, local_vel, local_Z, local_gid, 
+              my_send_map, my_recv_indices, my_interior_mask, per_node_info) = do_per_node_partition_and_redistribute(
+                local_pos=local_pos,
+                local_vel=local_vel,
+                local_Z=local_Z,
+                local_gid=local_gid,
+                cell=cell,
+                pbc=pbc,
+                cutoff=cfg.dist.cutoff,
+                ghost_cutoff_buffer=cfg.dist.ghost_cutoff_buffer,
+                partition_algorithm=cfg.dist.partition_algorithm,
+                rank=rank,
+                world_size=world_size,
+                device=device,
+                edge_weighted=cfg.dist.edge_weighted_partition
+            )
+             per_node_params = {
+                 'intra_group': intra_group,
+                 'use_nvshmem': cfg.dist.use_nvshmem,
+                 **per_node_info
+             }
+        else:
+            (local_pos, local_vel, local_Z, local_gid,
+             my_send_map, my_recv_indices, my_interior_mask) = do_partition_and_redistribute(
+                local_pos=local_pos,
+                local_vel=local_vel,
+                local_Z=local_Z,
+                local_gid=local_gid,
+                cell=cell,
+                pbc=pbc,
+                cutoff=cfg.dist.cutoff,
+                ghost_cutoff_buffer=cfg.dist.ghost_cutoff_buffer,
+                partition_algorithm=cfg.dist.partition_algorithm,
+                rank=rank,
+                world_size=world_size,
+                device=device,
+                edge_weighted=cfg.dist.edge_weighted_partition,
+                ring_exchange=cfg.dist.ring_exchange,
+            )
+
         N_local = local_pos.size(0)
+        # Use simple sum for logging (interior mask logic differs per mode)
         print(f"  Rank {rank}: {my_interior_mask.sum().item()}/{N_local} interior atoms ({100*my_interior_mask.sum().item()/N_local:.1f}%)")
     else:
         my_send_map = {}
@@ -696,14 +1002,22 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
         # Build my_comm_map in expected format: {recv_rank: indices_to_send}
         # my_recv_indices tells us where to place received ghost data
         calc = DistributedCalculator(
-            calc, 
-            cutoff, 
-            comm_map=my_send_map, 
-            interior_mask=my_interior_mask, 
+            calc,
+            cutoff,
+            comm_map=my_send_map,
+            interior_mask=my_interior_mask,
             enable_overlap=cfg.dist.overlap,
             recv_ghost_indices=my_recv_indices,
-            hierarchical_params=hierarchical_params
+            hierarchical_params=hierarchical_params,
+            per_node_params=per_node_params
         )
+        # Replace exchanger with RingExchanger if ring_exchange is enabled
+        if cfg.dist.ring_exchange:
+            calc.exchanger = RingExchanger(
+                calc.rank, calc.world_size, my_send_map, device,
+                recv_ghost_indices=my_recv_indices
+            )
+            rank0_print("Ring exchange ENABLED (isend/irecv with rank n-1, n+1 only)")
     else:
         # Single rank: still wrap with DistributedCalculator for consistent profiling path
         calc = DistributedCalculator(
@@ -715,12 +1029,44 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
             recv_ghost_indices={}
         )
     
+    # Differentiable feature exchange: backward auto-sends ghost grads
+    calc.differentiable_exchange = cfg.dist.differentiable_exchange
+    if cfg.dist.differentiable_exchange and rank == 0:
+        print("Differentiable feature exchange ENABLED (adds L backward all_to_all for ghost gradients)")
+
+    # Optimization #2: Skip energy all-reduce on non-logging steps.
+    # MD integration only needs forces; energy is for monitoring.
+    calc._energy_allreduce_interval = cfg.md.log_interval
+
     local_atoms.calc = calc
-    
+
+    # === NVSHMEM INITIALIZATION ===
+    # Must happen after DistributedCalculator is created but before first calculate()
+    # The model's set_comm_maps (called during first calculate) will create the
+    # NVSHMEMNodeFeatureExchanger. We pre-initialize NVSHMEM here so it's ready.
+    if cfg.dist.use_nvshmem and cfg.dist.per_node_partition and world_size > 1:
+        import baseline.nvshmem_ext as nvshmem_ext
+        # JIT compile on rank 0 only, then barrier, then all ranks load
+        if rank == 0:
+            rank0_print("Compiling NVSHMEM extension...")
+            nvshmem_ext.compile()
+            rank0_print("NVSHMEM extension compiled.")
+        dist.barrier()
+        # UniqueID bootstrap: rank 0 generates ID, broadcast to all, then init
+        # NCCL backend only supports CUDA tensors, so move to GPU for broadcast
+        if rank == 0:
+            uid = nvshmem_ext.get_unique_id().cuda()
+        else:
+            uid = torch.zeros(128, dtype=torch.uint8, device='cuda')
+        dist.broadcast(uid, src=0)
+        nvshmem_ext.init(uid.cpu(), rank, world_size)
+        rank0_print("NVSHMEM initialized for inter-node feature exchange")
+
     # === PROFILER SETUP ===
     step_profiler = StepProfiler(enabled=cfg.profiler.enabled, rank=rank)
     if isinstance(calc, DistributedCalculator):
         calc.set_profiler(step_profiler)
+        calc.measure_bw = cfg.profiler.measure_bw
     else:
         # Single-rank case: set profiler directly on FAIRChemCalculator
         calc._profiler = step_profiler
@@ -740,6 +1086,29 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
     # Print initial energy before MD starts
     init_energy = local_atoms.get_potential_energy()
     rank0_print(f"Step 0 (initial): Total Energy = {init_energy:.4f} eV")
+
+    # Save initial forces (before any MD steps) for force comparison
+    if cfg.md.traj_interval > 0:
+        init_forces = local_atoms.get_forces()
+        init_positions = local_atoms.get_positions()
+        init_local_energy = calc.results.get('local_energy', init_energy) if hasattr(calc, 'results') else init_energy
+        init_save_dict = {
+            'step': -1,
+            'positions': init_positions,
+            'energy': init_local_energy,
+            'forces': init_forces,
+            'atomic_numbers': local_atoms.get_atomic_numbers(),
+        }
+        if local_atoms.has("global_id"):
+            init_save_dict['global_id'] = local_atoms.get_array("global_id")
+        init_path = os.path.join(output_dir, f"traj_step_init_rank{rank}.npz")
+        np.savez(init_path, **init_save_dict)
+
+    # Reset calc step counter so MD step N maps to _calc_step N.
+    # The init call above incremented _calc_step to 1; resetting to 0
+    # ensures log_interval-aligned steps (100, 200, ...) hit the
+    # energy allreduce condition (_calc_step % interval == 0).
+    calc._calc_step = 0
     
 
     while total_done < total_steps:
@@ -759,30 +1128,54 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
             local_gid = torch.tensor(local_atoms.get_array("global_id"), dtype=torch.int64, device=device) if has_gid else None
             
             # Call unified partition and redistribute function
-            (new_pos, new_vel, new_Z, new_gid, 
-             my_send_map, my_recv_indices, my_interior_mask) = do_partition_and_redistribute(
-                local_pos=local_pos,
-                local_vel=local_vel,
-                local_Z=local_Z,
-                local_gid=local_gid,
-                cell=cell,
-                pbc=pbc,
-                cutoff=cfg.dist.cutoff,
-                ghost_cutoff_buffer=cfg.dist.ghost_cutoff_buffer,
-                partition_algorithm=cfg.dist.partition_algorithm,
-                rank=rank,
-                world_size=world_size,
-                device=device,
-                profiler=step_profiler,
-                edge_weighted=cfg.dist.edge_weighted_partition
-            )
-            
+            if cfg.dist.per_node_partition:
+                (new_pos, new_vel, new_Z, new_gid, 
+                 my_send_map, my_recv_indices, my_interior_mask, per_node_info) = do_per_node_partition_and_redistribute(
+                    local_pos=local_pos,
+                    local_vel=local_vel,
+                    local_Z=local_Z,
+                    local_gid=local_gid,
+                    cell=cell,
+                    pbc=pbc,
+                    cutoff=cfg.dist.cutoff,
+                    ghost_cutoff_buffer=cfg.dist.ghost_cutoff_buffer,
+                    partition_algorithm=cfg.dist.partition_algorithm,
+                    rank=rank,
+                    world_size=world_size,
+                    device=device,
+                    profiler=step_profiler,
+                    edge_weighted=cfg.dist.edge_weighted_partition
+                )
+                # Update per_node_params with new info (intra_group stays same)
+                per_node_params.update(per_node_info)
+            else:
+                (new_pos, new_vel, new_Z, new_gid,
+                 my_send_map, my_recv_indices, my_interior_mask) = do_partition_and_redistribute(
+                    local_pos=local_pos,
+                    local_vel=local_vel,
+                    local_Z=local_Z,
+                    local_gid=local_gid,
+                    cell=cell,
+                    pbc=pbc,
+                    cutoff=cfg.dist.cutoff,
+                    ghost_cutoff_buffer=cfg.dist.ghost_cutoff_buffer,
+                    partition_algorithm=cfg.dist.partition_algorithm,
+                    rank=rank,
+                    world_size=world_size,
+                    device=device,
+                    profiler=step_profiler,
+                    edge_weighted=cfg.dist.edge_weighted_partition,
+                    ring_exchange=cfg.dist.ring_exchange,
+                )
+
             # Update calculator with new maps
             if isinstance(calc, DistributedCalculator):
-                calc.exchanger = HaloExchanger(
-                    rank, world_size, my_send_map, device, 
+                ExchangerClass = RingExchanger if cfg.dist.ring_exchange else HaloExchanger
+                calc.exchanger = ExchangerClass(
+                    rank, world_size, my_send_map, device,
                     recv_ghost_indices=my_recv_indices
                 )
+                calc.exchanger._measure_bw = cfg.profiler.measure_bw
                 calc.interior_mask = my_interior_mask.to(device) if my_interior_mask is not None else None
                 # CRITICAL: Invalidate caches after repartition
                 calc._cached_local_Z_tensor = None
@@ -790,6 +1183,14 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
                 calc._cached_num_local = None
                 calc._cached_num_ghosts = None
                 calc._comm_map_version += 1  # Invalidate comm map cache
+                
+                # Update per-node params if applicable
+                if cfg.dist.per_node_partition:
+                    calc.per_node_params = per_node_params
+                    # Must trigger set_comm_maps update which happens in _prepare_combined_atoms
+                    # The cache invalidation above is sufficient for maps, but we also need to update
+                    # atom counts in the exchanger. This happens automatically via set_comm_maps
+                    # because we update calc.per_node_params which is passed to set_comm_maps.
             
             # Update local atoms
             local_atoms = ase.Atoms(
@@ -888,13 +1289,22 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
                 dyn.run(steps=cfg.md.steps_per_episode)
         
         if dist_is_enabled():
-            log_nccl_call(__file__, 860, "barrier_episode_end")
+
             dist.barrier()
         run_time = time.time() - start_time
         
         # Report profiling for this episode (only rank 0 prints to stdout)
         if rank == 0:
             step_profiler.report()
+
+        # Bandwidth report (all ranks print since BW may differ)
+        if cfg.profiler.measure_bw and isinstance(calc, DistributedCalculator):
+            calc.exchanger.bw_report()
+            model = calc.calculator.predictor.model
+            if hasattr(model, 'module'):
+                model = model.module
+            if hasattr(model, 'backbone') and hasattr(model.backbone, 'exchanger'):
+                model.backbone.exchanger.bw_report()
         
         # Save profiling results to CSV for ALL ranks
         current_episode = total_done // cfg.md.steps_per_episode
@@ -937,7 +1347,7 @@ def run_md_simulation_distributed(calc, cfg: AppConfig, rank: int, world_size: i
         
     
     if dist_is_enabled():
-        log_nccl_call(__file__, 908, "barrier_final")
+
         dist.barrier()
         dist.destroy_process_group()
 
@@ -1041,6 +1451,9 @@ def setup_calculator(cfg, rank, world_size, device="cuda", use_barrier=True):
             
             if settings.compile:
                 torch._dynamo.config.cache_size_limit = cfg.uma.dynamo_cache_size
+                # Suppress dynamo errors so it falls back to eager instead of crashing
+                # (distributed forward has NCCL ops and dynamic control flow)
+                torch._dynamo.config.suppress_errors = True
 
             # print(f"[DEBUG] Rank {rank}: Preparing overrides...", flush=True)
             with Timer(f"Setting up calculator ({cfg.uma.model})"):
@@ -1068,7 +1481,7 @@ def setup_calculator(cfg, rank, world_size, device="cuda", use_barrier=True):
                 
     if dist_is_enabled() and use_barrier:
         # print(f"[DEBUG] Rank {rank}: Entering dist.barrier() after calculator setup...", flush=True)
-        log_nccl_call(__file__, 1040, "barrier_setup_calc")
+
         dist.barrier()
         # print(f"[DEBUG] Rank {rank}: dist.barrier() completed", flush=True)
     
@@ -1104,6 +1517,8 @@ def main(cfg: AppConfig) -> None:
                 f.write(OmegaConf.to_yaml(cfg))
     
     print(f"Rank {rank}: Config processed. Output dir: {cfg.output_dir}")
+    if rank == 0:
+        pass  # per_node_partition config validated
 
     # Set device
     device = "cpu"

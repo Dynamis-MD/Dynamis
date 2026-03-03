@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 import ase
 from typing import Dict, List, Optional, Tuple
-from baseline.nccl_debug import log_nccl_call
+
 
 from baseline.local_fairchem.graph.radius_graph_pbc import radius_graph_pbc_v2
 
@@ -162,7 +162,9 @@ def distributed_build_halo_maps(
     pbc: torch.Tensor,
     rank: int,
     world_size: int,
-    device: torch.device
+    device: torch.device,
+    per_node_partition: bool = False,
+    gpus_per_node: int = 4
 ) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor], torch.Tensor]:
     """
     Distributed halo map construction - each rank computes independently.
@@ -171,6 +173,11 @@ def distributed_build_halo_maps(
     1. all_gather local_pos to get full_pos
     2. Each rank builds full edge graph (same result due to deterministic computation)
     3. Each rank extracts its own send/recv maps
+    
+    When per_node_partition=True:
+    - Only inter-node atoms are ghosts (intra-node atoms accessed via all_gather)
+    - send_map/recv_ghost_indices only contain inter-node entries
+    - Interior mask: atom whose ALL neighbors are in the same NODE
     
     Returns:
         send_map: {recv_rank: local_indices_to_send}
@@ -182,14 +189,14 @@ def distributed_build_halo_maps(
     # Step 1: All-gather positions to get full graph
     local_count = torch.tensor([N_local], dtype=torch.long, device=device)
     all_counts = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(world_size)]
-    log_nccl_call(__file__, 185, "all_gather_counts")
+
     dist.all_gather(all_counts, local_count)
     counts = [c.item() for c in all_counts]
     total_atoms = sum(counts)
     
     # All-gather positions
     all_pos_list = [torch.zeros((c, 3), dtype=torch.float32, device=device) for c in counts]
-    log_nccl_call(__file__, 191, "all_gather_pos")
+
     dist.all_gather(all_pos_list, local_pos.contiguous())
     full_pos = torch.cat(all_pos_list, dim=0)
     
@@ -220,13 +227,23 @@ def distributed_build_halo_maps(
         rank_start_indices.append(rank_start_indices[-1] + c)
     
     my_start = rank_start_indices[rank]
-    my_end = my_start + counts[rank]
+
+    # Helper: check if two ranks are on the same node
+    if per_node_partition:
+        my_node = rank // gpus_per_node
+        def is_inter_node(r):
+            return r // gpus_per_node != my_node
+    else:
+        def is_inter_node(r):
+            return r != rank  # All other ranks are "inter" in per-GPU mode
     
     # Find edges where source is mine and destination is another rank
     my_atoms_mask = (partition_id[src] == rank)
     for recv_rank in range(world_size):
         if recv_rank == rank:
             continue
+        if per_node_partition and not is_inter_node(recv_rank):
+            continue  # Skip intra-node: handled by all_gather
         # Edges: my atoms -> recv_rank's atoms
         # These are atoms I need to send to recv_rank
         needs_send_mask = my_atoms_mask & (partition_id[dst] == recv_rank)
@@ -246,6 +263,8 @@ def distributed_build_halo_maps(
     for send_rank in range(world_size):
         if send_rank == rank:
             continue
+        if per_node_partition and not is_inter_node(send_rank):
+            continue  # Skip intra-node: handled by all_gather
         # Edges: send_rank's atoms -> my atoms
         needs_recv_mask = (partition_id[src] == send_rank) & dst_is_mine
         if needs_recv_mask.any():
@@ -267,32 +286,79 @@ def distributed_build_halo_maps(
             my_recv_indices[send_rank] = ghost_slots.cpu()
     
     # Step 4: Compute interior mask
-    # Interior atom = local atom whose ALL neighbors are also local (same rank)
-    # Find edges where dst is my atom but src is from a different rank
-    src_is_ghost = (partition_id[src] != rank)
-    has_ghost_neighbor = torch.zeros(counts[rank], dtype=torch.bool, device=device)
-    
-    ghost_edges_to_me = dst_is_mine & src_is_ghost
-    if ghost_edges_to_me.any():
-        # Convert dst to local indices
-        local_dst = dst[ghost_edges_to_me] - my_start
-        if local_dst.numel() > 0:
-            has_ghost_neighbor.scatter_(0, local_dst, True)
-    
-    interior_mask = ~has_ghost_neighbor
+    if per_node_partition:
+        # Interior atom = local atom whose ALL neighbors are in the same NODE
+        # (not just same GPU — intra-node neighbors are free via NVLink)
+        src_node = partition_id[src] // gpus_per_node
+        src_is_inter_node = (src_node != my_node)
+        has_inter_node_neighbor = torch.zeros(counts[rank], dtype=torch.bool, device=device)
+        
+        ghost_edges_to_me = dst_is_mine & src_is_inter_node
+        if ghost_edges_to_me.any():
+            local_dst = dst[ghost_edges_to_me] - my_start
+            if local_dst.numel() > 0:
+                has_inter_node_neighbor.scatter_(0, local_dst, True)
+        
+        interior_mask = ~has_inter_node_neighbor
+    else:
+        # Original: interior = all neighbors same GPU
+        src_is_ghost = (partition_id[src] != rank)
+        has_ghost_neighbor = torch.zeros(counts[rank], dtype=torch.bool, device=device)
+        
+        ghost_edges_to_me = dst_is_mine & src_is_ghost
+        if ghost_edges_to_me.any():
+            local_dst = dst[ghost_edges_to_me] - my_start
+            if local_dst.numel() > 0:
+                has_ghost_neighbor.scatter_(0, local_dst, True)
+        
+        interior_mask = ~has_ghost_neighbor
     
     return my_send_map, my_recv_indices, interior_mask.cpu()
 
 
+def _measure_a2a_bandwidth(label, output_tensor, input_tensor, output_split_sizes,
+                           input_split_sizes, device, rank, bw_log, async_op=False):
+    """Measure all_to_all_single bandwidth with barrier + CUDA events.
+
+    Inserts dist.barrier() to sync all ranks, then times only the communication.
+    Returns (work_handle_or_None, elapsed_ms).
+    """
+    torch.cuda.synchronize()
+    dist.barrier()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    work = dist.all_to_all_single(output_tensor, input_tensor,
+                                  output_split_sizes=output_split_sizes,
+                                  input_split_sizes=input_split_sizes,
+                                  async_op=async_op)
+    if not async_op:
+        end.record()
+        torch.cuda.synchronize()
+        elapsed_ms = start.elapsed_time(end)
+        send_bytes = input_tensor.nelement() * input_tensor.element_size()
+        recv_bytes = output_tensor.nelement() * output_tensor.element_size()
+        total_bytes = max(send_bytes, recv_bytes)
+        bw_GBs = total_bytes / (elapsed_ms * 1e-3) / 1e9 if elapsed_ms > 0 else 0
+        bw_log.append({
+            'label': label, 'elapsed_ms': elapsed_ms,
+            'send_bytes': send_bytes, 'recv_bytes': recv_bytes, 'bw_GBs': bw_GBs
+        })
+        return None
+    else:
+        return (work, start, end)
+
+
 class HaloExchanger:
     """Exchanges ghost atom data between MPI ranks for distributed MD."""
-    
-    def __init__(self, rank: int, world_size: int, comm_map: Dict[int, torch.Tensor], 
+
+    def __init__(self, rank: int, world_size: int, comm_map: Dict[int, torch.Tensor],
                  device: torch.device, recv_ghost_indices: Dict[int, torch.Tensor] = None):
         self.rank = rank
         self.world_size = world_size
         self.comm_map = {r: indices.to(device) for r, indices in comm_map.items()} # Dict[target_rank, local_indices_to_send]
         self.device = device
+        self.bw_log = []  # bandwidth measurement log
         
         # Store recv_ghost_indices if provided (from distributed halo map)
         self._recv_ghost_indices_precomputed = None
@@ -317,7 +383,7 @@ class HaloExchanger:
             
         # All-to-all to get recv counts
         recv_counts_tensor = torch.zeros(self.world_size, dtype=torch.int32, device=self.device)
-        log_nccl_call(__file__, 318, "all_to_all_exchange_counts")
+
         dist.all_to_all_single(recv_counts_tensor, send_counts)
         
         self.recv_counts = {}
@@ -404,10 +470,14 @@ class HaloExchanger:
         output_tensor = torch.zeros((self._total_recv, 7), dtype=torch.float32, device=self.device)
         
         # 3. All-to-All
-        log_nccl_call(__file__, 392, "all_to_all_exchange_ghosts")
-        dist.all_to_all_single(output_tensor, input_tensor, 
-                               output_split_sizes=self._recv_split_sizes, 
-                               input_split_sizes=self._send_split_sizes)
+        if getattr(self, '_measure_bw', False):
+            _measure_a2a_bandwidth('ghost_exchange', output_tensor, input_tensor,
+                                   self._recv_split_sizes, self._send_split_sizes,
+                                   self.device, self.rank, self.bw_log)
+        else:
+            dist.all_to_all_single(output_tensor, input_tensor,
+                                   output_split_sizes=self._recv_split_sizes,
+                                   input_split_sizes=self._send_split_sizes)
         
         # 4. Unpack
         if self._total_recv == 0:
@@ -441,15 +511,19 @@ class HaloExchanger:
         recv_tensor = torch.zeros((self._total_force_recv, 3), dtype=local_forces.dtype, device=self.device)
         
         # Exchange using pre-computed splits
-        log_nccl_call(__file__, 463, "all_to_all_reduce_forces")
-        dist.all_to_all_single(recv_tensor, send_tensor, 
-                               output_split_sizes=self._force_recv_splits, 
-                               input_split_sizes=self._force_send_splits)
-        
+        if getattr(self, '_measure_bw', False):
+            _measure_a2a_bandwidth('force_reduction', recv_tensor, send_tensor,
+                                   self._force_recv_splits, self._force_send_splits,
+                                   self.device, self.rank, self.bw_log)
+        else:
+            dist.all_to_all_single(recv_tensor, send_tensor,
+                                   output_split_sizes=self._force_recv_splits,
+                                   input_split_sizes=self._force_send_splits)
+
         # Scatter to local forces
         if self._reduction_indices.numel() > 0:
              local_forces.index_add_(0, self._reduction_indices, recv_tensor)
-                
+
         return local_forces
     
     def reduce_forces_start(self, local_forces, ghost_forces):
@@ -468,25 +542,209 @@ class HaloExchanger:
             
         recv_tensor = torch.zeros((self._total_force_recv, 3), dtype=local_forces.dtype, device=self.device)
         
-        log_nccl_call(__file__, 463, "all_to_all_reduce_forces_async")
-        work = dist.all_to_all_single(recv_tensor, send_tensor, 
-                                       output_split_sizes=self._force_recv_splits, 
-                                       input_split_sizes=self._force_send_splits,
-                                       async_op=True)
-        
-        return (work, recv_tensor, local_forces)
-    
+
+        if getattr(self, '_measure_bw', False):
+            result = _measure_a2a_bandwidth('force_reduction_async', recv_tensor, send_tensor,
+                                            self._force_recv_splits, self._force_send_splits,
+                                            self.device, self.rank, self.bw_log,
+                                            async_op=True)
+            work, start_evt, end_evt = result
+            return (work, recv_tensor, local_forces, start_evt, end_evt)
+        else:
+            work = dist.all_to_all_single(recv_tensor, send_tensor,
+                                           output_split_sizes=self._force_recv_splits,
+                                           input_split_sizes=self._force_send_splits,
+                                           async_op=True)
+            return (work, recv_tensor, local_forces)
+
     def reduce_forces_wait(self, handle):
         """
         Area 4: Wait for async force reduction and scatter results.
         """
         if handle is None:
             return None
-        
-        work, recv_tensor, local_forces = handle
-        work.wait()
-        
+
+        if len(handle) == 5:
+            work, recv_tensor, local_forces, start_evt, end_evt = handle
+            work.wait()
+            end_evt.record()
+            torch.cuda.synchronize()
+            elapsed_ms = start_evt.elapsed_time(end_evt)
+            send_bytes = recv_tensor.nelement() * recv_tensor.element_size()  # approx
+            bw_GBs = send_bytes / (elapsed_ms * 1e-3) / 1e9 if elapsed_ms > 0 else 0
+            self.bw_log.append({
+                'label': 'force_reduction_async', 'elapsed_ms': elapsed_ms,
+                'send_bytes': send_bytes, 'recv_bytes': send_bytes, 'bw_GBs': bw_GBs
+            })
+        else:
+            work, recv_tensor, local_forces = handle
+            work.wait()
+
         if self._reduction_indices.numel() > 0:
             local_forces.index_add_(0, self._reduction_indices, recv_tensor)
-        
+
         return local_forces
+
+    def bw_report(self):
+        """Print bandwidth measurement summary."""
+        if not self.bw_log:
+            return
+        from collections import defaultdict
+        stats = defaultdict(list)
+        for entry in self.bw_log:
+            stats[entry['label']].append(entry)
+        print(f"\n[Rank {self.rank}] === Halo Exchange Bandwidth Report ===")
+        print(f"{'Operation':<25} {'Count':>6} {'Avg ms':>8} {'Min ms':>8} {'Max ms':>8} "
+              f"{'Avg Send':>12} {'Avg Recv':>12} {'Avg BW GB/s':>12}")
+        print("-" * 103)
+        for label, entries in sorted(stats.items()):
+            times = [e['elapsed_ms'] for e in entries]
+            sends = [e['send_bytes'] for e in entries]
+            recvs = [e['recv_bytes'] for e in entries]
+            bws = [e['bw_GBs'] for e in entries]
+            def fmt_bytes(b):
+                if b > 1e6: return f"{b/1e6:.2f} MB"
+                if b > 1e3: return f"{b/1e3:.1f} KB"
+                return f"{b:.0f} B"
+            print(f"{label:<25} {len(entries):>6} {sum(times)/len(times):>8.3f} "
+                  f"{min(times):>8.3f} {max(times):>8.3f} "
+                  f"{fmt_bytes(sum(sends)/len(sends)):>12} "
+                  f"{fmt_bytes(sum(recvs)/len(recvs)):>12} "
+                  f"{sum(bws)/len(bws):>12.3f}")
+        print()
+
+
+def distributed_build_ring_halo_maps(
+    local_pos: torch.Tensor,    # [N_local, 3]
+    cutoff: float,
+    cell: torch.Tensor,
+    pbc: torch.Tensor,
+    rank: int,
+    world_size: int,
+    device: torch.device,
+) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor], torch.Tensor]:
+    """
+    Build halo maps for ring exchange topology.
+
+    Only considers rank n-1 and rank n+1 as communication neighbors
+    (modulo world_size for PBC). This is correct when using a slab/PCA-slab
+    partition where each slab's thickness >= cutoff.
+
+    Returns same format as distributed_build_halo_maps:
+        send_map: {recv_rank: local_indices_to_send}
+        recv_ghost_indices: {send_rank: local_ghost_indices_to_receive_at}
+        interior_mask: boolean mask for interior atoms [N_local]
+    """
+    N_local = local_pos.size(0)
+
+    # Determine ring neighbors
+    left = (rank - 1) % world_size
+    right = (rank + 1) % world_size
+    ring_neighbors = set()
+    if world_size > 1:
+        ring_neighbors.add(left)
+        ring_neighbors.add(right)
+
+    # Step 1: All-gather positions to get full graph
+    local_count = torch.tensor([N_local], dtype=torch.long, device=device)
+    all_counts = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(world_size)]
+    dist.all_gather(all_counts, local_count)
+    counts = [c.item() for c in all_counts]
+    total_atoms = sum(counts)
+
+    all_pos_list = [torch.zeros((c, 3), dtype=torch.float32, device=device) for c in counts]
+    dist.all_gather(all_pos_list, local_pos.contiguous())
+    full_pos = torch.cat(all_pos_list, dim=0)
+
+    # Create global partition_id
+    partition_id = torch.zeros(total_atoms, dtype=torch.long, device=device)
+    offset = 0
+    for r, c in enumerate(counts):
+        partition_id[offset:offset+c] = r
+        offset += c
+
+    # Step 2: Build full edge graph
+    edge_index, _ = _build_edges_cutoff_fairchem_raw(full_pos, cutoff, cell, pbc)
+    edge_index = edge_index.to(device)
+    src, dst = edge_index
+
+    # Compute start indices for each rank
+    rank_start_indices = [0]
+    for c in counts[:-1]:
+        rank_start_indices.append(rank_start_indices[-1] + c)
+
+    my_start = rank_start_indices[rank]
+
+    # Step 3: Build send_map and recv_ghost_indices (only ring neighbors)
+    my_send_map = {}
+    my_recv_indices = {}
+
+    my_atoms_mask = (partition_id[src] == rank)
+    for recv_rank in ring_neighbors:
+        needs_send_mask = my_atoms_mask & (partition_id[dst] == recv_rank)
+        if needs_send_mask.any():
+            global_indices = src[needs_send_mask].unique()
+            local_indices = global_indices - my_start
+            my_send_map[recv_rank] = local_indices.to(torch.int32).cpu()
+
+    dst_is_mine = (partition_id[dst] == rank)
+    ghost_offset = N_local
+
+    for send_rank in ring_neighbors:
+        needs_recv_mask = (partition_id[src] == send_rank) & dst_is_mine
+        if needs_recv_mask.any():
+            global_ghost_indices = src[needs_recv_mask].unique()
+            n_ghosts = len(global_ghost_indices)
+            ghost_slots = torch.arange(
+                ghost_offset,
+                ghost_offset + n_ghosts,
+                device=device,
+                dtype=torch.long
+            )
+            ghost_offset += n_ghosts
+            my_recv_indices[send_rank] = ghost_slots.cpu()
+
+    # Step 4: Interior mask — atom has no ghost neighbor from ring neighbors
+    src_is_ghost = torch.zeros(edge_index.size(1), dtype=torch.bool, device=device)
+    for nbr in ring_neighbors:
+        src_is_ghost |= (partition_id[src] == nbr)
+
+    has_ghost_neighbor = torch.zeros(counts[rank], dtype=torch.bool, device=device)
+    ghost_edges_to_me = dst_is_mine & src_is_ghost
+    if ghost_edges_to_me.any():
+        local_dst = dst[ghost_edges_to_me] - my_start
+        if local_dst.numel() > 0:
+            has_ghost_neighbor.scatter_(0, local_dst, True)
+
+    interior_mask = ~has_ghost_neighbor
+
+    return my_send_map, my_recv_indices, interior_mask.cpu()
+
+
+class RingExchanger(HaloExchanger):
+    """Exchanges ghost atom data using ring topology (only rank n-1, n+1).
+
+    Drop-in replacement for HaloExchanger when using slab/PCA-slab partition.
+    Inherits from HaloExchanger and uses the same all_to_all_single transport
+    (NCCL does not support true P2P isend/irecv without deadlocks).
+
+    The ring topology benefit comes from the partition: only 2 neighbors have
+    non-zero split sizes in all_to_all, reducing data transferred.
+    """
+
+    def __init__(self, rank: int, world_size: int, comm_map: Dict[int, torch.Tensor],
+                 device: torch.device, recv_ghost_indices: Dict[int, torch.Tensor] = None):
+        # Filter comm_map to ring neighbors only
+        left = (rank - 1) % world_size
+        right = (rank + 1) % world_size
+        ring_neighbors = {left, right} if world_size > 1 else set()
+
+        filtered_comm_map = {r: indices for r, indices in comm_map.items()
+                             if r in ring_neighbors}
+        filtered_recv = None
+        if recv_ghost_indices is not None:
+            filtered_recv = {r: indices for r, indices in recv_ghost_indices.items()
+                             if r in ring_neighbors}
+
+        super().__init__(rank, world_size, filtered_comm_map, device,
+                         recv_ghost_indices=filtered_recv)

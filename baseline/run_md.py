@@ -126,10 +126,25 @@ def run_serial_md(calc, cfg: AppConfig, profiler: CUDAEventProfiler = None) -> N
     print(f"Total steps: {cfg.md.total_steps}")
     print(f"Output directory: {output_dir}")
     
+    # Save initial forces (before any MD steps) for force comparison
+    init_energy = atoms.get_potential_energy()
+    init_forces = atoms.get_forces()
+    init_positions = atoms.get_positions()
+    n_atoms = len(atoms)
+    init_path = os.path.join(output_dir, "traj_step_init.npz")
+    np.savez(init_path,
+             step=-1,
+             positions=init_positions,
+             energy=init_energy,
+             forces=init_forces,
+             atomic_numbers=atoms.get_atomic_numbers(),
+             global_id=np.arange(n_atoms, dtype=np.int64))
+    print(f"Step 0 (initial): Total Energy = {init_energy:.4f} eV")
+
     # Run MD
     total_done = 0
     total_started = time.time()
-    
+
     step = 0
     while step < cfg.md.total_steps:
         # Create dynamics integrator
@@ -170,7 +185,6 @@ def run_serial_md(calc, cfg: AppConfig, profiler: CUDAEventProfiler = None) -> N
             step_forces = atoms.get_forces()
             step_positions = atoms.get_positions()
             
-            # Save trajectory data to NPZ file
             # Save trajectory data to NPZ file
             traj_data_path = os.path.join(output_dir, f"traj_step_{total_done}.npz")
             n_atoms = len(atoms)

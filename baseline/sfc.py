@@ -11,7 +11,7 @@ import numpy as np
 from typing import List, Tuple, Dict, Optional
 import time
 import torch.distributed as dist
-from baseline.nccl_debug import log_nccl_call
+
 
 
 def hilbert_curve_index_tensor(coords: torch.Tensor, order: int = 7, normalize: bool = True) -> torch.Tensor:
@@ -363,9 +363,9 @@ def distributed_sfc_partition(
     # All-reduce to get global bounds
     global_min = local_min.clone()
     global_max = local_max.clone()
-    log_nccl_call(__file__, 365, "all_reduce_min")
+
     dist.all_reduce(global_min, op=dist.ReduceOp.MIN)
-    log_nccl_call(__file__, 367, "all_reduce_max")
+
     dist.all_reduce(global_max, op=dist.ReduceOp.MAX)
     
     # Normalize using global bounds
@@ -396,14 +396,14 @@ def distributed_sfc_partition(
     # First exchange counts
     local_count = torch.tensor([N_local], dtype=torch.long, device=device)
     all_counts = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(world_size)]
-    log_nccl_call(__file__, 397, "all_gather_counts")
+
     dist.all_gather(all_counts, local_count)
     counts = [c.item() for c in all_counts]
     total_atoms = sum(counts)
     
     # Prepare buffers for all-gather
     all_keys_list = [torch.zeros(c, dtype=torch.long, device=device) for c in counts]
-    log_nccl_call(__file__, 403, "all_gather_keys")
+
     dist.all_gather(all_keys_list, local_keys)
     
     # Concatenate all keys
@@ -413,7 +413,7 @@ def distributed_sfc_partition(
     use_weighted = local_edge_counts is not None
     if use_weighted:
         all_edge_counts_list = [torch.zeros(c, dtype=torch.long, device=device) for c in counts]
-        log_nccl_call(__file__, 413, "all_gather_edge_counts")
+
         dist.all_gather(all_edge_counts_list, local_edge_counts.to(device))
         all_edge_counts = torch.cat(all_edge_counts_list, dim=0)
     
@@ -490,6 +490,431 @@ def distributed_sfc_partition(
         "send_counts_matrix": send_counts_matrix  # Added for optimization
     }
     
+    return local_partition_id, metadata
+
+
+# ---------------------------------------------------------------------------
+# KD-Tree partition (single-process and distributed)
+# ---------------------------------------------------------------------------
+
+def kdtree_partition(
+    coords: torch.Tensor,
+    num_partitions: int,
+    device: Optional[torch.device] = None,
+    edge_counts: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """
+    KD-Tree partition: recursive bisection on the longest axis using GPU torch ops.
+
+    Args:
+        coords: Tensor of shape [N, 3] containing (x, y, z) coordinates
+        num_partitions: Number of partitions
+        device: Device to run computation on
+        edge_counts: Optional tensor of edge counts per atom. If provided,
+                    split by cumulative edge cost instead of atom count.
+
+    Returns:
+        Tuple of (partition_labels, metadata)
+    """
+    if device is None:
+        device = coords.device
+
+    start_time = time.perf_counter()
+    coords = coords.to(device)
+    N = coords.size(0)
+    labels = torch.zeros(N, dtype=torch.long, device=device)
+    use_weighted = edge_counts is not None
+    if use_weighted:
+        edge_counts = edge_counts.to(device)
+
+    def _bisect(idx: torch.Tensor, parts: int, base_label: int):
+        if parts <= 1 or idx.numel() == 0:
+            labels[idx] = base_label
+            return
+        sub_coords = coords[idx]
+        extent = sub_coords.max(dim=0).values - sub_coords.min(dim=0).values
+        axis = extent.argmax().item()
+        _, order = sub_coords[:, axis].sort()
+        sorted_idx = idx[order]
+
+        left_parts = parts // 2
+        right_parts = parts - left_parts
+
+        if not use_weighted:
+            mid = sorted_idx.size(0) // 2
+        else:
+            sorted_w = edge_counts[sorted_idx].float()
+            cumsum = sorted_w.cumsum(dim=0)
+            target = cumsum[-1] / 2.0
+            mid = (cumsum >= target).nonzero(as_tuple=False)[0].item()
+            mid = max(1, min(mid, sorted_idx.size(0) - 1))
+
+        _bisect(sorted_idx[:mid], left_parts, base_label)
+        _bisect(sorted_idx[mid:], right_parts, base_label + left_parts)
+
+    _bisect(torch.arange(N, device=device), num_partitions, 0)
+
+    partition_time = time.perf_counter() - start_time
+    metadata = {
+        "partition_time": partition_time,
+        "method": "kdtree" + ("_weighted" if use_weighted else ""),
+        "weighted": use_weighted,
+    }
+    return labels, metadata
+
+
+def distributed_kdtree_partition(
+    local_coords: torch.Tensor,
+    num_partitions: int,
+    device: Optional[torch.device] = None,
+    local_edge_counts: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """
+    Distributed KD-Tree partition: all-gather coordinates, then each rank
+    independently runs the same recursive bisection.
+
+    Communication: all-gather N×3 float32 coords (+ N×1 int64 weights if weighted).
+    For 1M atoms this is ~12 MB coords + 8 MB weights = 20 MB — negligible.
+
+    The interface and return values are identical to distributed_sfc_partition,
+    so it can be used as a drop-in replacement.
+
+    Args:
+        local_coords: Tensor of shape [N_local, 3] containing local coordinates
+        num_partitions: Number of partitions (typically world_size)
+        device: Device to run computation on
+        local_edge_counts: Optional tensor of edge counts per local atom.
+
+    Returns:
+        Tuple of (local_partition_id, metadata)
+        - local_partition_id: partition assignment for each LOCAL atom
+        - metadata: timing and method info (includes send_counts_matrix)
+    """
+    import torch.distributed as dist
+
+    if device is None:
+        device = local_coords.device
+
+    start_time = time.perf_counter()
+    local_coords = local_coords.to(device)
+    N_local = local_coords.size(0)
+
+    # Fallback for single-process
+    if not dist.is_initialized() or dist.get_world_size() <= 1:
+        return kdtree_partition(local_coords, num_partitions, device, local_edge_counts)
+
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+
+    # Step 1: Exchange counts
+    local_count = torch.tensor([N_local], dtype=torch.long, device=device)
+    all_counts = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(world_size)]
+    dist.all_gather(all_counts, local_count)
+    counts = [c.item() for c in all_counts]
+    total_atoms = sum(counts)
+
+    # Step 2: All-gather coordinates (N_total x 3, float32)
+    all_coords_list = [torch.zeros(c, 3, dtype=torch.float32, device=device) for c in counts]
+    dist.all_gather(all_coords_list, local_coords.float())
+    all_coords = torch.cat(all_coords_list, dim=0)
+
+    # Step 3: All-gather edge counts if weighted
+    use_weighted = local_edge_counts is not None
+    all_edge_counts = None
+    if use_weighted:
+        all_edge_counts_list = [torch.zeros(c, dtype=torch.long, device=device) for c in counts]
+        dist.all_gather(all_edge_counts_list, local_edge_counts.to(device))
+        all_edge_counts = torch.cat(all_edge_counts_list, dim=0)
+
+    # Step 4: Each rank independently runs KD-tree on global data
+    global_partition_id = torch.zeros(total_atoms, dtype=torch.long, device=device)
+
+    def _bisect(idx: torch.Tensor, parts: int, base_label: int):
+        if parts <= 1 or idx.numel() == 0:
+            global_partition_id[idx] = base_label
+            return
+        sub_coords = all_coords[idx]
+        extent = sub_coords.max(dim=0).values - sub_coords.min(dim=0).values
+        axis = extent.argmax().item()
+        _, order = sub_coords[:, axis].sort()
+        sorted_idx = idx[order]
+
+        left_parts = parts // 2
+        right_parts = parts - left_parts
+
+        if not use_weighted:
+            mid = sorted_idx.size(0) // 2
+        else:
+            sorted_w = all_edge_counts[sorted_idx].float()
+            cumsum = sorted_w.cumsum(dim=0)
+            target = cumsum[-1] / 2.0
+            mid = (cumsum >= target).nonzero(as_tuple=False)[0].item()
+            mid = max(1, min(mid, sorted_idx.size(0) - 1))
+
+        _bisect(sorted_idx[:mid], left_parts, base_label)
+        _bisect(sorted_idx[mid:], right_parts, base_label + left_parts)
+
+    _bisect(torch.arange(total_atoms, device=device), num_partitions, 0)
+
+    # Step 5: Extract local partition IDs
+    start_idx = sum(counts[:rank])
+    end_idx = start_idx + N_local
+    local_partition_id = global_partition_id[start_idx:end_idx]
+
+    # Step 6: Compute send_counts_matrix (same as distributed_sfc_partition)
+    send_counts_matrix = torch.zeros((world_size, world_size), dtype=torch.long, device=device)
+    offset = 0
+    for sender in range(world_size):
+        sender_count = counts[sender]
+        sender_partition_ids = global_partition_id[offset:offset + sender_count]
+        for receiver in range(world_size):
+            send_counts_matrix[sender, receiver] = (sender_partition_ids == receiver).sum()
+        offset += sender_count
+
+    partition_time = time.perf_counter() - start_time
+    metadata = {
+        "partition_time": partition_time,
+        "method": "distributed_kdtree" + ("_weighted" if use_weighted else ""),
+        "total_atoms": total_atoms,
+        "local_atoms": N_local,
+        "weighted": use_weighted,
+        "send_counts_matrix": send_counts_matrix,
+    }
+    return local_partition_id, metadata
+
+
+# ---------------------------------------------------------------------------
+# PCA Slab partition (single-process and distributed)
+# ---------------------------------------------------------------------------
+
+def pca_slab_partition(
+    coords: torch.Tensor,
+    num_partitions: int,
+    device: Optional[torch.device] = None,
+    edge_counts: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """
+    PCA Slab partition: project atoms onto the principal component direction
+    (direction of maximum variance), then partition along this 1D projection.
+
+    Guarantees ring communication topology: rank n's neighbors are only on
+    rank n-1 and rank n+1 (provided slab thickness > cutoff radius).
+
+    Args:
+        coords: Tensor of shape [N, 3] containing (x, y, z) coordinates
+        num_partitions: Number of partitions
+        device: Device to run computation on
+        edge_counts: Optional tensor of edge counts per atom for weighted partitioning
+
+    Returns:
+        Tuple of (partition_labels, metadata)
+    """
+    if device is None:
+        device = coords.device
+
+    start_time = time.perf_counter()
+    coords = coords.to(device)
+    N = coords.size(0)
+    use_weighted = edge_counts is not None
+
+    # Compute PCA direction (eigenvector of largest eigenvalue of covariance)
+    centered = coords - coords.mean(dim=0)
+    cov = centered.T @ centered  # [3, 3]
+    eigenvalues, eigenvectors = torch.linalg.eigh(cov)
+    principal_dir = eigenvectors[:, -1]  # largest eigenvalue is last
+
+    # Project onto principal direction
+    projections = coords @ principal_dir  # [N]
+
+    # Sort by projection
+    sorted_indices = torch.argsort(projections)
+
+    # Partition into contiguous segments
+    partition_id = torch.zeros(N, dtype=torch.long, device=device)
+
+    if use_weighted:
+        edge_counts = edge_counts.to(device)
+        sorted_costs = edge_counts[sorted_indices].float()
+        cumulative_costs = sorted_costs.cumsum(dim=0)
+        total_cost = cumulative_costs[-1].item()
+        target_cost_per_partition = total_cost / num_partitions
+
+        current_idx = 0
+        for p in range(num_partitions):
+            if p == num_partitions - 1:
+                partition_id[sorted_indices[current_idx:]] = p
+            else:
+                target = (p + 1) * target_cost_per_partition
+                mask = cumulative_costs >= target
+                if mask.any():
+                    end_idx = mask.nonzero()[0].item() + 1
+                else:
+                    end_idx = N
+                end_idx = max(end_idx, current_idx + 1)
+                partition_id[sorted_indices[current_idx:end_idx]] = p
+                current_idx = end_idx
+    else:
+        atoms_per_partition = N // num_partitions
+        remainder = N % num_partitions
+        current_idx = 0
+        for p in range(num_partitions):
+            partition_size = atoms_per_partition + (1 if p < remainder else 0)
+            end_idx = current_idx + partition_size
+            partition_id[sorted_indices[current_idx:end_idx]] = p
+            current_idx = end_idx
+
+    partition_time = time.perf_counter() - start_time
+    metadata = {
+        "partition_time": partition_time,
+        "method": "pca_slab" + ("_weighted" if use_weighted else ""),
+        "weighted": use_weighted,
+        "principal_dir": principal_dir.cpu().numpy().tolist(),
+    }
+    return partition_id, metadata
+
+
+def distributed_pca_slab_partition(
+    local_coords: torch.Tensor,
+    num_partitions: int,
+    device: Optional[torch.device] = None,
+    local_edge_counts: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """
+    Distributed PCA Slab partition: all-gather coordinates, compute global PCA
+    direction, project and partition. Each rank independently computes the same
+    result (deterministic).
+
+    Guarantees ring communication topology when slab thickness > cutoff.
+
+    Args:
+        local_coords: Tensor of shape [N_local, 3] containing local coordinates
+        num_partitions: Number of partitions (typically world_size)
+        device: Device to run computation on
+        local_edge_counts: Optional tensor of edge counts per local atom
+
+    Returns:
+        Tuple of (local_partition_id, metadata)
+    """
+    import torch.distributed as dist
+
+    if device is None:
+        device = local_coords.device
+
+    start_time = time.perf_counter()
+    local_coords = local_coords.to(device)
+    N_local = local_coords.size(0)
+
+    # Fallback for single-process
+    if not dist.is_initialized() or dist.get_world_size() <= 1:
+        return pca_slab_partition(local_coords, num_partitions, device, local_edge_counts)
+
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+
+    # Step 1: Exchange counts
+    local_count = torch.tensor([N_local], dtype=torch.long, device=device)
+    all_counts = [torch.zeros(1, dtype=torch.long, device=device) for _ in range(world_size)]
+    dist.all_gather(all_counts, local_count)
+    counts = [c.item() for c in all_counts]
+    total_atoms = sum(counts)
+
+    # Step 2: All-gather coordinates
+    all_coords_list = [torch.zeros(c, 3, dtype=torch.float32, device=device) for c in counts]
+    dist.all_gather(all_coords_list, local_coords.float())
+    all_coords = torch.cat(all_coords_list, dim=0)
+
+    # Step 3: All-gather edge counts if weighted
+    use_weighted = local_edge_counts is not None
+    all_edge_counts = None
+    if use_weighted:
+        all_edge_counts_list = [torch.zeros(c, dtype=torch.long, device=device) for c in counts]
+        dist.all_gather(all_edge_counts_list, local_edge_counts.to(device))
+        all_edge_counts = torch.cat(all_edge_counts_list, dim=0)
+
+    # Step 4: Compute global PCA direction
+    centered = all_coords - all_coords.mean(dim=0)
+    cov = centered.T @ centered  # [3, 3]
+    eigenvalues, eigenvectors = torch.linalg.eigh(cov)
+    principal_dir = eigenvectors[:, -1]  # largest eigenvalue
+
+    # Project all atoms onto principal direction
+    projections = all_coords @ principal_dir  # [total_atoms]
+
+    # Sort by projection
+    sorted_indices = torch.argsort(projections)
+
+    # Partition into contiguous segments
+    global_partition_id = torch.zeros(total_atoms, dtype=torch.long, device=device)
+
+    if use_weighted:
+        sorted_costs = all_edge_counts[sorted_indices].float()
+        cumulative_costs = sorted_costs.cumsum(dim=0)
+        total_cost = cumulative_costs[-1].item()
+        target_cost_per_partition = total_cost / num_partitions
+
+        current_idx = 0
+        for p in range(num_partitions):
+            if p == num_partitions - 1:
+                global_partition_id[sorted_indices[current_idx:]] = p
+            else:
+                target = (p + 1) * target_cost_per_partition
+                mask = cumulative_costs >= target
+                if mask.any():
+                    end_idx = mask.nonzero()[0].item() + 1
+                else:
+                    end_idx = total_atoms
+                end_idx = max(end_idx, current_idx + 1)
+                global_partition_id[sorted_indices[current_idx:end_idx]] = p
+                current_idx = end_idx
+    else:
+        atoms_per_partition = total_atoms // num_partitions
+        remainder = total_atoms % num_partitions
+        current_idx = 0
+        for p in range(num_partitions):
+            partition_size = atoms_per_partition + (1 if p < remainder else 0)
+            end_idx = current_idx + partition_size
+            global_partition_id[sorted_indices[current_idx:end_idx]] = p
+            current_idx = end_idx
+
+    # Step 5: Extract local partition IDs
+    start_idx = sum(counts[:rank])
+    end_idx = start_idx + N_local
+    local_partition_id = global_partition_id[start_idx:end_idx]
+
+    # Step 6: Compute send_counts_matrix
+    send_counts_matrix = torch.zeros((world_size, world_size), dtype=torch.long, device=device)
+    offset = 0
+    for sender in range(world_size):
+        sender_count = counts[sender]
+        sender_partition_ids = global_partition_id[offset:offset + sender_count]
+        for receiver in range(world_size):
+            send_counts_matrix[sender, receiver] = (sender_partition_ids == receiver).sum()
+        offset += sender_count
+
+    # Compute slab thickness for diagnostics
+    # Min distance between non-adjacent partition boundaries along principal direction
+    proj_sorted = projections[sorted_indices]
+    slab_thicknesses = []
+    current_idx = 0
+    for p in range(num_partitions):
+        count_p = (global_partition_id == p).sum().item()
+        slab_start = proj_sorted[current_idx].item()
+        slab_end = proj_sorted[current_idx + count_p - 1].item()
+        slab_thicknesses.append(slab_end - slab_start)
+        current_idx += count_p
+
+    partition_time = time.perf_counter() - start_time
+    metadata = {
+        "partition_time": partition_time,
+        "method": "distributed_pca_slab" + ("_weighted" if use_weighted else ""),
+        "total_atoms": total_atoms,
+        "local_atoms": N_local,
+        "weighted": use_weighted,
+        "send_counts_matrix": send_counts_matrix,
+        "principal_dir": principal_dir.cpu().numpy().tolist(),
+        "slab_thicknesses": slab_thicknesses,
+        "min_slab_thickness": min(slab_thicknesses) if slab_thicknesses else 0.0,
+    }
     return local_partition_id, metadata
 
 
