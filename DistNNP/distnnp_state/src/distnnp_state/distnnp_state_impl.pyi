@@ -1,7 +1,7 @@
 from __future__ import annotations
 import torch
 import typing
-__all__: list[str] = ['DistEnvironment', 'DistNNPState', 'MolecularInfo', 'PartitionMessagePassingInfo']
+__all__: list[str] = ['DistEnvironment', 'DistNNPState', 'MolecularInfo', 'PartitionMessagePassingInfo', 'SimulationConfig', 'SimpleSpatialPartitioner']
 class DistEnvironment:
     def __init__(self) -> None:
         ...
@@ -53,11 +53,30 @@ class MolecularInfo:
     @num_atoms.setter
     def num_atoms(self, arg0: typing.SupportsInt) -> None:
         ...
+class SimulationConfig:
+    cutoff: float
+    ghost_cutoff_buffer: float
+    cell: torch.Tensor
+    pbc: torch.Tensor
+    def __init__(self) -> None:
+        ...
 class PartitionMessagePassingInfo:
+    partition_id: torch.Tensor
     global_send_recv_matrix: torch.Tensor
-    halo_map: torch.Tensor
     local_atom_positions: torch.Tensor
     local_atom_velocities: torch.Tensor
     partition_indices: torch.Tensor
+    send_offsets: torch.Tensor
+    send_local_indices: torch.Tensor
+    recv_offsets: torch.Tensor
+    recv_ghost_indices: torch.Tensor
+    interior_mask: torch.Tensor
     def __init__(self) -> None:
+        ...
+class SimpleSpatialPartitioner:
+    def __init__(self) -> None:
+        ...
+    def partition(self, state: MolecularInfo, env: DistEnvironment) -> PartitionMessagePassingInfo:
+        ...
+    def build_halo_maps(self, info: PartitionMessagePassingInfo, global_state: MolecularInfo, env: DistEnvironment, config: SimulationConfig) -> None:
         ...
