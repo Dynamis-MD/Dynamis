@@ -10,7 +10,8 @@ PYBIND11_MODULE(distnnp_state_impl, m)
       .def_readwrite("num_atoms", &distnnp_state::MolecularInfo::num_atoms)
       .def_readwrite("atom_indices", &distnnp_state::MolecularInfo::atom_indices)
       .def_readwrite("atom_positions", &distnnp_state::MolecularInfo::atom_positions)
-      .def_readwrite("atom_velocities", &distnnp_state::MolecularInfo::atom_velocities);
+      .def_readwrite("atom_velocities", &distnnp_state::MolecularInfo::atom_velocities)
+      .def_readwrite("edge_counts", &distnnp_state::MolecularInfo::edge_counts);
 
   py::class_<distnnp_state::DistEnvironment>(m, "DistEnvironment")
       .def(py::init<>())
@@ -38,13 +39,30 @@ PYBIND11_MODULE(distnnp_state_impl, m)
       .def_readwrite("send_local_indices", &distnnp_state::PartitionMessagePassingInfo::send_local_indices)
       .def_readwrite("recv_offsets", &distnnp_state::PartitionMessagePassingInfo::recv_offsets)
       .def_readwrite("recv_ghost_indices", &distnnp_state::PartitionMessagePassingInfo::recv_ghost_indices)
-      .def_readwrite("interior_mask", &distnnp_state::PartitionMessagePassingInfo::interior_mask);
+      .def_readwrite("interior_mask", &distnnp_state::PartitionMessagePassingInfo::interior_mask)
+      .def_readwrite("edge_index", &distnnp_state::PartitionMessagePassingInfo::edge_index)
+      .def_readwrite("edge_index_halo", &distnnp_state::PartitionMessagePassingInfo::edge_index_halo);
 
   py::class_<distnnp_state::DistNNPState>(m, "DistNNPState")
       .def(py::init<>())
       .def_readwrite("dist_env", &distnnp_state::DistNNPState::dist_env)
       .def_readwrite("global_molecular_info", &distnnp_state::DistNNPState::global_molecular_info)
       .def_readwrite("local_partition_info", &distnnp_state::DistNNPState::local_partition_info);
+
+  py::class_<distnnp_state::KDTreePartitioner>(m, "KDTreePartitioner")
+      .def(py::init<>())
+      .def("partition",
+           py::overload_cast<const distnnp_state::MolecularInfo &,
+                             const distnnp_state::DistEnvironment &>(
+               &distnnp_state::KDTreePartitioner::partition),
+           "Partition: unweighted (default) or user-weighted (if edge_counts set)")
+      .def("partition",
+           py::overload_cast<const distnnp_state::MolecularInfo &,
+                             const distnnp_state::DistEnvironment &,
+                             const distnnp_state::SimulationConfig &>(
+               &distnnp_state::KDTreePartitioner::partition),
+           "Partition: auto-compute edge weights via radius_graph_pbc (CUDA)")
+      .def("build_halo_maps", &distnnp_state::KDTreePartitioner::build_halo_maps);
 
   py::class_<distnnp_state::SimpleSpatialPartitioner>(m, "SimpleSpatialPartitioner")
       .def(py::init<>())
