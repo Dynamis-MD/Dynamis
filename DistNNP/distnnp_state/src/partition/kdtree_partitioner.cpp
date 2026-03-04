@@ -7,6 +7,7 @@
 //      → builds graph at cutoff, computes edge_counts, stores edge_index
 
 #include "distnnp_state/partitioner.hpp"
+#include "partition/kdtree_cuda_.h"
 #include "radius_pbc/radius_pbc_.h"
 
 namespace distnnp_state
@@ -77,10 +78,15 @@ static PartitionMessagePassingInfo do_partition(
     int64_t W = static_cast<int64_t>(env.world_size);
     int64_t R = static_cast<int64_t>(env.global_rank);
 
-    auto labels = torch::zeros({N}, long_opts);
-    auto all_idx = torch::arange(N, long_opts);
-
-    kdtree_bisect(all_idx, labels, state.atom_positions, weights, W, 0);
+    torch::Tensor labels;
+    if (device.is_cuda()) {
+        labels = kdtree_bisect_cuda(
+            state.atom_positions.to(torch::kFloat), weights, W);
+    } else {
+        labels = torch::zeros({N}, long_opts);
+        auto all_idx = torch::arange(N, long_opts);
+        kdtree_bisect(all_idx, labels, state.atom_positions, weights, W, 0);
+    }
 
     info.partition_id = labels;
 
