@@ -1,0 +1,59 @@
+    Uninstalling distnnp_state-0.1.0:
+      Successfully uninstalled distnnp_state-0.1.0
+Successfully installed distnnp_state-0.1.0
+============================= test session starts ==============================
+platform linux -- Python 3.12.12, pytest-9.0.2, pluggy-1.6.0 -- /u/hqin1/ldata/miniconda3/envs/DistNNP/bin/python
+cachedir: .pytest_cache
+rootdir: /projects/bcpt/hqin1/git/DistNNP/DistNNP/distnnp_state
+configfile: pyproject.toml
+plugins: anyio-4.12.0, syrupy-5.0.0, hydra-core-1.3.2, cov-7.0.0
+collecting ... collected 22 items
+
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_rank0_gets_first_quarter[cpu] PASSED [  4%]
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_rank0_gets_first_quarter[cuda] PASSED [  9%]
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_last_rank_gets_remainder[cpu] PASSED [ 13%]
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_last_rank_gets_remainder[cuda] PASSED [ 18%]
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_partition_id_correct[cpu] PASSED [ 22%]
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_partition_id_correct[cuda] PASSED [ 27%]
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_all_ranks_cover_all_atoms[cpu] PASSED [ 31%]
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_all_ranks_cover_all_atoms[cuda] PASSED [ 36%]
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_positions_match_global[cpu] PASSED [ 40%]
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_positions_match_global[cuda] PASSED [ 45%]
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_diagonal_send_recv_matrix[cpu] PASSED [ 50%]
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_diagonal_send_recv_matrix[cuda] PASSED [ 54%]
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_output_device[cpu] PASSED [ 59%]
+distnnp_state/tests/test_simple_partitioner.py::TestCppPartitioner::test_output_device[cuda] PASSED [ 63%]
+distnnp_state/tests/test_simple_partitioner.py::TestBuildHaloMaps::test_halo_fields_populated PASSED [ 68%]
+distnnp_state/tests/test_simple_partitioner.py::TestBuildHaloMaps::test_self_rank_no_send PASSED [ 72%]
+distnnp_state/tests/test_simple_partitioner.py::TestBuildHaloMaps::test_send_recv_consistency PASSED [ 77%]
+distnnp_state/tests/test_simple_partitioner.py::TestBuildHaloMaps::test_interior_mask_shape PASSED [ 81%]
+distnnp_state/tests/test_simple_partitioner.py::TestBuildHaloMaps::test_output_device_cuda PASSED [ 86%]
+distnnp_state/tests/test_simple_partitioner.py::TestBuildHaloMaps::test_send_recv_matrix_updated PASSED [ 90%]
+distnnp_state/tests/test_simple_partitioner.py::TestBuildHaloMaps::test_send_local_indices_valid PASSED [ 95%]
+distnnp_state/tests/test_simple_partitioner.py::TestBuildHaloMaps::test_recv_ghost_indices_offset PASSED [100%]
+
+============================= 22 passed in 54.36s ==============================
+============================= test session starts ==============================
+platform linux -- Python 3.12.12, pytest-9.0.2, pluggy-1.6.0 -- /u/hqin1/ldata/miniconda3/envs/DistNNP/bin/python
+cachedir: .pytest_cache
+rootdir: /projects/bcpt/hqin1/git/DistNNP/DistNNP/distnnp_state
+configfile: pyproject.toml
+plugins: anyio-4.12.0, syrupy-5.0.0, hydra-core-1.3.2, cov-7.0.0
+collecting ... collected 14 items
+
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestCubicCell::test_small_cubic PASSED [  7%]
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestCubicCell::test_medium_cubic PASSED [ 14%]
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestCubicCell::test_large_cutoff_small_box PASSED [ 21%]
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestTriclinicCell::test_triclinic PASSED [ 28%]
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestPartialPBC::test_pbc_xy_only PASSED [ 35%]
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestPartialPBC::test_no_pbc PASSED [ 42%]
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestEdgeCases::test_empty PASSED [ 50%]
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestEdgeCases::test_single_atom_with_pbc PASSED [ 57%]
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestEdgeCases::test_single_atom_no_pbc PASSED [ 64%]
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestSelectiveReplication::test_source_count_less_than_full PASSED [ 71%]
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestMaxNeighbors::test_max_neighbors_strict PASSED [ 78%]
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestMaxNeighbors::test_max_neighbors_no_limit PASSED [ 85%]
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestLargeSystem::test_1k_atoms PASSED [ 92%]
+distnnp_state/tests/test_radius_graph_pbc_cuda.py::TestPythonWrapper::test_wrapper_single_image PASSED [100%]
+
+============================== 14 passed in 8.21s ==============================
