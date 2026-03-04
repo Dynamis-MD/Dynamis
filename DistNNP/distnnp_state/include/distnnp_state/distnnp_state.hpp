@@ -20,23 +20,43 @@ namespace distnnp_state
         unsigned long local_rank;
     };
 
+    struct SimulationConfig
+    {
+        double cutoff;                // Neighbor cutoff radius
+        double ghost_cutoff_buffer;   // Extra buffer for ghost zone (default 0.5)
+        torch::Tensor cell;           // [3, 3] simulation cell matrix
+        torch::Tensor pbc;            // [3] periodic boundary conditions (int, 0 or 1)
+    };
+
     struct PartitionMessagePassingInfo
     {
-        torch::Tensor partition_indices; // Tensor of shape [num_local_atoms] containing global atom indices for this partition
-        torch::Tensor local_atom_positions; // Tensor of shape [num_local_atoms, 3] containing local atomic positions for this partition
-        torch::Tensor local_atom_velocities; // Tensor of shape [num_local_atoms, 3] containing local atomic velocities for this partition
-        torch::Tensor global_send_recv_matrix; // Tensor of shape [world_size, world_size] containing the number of atoms to send from each rank to every other rank
-        torch::Tensor halo_map; // Tensor of shape sum(global_send_recv_matrix[global_rank]) containing the global atom indices of the halo atoms that this partition needs to receive from other ranks
+        // --- Partition assignment ---
+        torch::Tensor partition_id;             // [num_atoms] rank assignment for every atom
+
+        // --- Partition results ---
+        torch::Tensor partition_indices;        // [num_local] global atom indices for this rank
+        torch::Tensor local_atom_positions;     // [num_local, 3]
+        torch::Tensor local_atom_velocities;    // [num_local, 3]
+        torch::Tensor global_send_recv_matrix;  // [world_size, world_size]
+
+        // --- Halo communication maps (CSR, push-only) ---
+        torch::Tensor send_offsets;       // [world_size + 1] CSR row pointers
+        torch::Tensor send_local_indices; // [total_send] local atom indices to push to neighbors
+        torch::Tensor recv_offsets;       // [world_size + 1] CSR row pointers
+        torch::Tensor recv_ghost_indices; // [total_recv] local ghost slot indices
+
+        // --- Interior mask ---
+        torch::Tensor interior_mask;      // [num_local] bool, true = all neighbors are local
     };
-    
+
     struct DistNNPState
     {
       // Distributed environment information
       DistEnvironment dist_env;
 
-      // Molecular system information      
+      // Molecular system information
       MolecularInfo global_molecular_info; // Contains global atom information for the entire system
-      
+
       // Partitioned data information
       MolecularInfo local_partition_info; // Contains local atom information for this partition
 
