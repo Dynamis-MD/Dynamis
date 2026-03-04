@@ -53,6 +53,7 @@ python_add_library(distnnp_state_impl
     WITH_SOABI
     src/distnnp_state_bindings.cpp
     src/partition/simple_spatial_partitioner.cpp
+    src/partition/kdtree_partitioner.cpp
     src/partition/build_halo_maps.cpp
     src/radius_pbc/radius_pbc_.cpp
     src/radius_pbc/radius_pbc.cu
@@ -98,7 +99,7 @@ LIBRARY DESTINATION .)
 # Manually install the type marker and stubs if they exist
 install(FILES
     "src/distnnp_state/py.typed"
-    "src/distnnp_state/distnnp_state.pyi"
+    "src/distnnp_state/distnnp_state_impl.pyi"
     DESTINATION .
     OPTIONAL
 )
