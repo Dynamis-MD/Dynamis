@@ -9,6 +9,7 @@ namespace distnnp_state
         torch::Tensor atom_indices; // Tensor of shape [num_atoms] containing global atom indices for this partition
         torch::Tensor atom_positions; // Tensor of shape [num_atoms, 3] containing local atomic positions for this partition
         torch::Tensor atom_velocities; // Tensor of shape [num_atoms, 3] containing local atomic velocities for this partition
+        torch::Tensor edge_counts; // [num_atoms], optional per-atom edge cost for weighted partitioning. Undefined = unweighted.
     };
 
     struct DistEnvironment
@@ -37,7 +38,7 @@ namespace distnnp_state
         torch::Tensor partition_indices;        // [num_local] global atom indices for this rank
         torch::Tensor local_atom_positions;     // [num_local, 3]
         torch::Tensor local_atom_velocities;    // [num_local, 3]
-        torch::Tensor global_send_recv_matrix;  // [world_size, world_size]
+        torch::Tensor global_send_recv_matrix;  // [world_size, world_size] — only row[rank] is filled locally; needs all-reduce for full view
 
         // --- Halo communication maps (CSR, push-only) ---
         torch::Tensor send_offsets;       // [world_size + 1] CSR row pointers
@@ -47,6 +48,10 @@ namespace distnnp_state
 
         // --- Interior mask ---
         torch::Tensor interior_mask;      // [num_local] bool, true = all neighbors are local
+
+        // --- Cached graphs (returned for downstream NNP model use) ---
+        torch::Tensor edge_index;         // [2, E] graph at cutoff radius (from auto-weighted partition). Undefined if not built.
+        torch::Tensor edge_index_halo;    // [2, E'] graph at cutoff + ghost_buffer radius (from build_halo_maps). Undefined if not built.
     };
 
     struct DistNNPState
