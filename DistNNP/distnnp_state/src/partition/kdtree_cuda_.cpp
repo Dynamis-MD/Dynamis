@@ -1,6 +1,6 @@
 // kdtree_cuda_.cpp — C++ entry point with input validation for CUDA KD-tree
 
-#include "kdtree_cuda_.h"
+#include "distnnp_state/kdtree_cuda.hpp"
 
 // Forward declaration of internal CUDA implementation (defined in kdtree_cuda.cu)
 at::Tensor kdtree_bisect_cuda_impl(at::Tensor pos, at::Tensor weights, int64_t W);

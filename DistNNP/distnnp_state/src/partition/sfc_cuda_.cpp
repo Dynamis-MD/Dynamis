@@ -1,6 +1,6 @@
 // sfc_cuda_.cpp — C++ entry point with input validation for CUDA SFC partition
 
-#include "sfc_cuda_.h"
+#include "distnnp_state/sfc_cuda.hpp"
 
 // Forward declaration of internal CUDA implementation (defined in sfc_cuda.cu)
 at::Tensor sfc_partition_cuda_impl(at::Tensor pos, at::Tensor weights,
