@@ -11,15 +11,15 @@ class EulerIntegrator:
 class VerletIntegrator:
     def __init__(self) -> None:
         ...
-    def step1(self, pos: torch.Tensor, vel: torch.Tensor, frc: torch.Tensor, mass: torch.Tensor, dt: typing.SupportsFloat) -> None:
+    def halfstep1(self, pos: torch.Tensor, vel: torch.Tensor, frc: torch.Tensor, mass: torch.Tensor, dt: typing.SupportsFloat) -> None:
         ...
-    def step2(self, vel: torch.Tensor, frc: torch.Tensor, mass: torch.Tensor, dt: typing.SupportsFloat) -> None:
+    def halfstep2(self, vel: torch.Tensor, frc: torch.Tensor, mass: torch.Tensor, dt: typing.SupportsFloat) -> None:
         ...
 
 class LangevinIntegrator:
     def __init__(self) -> None:
         ...
-    def step1(self, pos: torch.Tensor, vel: torch.Tensor, frc: torch.Tensor, mass: torch.Tensor, noise: torch.Tensor, gamma: typing.SupportsFloat, kT: typing.SupportsFloat, dt: typing.SupportsFloat) -> None:
+    def halfstep1(self, pos: torch.Tensor, vel: torch.Tensor, frc: torch.Tensor, mass: torch.Tensor, noise: torch.Tensor, gamma: typing.SupportsFloat, kT: typing.SupportsFloat, dt: typing.SupportsFloat) -> None:
         ...
-    def step2(self, vel: torch.Tensor, frc: torch.Tensor, mass: torch.Tensor, noise: torch.Tensor, gamma: typing.SupportsFloat, kT: typing.SupportsFloat, dt: typing.SupportsFloat) -> None:
+    def halfstep2(self, vel: torch.Tensor, frc: torch.Tensor, mass: torch.Tensor, noise: torch.Tensor, gamma: typing.SupportsFloat, kT: typing.SupportsFloat, dt: typing.SupportsFloat) -> None:
         ...

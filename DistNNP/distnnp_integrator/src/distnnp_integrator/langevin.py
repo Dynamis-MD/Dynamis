@@ -35,7 +35,7 @@ class Langevin(DistNNPIntegrator):
         """
         check_devices(pos, vel, frc, mass, noise)
         check_shapes(pos, vel, frc, mass, noise)
-        self.cpp_integrator.step1(pos, vel, frc, mass, noise, self.gamma, self.kT, dt)
+        self.cpp_integrator.halfstep1(pos, vel, frc, mass, noise, self.gamma, self.kT, dt)
 
     def halfstep2_(
         self,
@@ -58,7 +58,7 @@ class Langevin(DistNNPIntegrator):
         """
         check_devices(vel, frc, mass, noise)
         check_shapes(vel, frc, mass, noise)
-        self.cpp_integrator.step2(vel, frc, mass, noise, self.gamma, self.kT, dt)
+        self.cpp_integrator.halfstep2(vel, frc, mass, noise, self.gamma, self.kT, dt)
 
     def step(self, state, model, dt=None):
         """
