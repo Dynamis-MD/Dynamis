@@ -9,6 +9,9 @@ DistNNPState = distnnp_state_impl.DistNNPState
 
 # C++ partitioners (partition + build_halo_maps are both methods)
 SimpleSpatialPartitioner = distnnp_state_impl.SimpleSpatialPartitioner
+KDTreePartitioner = distnnp_state_impl.KDTreePartitioner
+SFCPartitioner = distnnp_state_impl.SFCPartitioner
+SFCCurveType = distnnp_state_impl.SFCCurveType
 
 # CUDA radius graph with PBC
 from distnnp_state.radius_graph_pbc_cuda import radius_graph_pbc_cuda
@@ -20,5 +23,8 @@ __all__ = [
     "PartitionMessagePassingInfo",
     "DistNNPState",
     "SimpleSpatialPartitioner",
+    "KDTreePartitioner",
+    "SFCPartitioner",
+    "SFCCurveType",
     "radius_graph_pbc_cuda",
 ]
