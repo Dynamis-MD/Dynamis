@@ -52,6 +52,8 @@ python_add_library(distnnp_integrator_impl
     WITH_SOABI
     src/distnnp_integrator_bindings.cpp
     src/csrc/euler_integrator.cu
+    src/csrc/verlet_integrator.cu
+    src/csrc/langevin_integrator.cu
 )
 
 target_include_directories(distnnp_integrator_impl
@@ -91,7 +93,7 @@ install(TARGETS distnnp_integrator_impl DESTINATION .)
 # Manually install the type marker and stubs if they exist
 install(FILES
     "src/distnnp_integrator/py.typed"
-    "src/distnnp_integrator/distnnp_integrator.pyi"
+    "src/distnnp_integrator/distnnp_integrator_impl.pyi"
     DESTINATION .
     OPTIONAL
 )
