@@ -61,7 +61,6 @@ python_add_library(distnnp_state_impl
 target_include_directories(distnnp_state_impl
     PRIVATE
     include
-    src
     ${TORCH_INCLUDE_DIRS}
     ${CUDAToolkit_INCLUDE_DIRS}
 )

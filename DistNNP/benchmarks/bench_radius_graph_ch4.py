@@ -13,7 +13,7 @@ import gc
 
 # Load reference implementation directly (avoid baseline __init__.py)
 _ref_path = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "baseline",
+    os.path.dirname(__file__), "..", "..", "baseline",
     "local_fairchem", "graph", "radius_graph_pbc.py"
 )
 _spec = importlib.util.spec_from_file_location("_ref", _ref_path)
@@ -23,7 +23,7 @@ radius_graph_pbc_v2 = _mod.radius_graph_pbc_v2
 
 import distnnp_state.distnnp_state_impl as _impl
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data")
 RADIUS = 6.0
 MAX_NEIGHBORS = 50
 
@@ -247,41 +247,3 @@ if __name__ == "__main__":
             print(f"ch4_{sz}_splited.xyz  -- NOT FOUND, skipping")
 
     print("=" * 145)
-
-"""
-All 14 unit tests pass — correctness verified against v2 reference for cubic, triclinic, partial PBC, no PBC, edge cases, and 1K atom systems.                                                    
-  
-  CH4 benchmark results (1K–1024K atoms, cutoff=6Å):                                                                                                                                                
-                                                                  
-  ┌───────┬───────────┬──────────────┬─────────┬──────────┬────────┐
-  │ Size  │   Atoms   │ Correctness  │ Speedup │ CUDA Mem │ v2 Mem │
-  ├───────┼───────────┼──────────────┼─────────┼──────────┼────────┤
-  │ 1K    │ 999       │ exact match  │ 1.35x   │ 14MB     │ 35MB   │
-  ├───────┼───────────┼──────────────┼─────────┼──────────┼────────┤
-  │ 2K    │ 1,998     │ exact match  │ 1.28x   │ 22MB     │ 62MB   │
-  ├───────┼───────────┼──────────────┼─────────┼──────────┼────────┤
-  │ 4K    │ 3,996     │ exact match  │ 2.25x   │ 35MB     │ 117MB  │
-  ├───────┼───────────┼──────────────┼─────────┼──────────┼────────┤
-  │ 8K    │ 8,001     │ exact match  │ 2.20x   │ 58MB     │ 220MB  │
-  ├───────┼───────────┼──────────────┼─────────┼──────────┼────────┤
-  │ 16K   │ 16,002    │ exact match  │ 2.74x   │ 105MB    │ 426MB  │
-  ├───────┼───────────┼──────────────┼─────────┼──────────┼────────┤
-  │ 32K   │ 32,004    │ exact match  │ 3.49x   │ 195MB    │ 843MB  │
-  ├───────┼───────────┼──────────────┼─────────┼──────────┼────────┤
-  │ 64K   │ 63,999    │ 4 edge diff  │ 4.04x   │ 371MB    │ 1.6GB  │
-  ├───────┼───────────┼──────────────┼─────────┼──────────┼────────┤
-  │ 100K  │ 99,999    │ 4 edge diff  │ 5.81x   │ 505MB    │ 2.5GB  │
-  ├───────┼───────────┼──────────────┼─────────┼──────────┼────────┤
-  │ 128K  │ 127,998   │ exact match  │ 5.64x   │ 639MB    │ 3.3GB  │
-  ├───────┼───────────┼──────────────┼─────────┼──────────┼────────┤
-  │ 256K  │ 255,996   │ 6 edge diff  │ 5.90x   │ 1.2GB    │ 6.5GB  │
-  ├───────┼───────────┼──────────────┼─────────┼──────────┼────────┤
-  │ 512K  │ 512,001   │ 15 edge diff │ 5.96x   │ 2.4GB    │ 13.0GB │
-  ├───────┼───────────┼──────────────┼─────────┼──────────┼────────┤
-  │ 1024K │ 1,024,002 │ 7 edge diff  │ 7.56x   │ 4.8GB    │ 26.0GB │
-  └───────┴───────────┴──────────────┴─────────┴──────────┴────────┘
-
-  The tiny edge differences at larger sizes (<15 out of millions of edges, <0.001%) are float32 boundary effects where atoms sit at exactly the cutoff distance — both implementations are equally
-  valid at those boundaries.
-  
-"""

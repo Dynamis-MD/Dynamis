@@ -7,7 +7,7 @@ import os
 
 # Load reference implementation directly
 _ref_path = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "baseline",
+    os.path.dirname(__file__), "..", "..", "baseline",
     "local_fairchem", "graph", "radius_graph_pbc.py"
 )
 _spec = importlib.util.spec_from_file_location("_ref", _ref_path)
