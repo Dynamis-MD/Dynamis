@@ -41,8 +41,11 @@ class LennardJonesPotentialModel(DistNNPModel):
         self.sigma = sigma
 
     def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
-        prev_local_positions = distributed_state.local_partition_info.atom_positions
+        prev_local_positions = (
+            distributed_state.local_partition_info.local_atom_positions
+        )
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
+        local_atom_types = distributed_state.local_partition_info.local_atom_types
         # TODO: Not implemented yet
         # boundary_positions = ...
         # local_positions = torch.cat([local_positions, boundary_positions], dim=0)
