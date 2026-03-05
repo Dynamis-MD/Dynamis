@@ -58,7 +58,7 @@ namespace distnnp_state
       MolecularInfo global_molecular_info; // Contains global atom information for the entire system
 
       // Partitioned data information
-      MolecularInfo local_partition_info; // Contains local atom information for this partition
+      PartitionMessagePassingInfo local_partition_info; // Contains local atom information for this partition
 
     };
 } // namespace distnnp_state
