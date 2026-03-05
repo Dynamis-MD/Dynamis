@@ -13,6 +13,9 @@ KDTreePartitioner = distnnp_state_impl.KDTreePartitioner
 SFCPartitioner = distnnp_state_impl.SFCPartitioner
 SFCCurveType = distnnp_state_impl.SFCCurveType
 
+# C++ IPC exchanger
+IPCExchanger = distnnp_state_impl.IPCExchanger
+
 # CUDA radius graph with PBC
 from distnnp_state.radius_graph_pbc_cuda import radius_graph_pbc_cuda
 
@@ -26,5 +29,6 @@ __all__ = [
     "KDTreePartitioner",
     "SFCPartitioner",
     "SFCCurveType",
+    "IPCExchanger",
     "radius_graph_pbc_cuda",
 ]

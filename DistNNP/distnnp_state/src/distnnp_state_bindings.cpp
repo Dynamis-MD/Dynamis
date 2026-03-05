@@ -1,5 +1,6 @@
 #include "distnnp_state/distnnp_state.hpp"
 #include "distnnp_state/partitioner.hpp"
+#include "distnnp_state/exchanger.hpp"
 #include "distnnp_state/radius_pbc.hpp"
 #include <torch/extension.h>
 
@@ -88,6 +89,58 @@ PYBIND11_MODULE(distnnp_state_impl, m)
                &distnnp_state::SFCPartitioner::partition),
            "Partition: auto-compute edge weights via radius_graph_pbc (CUDA)")
       .def("build_halo_maps", &distnnp_state::SFCPartitioner::build_halo_maps);
+
+  py::class_<distnnp_state::IPCExchanger>(m, "IPCExchanger")
+      .def(py::init<>())
+      .def_static("allocate_ipc_buffer", &distnnp_state::IPCExchanger::allocate_ipc_buffer,
+           "Allocate a tensor via raw cudaMalloc (required for IPC)",
+           py::arg("rows"), py::arg("cols"), py::arg("device_index"))
+      .def("export_ipc_handle", &distnnp_state::IPCExchanger::export_ipc_handle,
+           "Export CUDA IPC handle for a buffer as bytes",
+           py::arg("buffer"))
+      .def("setup", &distnnp_state::IPCExchanger::setup,
+           "Open remote IPC handles and build push targets",
+           py::arg("x_buffer"),
+           py::arg("grad_recv_buffer"),
+           py::arg("all_x_handles"),
+           py::arg("all_grad_handles"),
+           py::arg("send_offsets"),
+           py::arg("send_local_indices"),
+           py::arg("recv_offsets"),
+           py::arg("all_recv_offsets"),
+           py::arg("all_num_local"),
+           py::arg("num_local"),
+           py::arg("feature_dim"),
+           py::arg("rank"),
+           py::arg("world_size"))
+      .def("push_forward", [](distnnp_state::IPCExchanger &self, torch::Tensor x_buffer,
+                              int64_t ce_threshold_bytes) {
+           self.push_forward(x_buffer, 0, ce_threshold_bytes);
+      }, "Forward push: gather + write to peers' ghost regions.\n"
+         "ce_threshold_bytes: per-peer data >= this uses Copy Engine (0 = always SM kernel)",
+           py::arg("x_buffer"), py::arg("ce_threshold_bytes") = 0)
+      .def("push_backward", [](distnnp_state::IPCExchanger &self, torch::Tensor grad) {
+           self.push_backward(grad, 0);
+      }, "Backward push: gather ghost grads + write to peers' grad buffers",
+           py::arg("grad"))
+      .def("create_and_export_event", &distnnp_state::IPCExchanger::create_and_export_event,
+           "Create interprocess event and return IPC handle (64 bytes)")
+      .def("setup_events", &distnnp_state::IPCExchanger::setup_events,
+           "Open remote IPC events for stream-level sync",
+           py::arg("all_event_handles"))
+      .def("record_push_complete", [](distnnp_state::IPCExchanger &self) {
+           self.record_push_complete(0);
+      }, "Record completion event on default stream")
+      .def("wait_for_pushes", [](distnnp_state::IPCExchanger &self) {
+           self.wait_for_pushes(0);
+      }, "Wait for all remote pushes to complete on default stream")
+      .def("teardown", &distnnp_state::IPCExchanger::teardown)
+      .def("is_setup", &distnnp_state::IPCExchanger::is_setup)
+      .def("feature_dim", &distnnp_state::IPCExchanger::feature_dim)
+      .def("num_local", &distnnp_state::IPCExchanger::num_local)
+      .def("total_send", &distnnp_state::IPCExchanger::total_send)
+      .def("total_recv", &distnnp_state::IPCExchanger::total_recv)
+      .def("send_local_indices", &distnnp_state::IPCExchanger::send_local_indices);
 
   m.def("radius_graph_pbc", &radius_graph_pbc,
         "CUDA cell-list radius graph with selective PBC tiling",
