@@ -1,7 +1,8 @@
 from __future__ import annotations
 import torch
 import typing
-__all__: list[str] = ['DistEnvironment', 'DistNNPState', 'KDTreePartitioner', 'MolecularInfo', 'PartitionMessagePassingInfo', 'SimulationConfig', 'SimpleSpatialPartitioner']
+import enum
+__all__: list[str] = ['DistEnvironment', 'DistNNPState', 'KDTreePartitioner', 'MolecularInfo', 'PartitionMessagePassingInfo', 'SFCCurveType', 'SFCPartitioner', 'SimulationConfig', 'SimpleSpatialPartitioner']
 class DistEnvironment:
     def __init__(self) -> None:
         ...
@@ -95,6 +96,24 @@ class SimpleSpatialPartitioner:
     def __init__(self) -> None:
         ...
     def partition(self, state: MolecularInfo, env: DistEnvironment) -> PartitionMessagePassingInfo:
+        ...
+    def build_halo_maps(self, info: PartitionMessagePassingInfo, global_state: MolecularInfo, env: DistEnvironment, config: SimulationConfig) -> None:
+        ...
+class SFCCurveType(enum.Enum):
+    Morton = 0
+    Hilbert = 1
+class SFCPartitioner:
+    def __init__(self, curve_type: SFCCurveType = SFCCurveType.Morton) -> None:
+        ...
+    @typing.overload
+    def partition(self, state: MolecularInfo, env: DistEnvironment) -> PartitionMessagePassingInfo:
+        """Unweighted (default) or user-weighted (if edge_counts set on state)."""
+        ...
+    @typing.overload
+    def partition(self, state: MolecularInfo, env: DistEnvironment, config: SimulationConfig) -> PartitionMessagePassingInfo:
+        """Auto-compute edge weights via radius_graph_pbc (CUDA). Stores graph in edge_index."""
+        ...
+    def partition(self, state: MolecularInfo, env: DistEnvironment, config: SimulationConfig | None = None) -> PartitionMessagePassingInfo:
         ...
     def build_halo_maps(self, info: PartitionMessagePassingInfo, global_state: MolecularInfo, env: DistEnvironment, config: SimulationConfig) -> None:
         ...

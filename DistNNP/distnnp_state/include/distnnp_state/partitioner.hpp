@@ -55,13 +55,30 @@ public:
                                         const SimulationConfig &config);
 };
 
+enum class SFCCurveType : int { Morton = 0, Hilbert = 1 };
+
 class SFCPartitioner : public AbstractPartitioner
 {
-  // Uses a space-filling curve (e.g. Hilbert curve) to partition
+  // Uses a space-filling curve (Morton Z-curve or Hilbert curve) to partition
   // the atoms. Good locality and load balancing for certain systems.
+  //
+  // Three partition modes (same as KDTreePartitioner):
+  //   1. Unweighted: edge_counts undefined, no SimulationConfig
+  //   2. User-weighted: edge_counts set on MolecularInfo
+  //   3. Auto-weighted: edge_counts undefined + SimulationConfig provided
+  //      → builds graph at cutoff, computes edge_counts, stores edge_index
+  SFCCurveType curve_type_;
 public:
+  explicit SFCPartitioner(SFCCurveType ct = SFCCurveType::Morton) : curve_type_(ct) {}
+
+  // Modes 1 & 2: unweighted or user-provided weights
   PartitionMessagePassingInfo partition(const MolecularInfo &state,
                                         const DistEnvironment &env) override;
+
+  // Mode 3: auto-compute edge weights via radius_graph_pbc (CUDA only).
+  PartitionMessagePassingInfo partition(const MolecularInfo &state,
+                                        const DistEnvironment &env,
+                                        const SimulationConfig &config);
 };
 
 } // namespace distnnp_state
