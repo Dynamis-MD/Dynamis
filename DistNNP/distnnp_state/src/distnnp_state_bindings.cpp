@@ -69,6 +69,26 @@ PYBIND11_MODULE(distnnp_state_impl, m)
       .def("partition", &distnnp_state::SimpleSpatialPartitioner::partition)
       .def("build_halo_maps", &distnnp_state::SimpleSpatialPartitioner::build_halo_maps);
 
+  py::enum_<distnnp_state::SFCCurveType>(m, "SFCCurveType")
+      .value("Morton", distnnp_state::SFCCurveType::Morton)
+      .value("Hilbert", distnnp_state::SFCCurveType::Hilbert);
+
+  py::class_<distnnp_state::SFCPartitioner>(m, "SFCPartitioner")
+      .def(py::init<distnnp_state::SFCCurveType>(),
+           py::arg("curve_type") = distnnp_state::SFCCurveType::Morton)
+      .def("partition",
+           py::overload_cast<const distnnp_state::MolecularInfo &,
+                             const distnnp_state::DistEnvironment &>(
+               &distnnp_state::SFCPartitioner::partition),
+           "Partition: unweighted (default) or user-weighted (if edge_counts set)")
+      .def("partition",
+           py::overload_cast<const distnnp_state::MolecularInfo &,
+                             const distnnp_state::DistEnvironment &,
+                             const distnnp_state::SimulationConfig &>(
+               &distnnp_state::SFCPartitioner::partition),
+           "Partition: auto-compute edge weights via radius_graph_pbc (CUDA)")
+      .def("build_halo_maps", &distnnp_state::SFCPartitioner::build_halo_maps);
+
   m.def("radius_graph_pbc", &radius_graph_pbc,
         "CUDA cell-list radius graph with selective PBC tiling",
         py::arg("pos"),

@@ -56,6 +56,9 @@ python_add_library(distnnp_state_impl
     src/partition/kdtree_partitioner.cpp
     src/partition/kdtree_cuda_.cpp
     src/partition/kdtree_cuda.cu
+    src/partition/sfc_partitioner.cpp
+    src/partition/sfc_cuda_.cpp
+    src/partition/sfc_cuda.cu
     src/partition/build_halo_maps.cpp
     src/radius_pbc/radius_pbc_.cpp
     src/radius_pbc/radius_pbc.cu
