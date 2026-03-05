@@ -9,6 +9,17 @@ v(t + dt) = v(t) + (F(t) / m) * dt
 x(t + dt) = x(t) + v(t + dt) * dt
 ```
 
+**`VerletIntegrator`** — a first-order explicit integrator that updates velocities over a half timestep, the positions over a full timestep, and then the velocities over a second half timestep according to:
+
+```
+v(t + dt/2) = v(t) + (F(t) / 2m) * dt
+x(t + dt) = x(t) + v(t + dt/2) * dt
+
+v(t + dt) = v(t + dt/2) + (F(t + dt) / 2m) * dt
+```
+
+**`LangevinIntegrator`** — a first-order explicit integrator that updates velocities over a half timestep, the positions over a full timestep, and then the velocities over a second half timestep, while also incorporating friction and random noise to simulate a controlled heat bath according to the BBK formulation of Langevin mechanics.
+
 ---
 
 ## Installation
