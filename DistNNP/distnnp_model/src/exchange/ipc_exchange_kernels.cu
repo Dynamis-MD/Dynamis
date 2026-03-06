@@ -4,11 +4,11 @@
 // Each thread handles one (atom, feature_element) pair. A binary search over
 // send_offsets determines the target peer rank.
 
-#include "distnnp_state/exchanger.hpp"
+#include "distnnp_model/exchanger.hpp"
 #include <cuda_runtime.h>
 #include <cstdint>
 
-namespace distnnp_state
+namespace distnnp_model
 {
 
 // Binary search: find the CSR segment that contains `idx`.
@@ -225,4 +225,4 @@ void launch_gather_to_staging(
         feature_dim);
 }
 
-} // namespace distnnp_state
+} // namespace distnnp_model

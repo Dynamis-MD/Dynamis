@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 #include <vector>
 
-namespace distnnp_state
+namespace distnnp_model
 {
 
 // Pre-computed push target for a single peer rank.
@@ -156,4 +156,4 @@ private:
     bool events_setup_ = false;
 };
 
-} // namespace distnnp_state
+} // namespace distnnp_model

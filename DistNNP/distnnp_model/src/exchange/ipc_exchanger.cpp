@@ -1,11 +1,11 @@
 // ipc_exchanger.cpp — CUDA IPC handle management and push target construction.
 
-#include "distnnp_state/exchanger.hpp"
+#include "distnnp_model/exchanger.hpp"
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <cstring>
 
-namespace distnnp_state
+namespace distnnp_model
 {
 
 // Forward declarations for kernel launchers (defined in ipc_exchange_kernels.cu)
@@ -528,4 +528,4 @@ void IPCExchanger::teardown()
     is_setup_ = false;
 }
 
-} // namespace distnnp_state
+} // namespace distnnp_model

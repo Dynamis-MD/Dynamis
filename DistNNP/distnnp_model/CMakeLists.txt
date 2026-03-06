@@ -27,6 +27,12 @@ set(CUDA_TOOLKIT_ROOT_DIR "${CUDAToolkit_ROOT}" CACHE PATH "" FORCE)
 set(CUDA_INCLUDE_DIRS "${CUDAToolkit_INCLUDE_DIRS}" CACHE PATH "" FORCE)
 
 
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(Torch REQUIRED)
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+
+# Locate torch_python after find_package(Torch) so TORCH_LIBRARIES paths are available.
 if (TORCH_LIBRARY)
   get_filename_component(TORCH_LIB_DIR "${TORCH_LIBRARY}" DIRECTORY)
 endif ()
@@ -35,28 +41,26 @@ find_library(TORCH_PYTHON_LIBRARY
   torch_python
   HINTS
   ${TORCH_LIB_DIR}
+  ${TORCH_INSTALL_PREFIX}/lib
   $ENV{Python_SITELIB}/torch/lib64
   $ENV{Python_SITELIB}/torch/lib
   NO_DEFAULT_PATH)
 
 find_library(TORCH_PYTHON_LIBRARY torch_python REQUIRED)
 
-
-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-find_package(Torch REQUIRED)
-
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
-
 python_add_library(distnnp_model_impl
     MODULE
     WITH_SOABI
     src/distnnp_model_bindings.cpp
+    src/exchange/ipc_exchanger.cpp
+    src/exchange/ipc_exchange_kernels.cu
 )
 
 target_include_directories(distnnp_model_impl
     PRIVATE
     include
     ${TORCH_INCLUDE_DIRS}
+    ${CUDAToolkit_INCLUDE_DIRS}
 )
 
 # torch_python provides pybind11 type_casters for at::Tensor and must be
@@ -81,6 +85,7 @@ set_target_properties(distnnp_model_impl
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
     CUDA_EXTENSIONS OFF
+    CUDA_ARCHITECTURES "70;80;90"
 
     INSTALL_RPATH_USE_LINK_PATH ON
 )
