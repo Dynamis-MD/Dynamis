@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 #include <torch/extension.h>
 
 namespace distnnp_state
@@ -66,4 +67,5 @@ namespace distnnp_state
       PartitionMessagePassingInfo local_partition_info; // Contains local atom information for this partition
 
     };
+
 } // namespace distnnp_state

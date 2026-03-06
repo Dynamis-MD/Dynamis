@@ -16,6 +16,9 @@ SFCCurveType = distnnp_state_impl.SFCCurveType
 # CUDA radius graph with PBC
 from distnnp_state.radius_graph_pbc_cuda import radius_graph_pbc_cuda
 
+# IO
+from distnnp_state.distnnp_state_impl import load_state
+
 __all__ = [
     "MolecularInfo",
     "DistEnvironment",
@@ -27,4 +30,5 @@ __all__ = [
     "SFCPartitioner",
     "SFCCurveType",
     "radius_graph_pbc_cuda",
+    "load_state",
 ]
