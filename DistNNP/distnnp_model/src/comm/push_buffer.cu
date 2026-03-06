@@ -42,8 +42,8 @@ at::Tensor push_buffer_create(at::Tensor input, at::Tensor buffer, at::Tensor in
     TORCH_CHECK(input.dim() == 2, "input must have 2 dimensions");
     TORCH_CHECK(buffer.dim() == 2, "buffer must have 2 dimensions");
     TORCH_CHECK(input_locs.dim() == 1, "input_locs must have 1 dimension");
-    TORCH_CHECK(buffer.size(0) == input_locs.size(0), "buffer rows must match number of indices");
-    TORCH_CHECK(buffer.size(1) == input.size(1), "buffer and input must have same feature dimension");
+    TORCH_CHECK(buffer.size(0) == input_locs.size(0), "buffer rows must match size of input_locs");
+    TORCH_CHECK(buffer.size(1) == input.size(1), "input and buffer must have same number of columns");
     TORCH_CHECK(input.scalar_type() == at::kFloat, "input datatype must be float32");
     TORCH_CHECK(buffer.scalar_type() == at::kFloat, "buffer datatype must be float32");
     TORCH_CHECK(input_locs.scalar_type() == at::kLong, "input_locs datatype must be int64");
