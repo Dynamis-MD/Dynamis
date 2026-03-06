@@ -1,6 +1,7 @@
 #include "distnnp_state/distnnp_state.hpp"
 #include "distnnp_state/partitioner.hpp"
 #include "distnnp_state/radius_pbc.hpp"
+#include "distnnp_state/md_io.hpp"
 #include <torch/extension.h>
 
 PYBIND11_MODULE(distnnp_state_impl, m)
@@ -97,4 +98,8 @@ PYBIND11_MODULE(distnnp_state_impl, m)
         py::arg("radius"),
         py::arg("max_num_neighbors"),
         py::arg("enforce_max_strictly"));
+
+  m.def("load_state", &distnnp_state::load_state,
+        "Returns environment from an xyz file",
+        py::arg("xyz_file_name"));
 }
