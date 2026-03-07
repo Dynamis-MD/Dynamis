@@ -51,7 +51,7 @@ python_add_library(distnnp_model_impl
     MODULE
     WITH_SOABI
     src/distnnp_model_bindings.cpp
-    src/comm/push_buffer.cu
+    src/csrc/push_buffer.cu
 )
 
 target_include_directories(distnnp_model_impl
