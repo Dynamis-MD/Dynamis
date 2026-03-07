@@ -52,18 +52,16 @@ def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma):
 
 
 class LennardJonesPotentialModel(DistNNPModel):
-    def __init__(self, epsilon: torch.Tensor, sigma: torch.Tensor, cutoff: float):
+    def __init__(self, epsilon: torch.Tensor, sigma: torch.Tensor):
         """Initializes the Lennard-Jones potential model with given epsilon and sigma parameters.
 
         Args:
             epsilon (torch.Tensor): A (num_types,) 1D tensor of well depths for each type.
             sigma (torch.Tensor): A (num_types,) 1D tensor of zero-potential distances for each type.
-            cutoff (float): The cutoff distance for the potential. Interactions beyond this distance are ignored.
         """
         super().__init__()
         self.epsilon = epsilon
         self.sigma = sigma
-        self.cutoff = cutoff
 
     def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
         prev_local_positions = (
@@ -85,15 +83,22 @@ class LennardJonesPotentialModel(DistNNPModel):
 
         # Construct the radius graph with PBC using the local positions (including boundary atoms)
 
+        sim_config = distributed_state.simulation_config
         # Ensure autograd is not tracking the radius graph construction
+        n_atoms = local_positions.shape[0]
         with torch.no_grad():
             edge_index, _, _ = radius_graph_pbc_cuda(
                 data=type(
                     "Data",
                     (object,),
-                    {"pos": local_positions, "cell": None, "natoms": None, "pbc": None},
+                    {
+                        "pos": local_positions,
+                        "cell": sim_config.cell,
+                        "natoms": n_atoms,
+                        "pbc": sim_config.pbc,
+                    },
                 )(),
-                radius=self.cutoff,
+                radius=sim_config.cutoff,
                 max_num_neighbors_threshold=0,
                 enforce_max_neighbors_strictly=False,
             )
