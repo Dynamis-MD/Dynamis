@@ -1,11 +1,15 @@
 from abc import ABC, abstractmethod
 from typing import Any
 from distnnp_state import DistNNPState
+from distnnp_model.distnnp_model_impl import FeatureExchanger
 from typing import Tuple, Union
 import torch
 
 
 class DistNNPModel(ABC):
+    def __init__(self) -> None:
+        super().__init__()
+
     @abstractmethod
     def __call__(
         self, distributed_state: DistNNPState, *args: Any, **kwds: Any

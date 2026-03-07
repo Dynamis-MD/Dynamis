@@ -7,6 +7,7 @@ namespace distnnp_model
 
   class FeatureExchanger
   {
+    // TODO: Add any necessary member variables for managing communication state, buffers, etc.
   public:
     torch::Tensor feature_push_forward(const torch::Tensor &local_features,
                                        const distnnp_state::PartitionMessagePassingInfo &partition_info);

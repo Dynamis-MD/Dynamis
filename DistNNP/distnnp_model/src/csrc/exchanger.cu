@@ -2,8 +2,9 @@
 
 namespace distnnp_model
 {
-  torch::Tensor feature_push_forward(const torch::Tensor &local_features,
-                                     const distnnp_state::PartitionMessagePassingInfo &partition_info)
+
+  torch::Tensor FeatureExchanger::feature_push_forward(const torch::Tensor &local_features,
+                                                       const distnnp_state::PartitionMessagePassingInfo &partition_info)
   {
 
     // TODO: Implement the actual feature push logic here.
@@ -11,12 +12,12 @@ namespace distnnp_model
     return pushed_features;
   }
 
-  torch::Tensor feature_push_backward(const torch::Tensor &grad_output,
-                                      const torch::IntArrayRef &grad_input_shape,
-                                      const distnnp_state::PartitionMessagePassingInfo &partition_info)
+  torch::Tensor FeatureExchanger::feature_push_backward(const torch::Tensor &grad_output,
+                                                        const torch::IntArrayRef &grad_input_shape,
+                                                        const distnnp_state::PartitionMessagePassingInfo &partition_info)
   {
-    //TODO: Implement the actual feature push backward logic here.
-    torch::Tensor grad_input = torch::zeros(grad_input_shape, device = grad_output.device(), dtype = grad_output.dtype()); // Placeholder for the actual gradients for input features
+    // TODO: Implement the actual feature push backward logic here.
+    torch::Tensor grad_input = torch::zeros(grad_input_shape, torch::TensorOptions().device(grad_output.device()).dtype(grad_output.dtype())); // Placeholder for the actual gradients for input features
     return grad_input;
   }
 }
