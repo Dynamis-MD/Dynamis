@@ -1,5 +1,7 @@
 #include "distnnp_model/macros.hpp"
 #include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAGuard.h>
 
 __global__ void push_buffer_gather_kernel(const float* input, float* buffer,
                     const int64_t* input_locs, int num_indices, int feature_dim) {
