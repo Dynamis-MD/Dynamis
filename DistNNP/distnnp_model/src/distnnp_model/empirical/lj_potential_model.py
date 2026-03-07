@@ -2,6 +2,7 @@ from distnnp_model.potential import DistNNPModel
 import torch
 import torch.nn.functional as F
 from distnnp_state import DistNNPState
+from distnnp_model.comm.feature_push import FeaturePushToExchange
 
 
 def lennard_jones_potential(positions, epsilon=1.0, sigma=1.0):
@@ -45,10 +46,18 @@ class LennardJonesPotentialModel(DistNNPModel):
             distributed_state.local_partition_info.local_atom_positions
         )
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
-        local_atom_types = distributed_state.local_partition_info.local_atom_types
-        # TODO: Not implemented yet
-        # boundary_positions = ...
-        # local_positions = torch.cat([local_positions, boundary_positions], dim=0)
+        local_atom_types = distributed_state.local_partition_info.partition_indices
+
+        boundary_positions = FeaturePushToExchange.apply(
+            local_positions, distributed_state, self._feature_exchanger
+        )
+
+        boundary_atom_types = FeaturePushToExchange.apply(
+            local_atom_types.float(), distributed_state, self._feature_exchanger
+        ).long()
+
+        local_positions = torch.cat([local_positions, boundary_positions], dim=0)  # type: ignore
+        local_atom_types = torch.cat([local_atom_types, boundary_atom_types], dim=0)  # type: ignore
 
         energy = lennard_jones_potential(local_positions, self.epsilon, self.sigma)
 

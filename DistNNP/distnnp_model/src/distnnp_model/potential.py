@@ -9,6 +9,7 @@ import torch
 class DistNNPModel(ABC):
     def __init__(self) -> None:
         super().__init__()
+        self._feature_exchanger = FeatureExchanger()
 
     @abstractmethod
     def __call__(

@@ -5,7 +5,7 @@ import torch
 
 from distnnp_state import DistNNPState, SimulationConfig, PartitionMessagePassingInfo
 from torch.autograd import Function
-from distnnp_model_impl import FeatureExchanger
+from distnnp_model.distnnp_model_impl import FeatureExchanger
 
 
 class FeaturePushToExchange(Function):
