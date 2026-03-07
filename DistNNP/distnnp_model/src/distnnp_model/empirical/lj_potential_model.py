@@ -5,38 +5,60 @@ from distnnp_state import DistNNPState
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 
 
-def lennard_jones_potential(positions, epsilon=1.0, sigma=1.0):
+def lennard_jones_potential(atom_types, positions, epsilon, sigma):
     """
-    Calculates the total Lennard-Jones potential energy for a set of particles.
+    Calculates the total Lennard-Jones potential energy for a set of particles
+    using Lorentz-Berthelot mixing rules for different atom types.
 
     Args:
+        atom_types (torch.Tensor): An (N,) integer tensor of atom types.
         positions (torch.Tensor): An (N, 3) tensor of particle coordinates.
-        epsilon (float): Depth of the potential well.
-        sigma (float): Distance at which the potential is zero.
+        epsilon (torch.Tensor): A (num_types,) 1D tensor of well depths for each type.
+        sigma (torch.Tensor): A (num_types,) 1D tensor of zero-potential distances for each type.
 
     Returns:
         torch.Tensor: A scalar tensor representing the total potential energy.
     """
+    N = positions.shape[0]
+
     # 1. Compute pairwise distances for all unique pairs
-    # pdist returns a 1D tensor of length N*(N-1)/2, completely avoiding
-    # the diagonal (self-interactions) and duplicate pairs.
+    # pdist returns a 1D tensor of length N*(N-1)/2
     distances = F.pdist(positions)
 
-    # 2. Compute the (sigma / r)^6 term
-    sr6 = (sigma / distances) ** 6
+    # 2. Generate the index pairs matching the pdist output order
+    # Ensure the indices are created on the same device as the positions (e.g., GPU)
+    pair_indices = torch.combinations(torch.arange(N, device=positions.device))
+    idx_i = pair_indices[:, 0]
+    idx_j = pair_indices[:, 1]
 
-    # 3. Compute the full LJ potential for all pairs
-    # (sigma / r)^12 is just sr6 squared, which is faster to compute
-    pairwise_potentials = 4 * epsilon * (sr6**2 - sr6)
+    # 3. Retrieve atom types for each pair
+    type_i = atom_types[idx_i]
+    type_j = atom_types[idx_j]
 
-    # 4. Sum the potentials of all unique pairs to get the total system energy
+    # 4. Apply Lorentz-Berthelot mixing rules
+    sigma_ij = (sigma[type_i] + sigma[type_j]) / 2.0
+    epsilon_ij = torch.sqrt(epsilon[type_i] * epsilon[type_j])
+
+    # 5. Compute the (sigma / r)^6 term
+    sr6 = (sigma_ij / distances) ** 6
+
+    # 6. Compute the full LJ potential for all pairs
+    pairwise_potentials = 4 * epsilon_ij * (sr6**2 - sr6)
+
+    # 7. Sum the potentials of all unique pairs
     total_energy = pairwise_potentials.sum()
 
     return total_energy
 
 
 class LennardJonesPotentialModel(DistNNPModel):
-    def __init__(self, epsilon=1.0, sigma=1.0):
+    def __init__(self, epsilon: torch.Tensor, sigma: torch.Tensor):
+        """Initializes the Lennard-Jones potential model with given epsilon and sigma parameters.
+
+        Args:
+            epsilon (torch.Tensor): A (num_types,) 1D tensor of well depths for each type.
+            sigma (torch.Tensor): A (num_types,) 1D tensor of zero-potential distances for each type.
+        """
         super().__init__()
         self.epsilon = epsilon
         self.sigma = sigma
@@ -54,12 +76,14 @@ class LennardJonesPotentialModel(DistNNPModel):
 
         boundary_atom_types = FeaturePushToExchange.apply(
             local_atom_types.float(), distributed_state, self._feature_exchanger
-        ).long()
+        ).long()  # type: ignore
 
         local_positions = torch.cat([local_positions, boundary_positions], dim=0)  # type: ignore
         local_atom_types = torch.cat([local_atom_types, boundary_atom_types], dim=0)  # type: ignore
 
-        energy = lennard_jones_potential(local_positions, self.epsilon, self.sigma)
+        energy = lennard_jones_potential(
+            local_atom_types, local_positions, self.epsilon, self.sigma
+        )
 
         energy.backward()
         assert (
