@@ -5,7 +5,7 @@ from distnnp_state import DistNNPState, radius_graph_pbc_cuda
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 
 
-def lennard_jones_potential(atom_types, positions, epsilon, sigma, cutoff):
+def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma):
     """
     Calculates the total Lennard-Jones potential energy for a set of particles
     using Lorentz-Berthelot mixing rules and a cutoff radius graph.
@@ -13,25 +13,13 @@ def lennard_jones_potential(atom_types, positions, epsilon, sigma, cutoff):
     Args:
         atom_types (torch.Tensor): An (N,) integer tensor of atom types.
         positions (torch.Tensor): An (N, 3) tensor of particle coordinates (requires_grad=True).
+        edge_index (torch.Tensor): A (2, E) tensor of edge indices from the radius graph.
         epsilon (torch.Tensor): A (num_types,) 1D tensor of well depths for each type.
         sigma (torch.Tensor): A (num_types,) 1D tensor of zero-potential distances for each type.
-        cutoff (float): The cutoff distance for the radius graph.
 
     Returns:
         torch.Tensor: A scalar tensor representing the total potential energy.
     """
-    # Ensure autograd is not tracking the radius graph construction
-    with torch.no_grad():
-        edge_index, _, _ = radius_graph_pbc_cuda(
-            data=type(
-                "Data",
-                (object,),
-                {"pos": positions, "cell": None, "natoms": None, "pbc": None},
-            )(),
-            radius=cutoff,
-            max_num_neighbors_threshold=0,
-            enforce_max_neighbors_strictly=False,
-        )
 
     # Extract source and target node indices
     idx_i, idx_j = edge_index[0], edge_index[1]
@@ -95,8 +83,24 @@ class LennardJonesPotentialModel(DistNNPModel):
         local_positions = torch.cat([local_positions, boundary_positions], dim=0)  # type: ignore
         local_atom_types = torch.cat([local_atom_types, boundary_atom_types], dim=0)  # type: ignore
 
+        # Construct the radius graph with PBC using the local positions (including boundary atoms)
+
+        # Ensure autograd is not tracking the radius graph construction
+        with torch.no_grad():
+            edge_index, _, _ = radius_graph_pbc_cuda(
+                data=type(
+                    "Data",
+                    (object,),
+                    {"pos": local_positions, "cell": None, "natoms": None, "pbc": None},
+                )(),
+                radius=self.cutoff,
+                max_num_neighbors_threshold=0,
+                enforce_max_neighbors_strictly=False,
+            )
+
+        # Compute the Lennard-Jones potential energy using the local atom types, positions, and edge index
         energy = lennard_jones_potential(
-            local_atom_types, local_positions, self.epsilon, self.sigma, self.cutoff
+            local_atom_types, local_positions, edge_index, self.epsilon, self.sigma
         )
 
         energy.backward()
