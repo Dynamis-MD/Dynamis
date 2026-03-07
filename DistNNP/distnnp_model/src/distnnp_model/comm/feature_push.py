@@ -5,6 +5,7 @@ import torch
 
 from distnnp_state import DistNNPState, SimulationConfig, PartitionMessagePassingInfo
 from torch.autograd import Function
+from distnnp_model_impl import feature_push_forward, feature_push_backward
 
 
 class FeaturePushToExchange(Function):
@@ -26,21 +27,10 @@ class FeaturePushToExchange(Function):
         # return feature_push(state, config, partition_info)
         ctx._state = state
         ctx._features_to_push_shape = features_to_push.shape
-        num_sends = state.local_partition_info.send_local_indices.shape[0]
-        feature_dim = features_to_push.shape[1]
 
-        received_features = torch.empty(
-            num_sends,
-            feature_dim,
-            device=features_to_push.device,
-            dtype=features_to_push.dtype,
-        )
+        partition_info: PartitionMessagePassingInfo = state.local_partition_info
 
-        # TODO: Perform the push to exchange operation
-        # Uncomment when the communication engine is implemented
-
-        # send_buffer = torch.gather(features_to_push, 0, state.local_partition_info.send_local_indices)
-        # distnnp_model_impl.feature_push(send_buffer, received_features, state)
+        received_features = feature_push_forward(features_to_push, partition_info)
 
         return received_features
 
@@ -60,15 +50,8 @@ class FeaturePushToExchange(Function):
         state = ctx._state
         input_feature_shape = ctx._features_to_push_shape
 
-        recevied_features_grad = torch.zeros(
-            *input_feature_shape, device=grad_output.device, dtype=grad_output.dtype
+        recevied_features_grad = feature_push_backward(
+            grad_output, input_feature_shape, state.local_partition_info
         )
-
-        # TODO: Compute the gradients for the input features based on the gradients received from neighboring partitions
-        # This will involve a push operation of the local gradients on all ranks to a temporary buffer.
-        # Then the gradients in the temporary buffer will be accumulated locally.
-        # A single vertex may be sent to multiple ranks, so once recevied the gradients must be
-        # accumulated across the rank dimension as well.
-        #
 
         return recevied_features_grad, None  # No gradients for state
