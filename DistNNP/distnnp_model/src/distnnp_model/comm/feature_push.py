@@ -5,7 +5,7 @@ import torch
 
 from distnnp_state import DistNNPState, SimulationConfig, PartitionMessagePassingInfo
 from torch.autograd import Function
-from distnnp_model_impl import feature_push_forward, feature_push_backward
+from distnnp_model_impl import FeatureExchanger
 
 
 class FeaturePushToExchange(Function):
@@ -14,6 +14,7 @@ class FeaturePushToExchange(Function):
         ctx,
         features_to_push: torch.Tensor,
         state: DistNNPState,
+        exchanger: FeatureExchanger,
     ) -> torch.Tensor:
         """Implements the forward pass for the feature push operation.
 
@@ -27,10 +28,13 @@ class FeaturePushToExchange(Function):
         # return feature_push(state, config, partition_info)
         ctx._state = state
         ctx._features_to_push_shape = features_to_push.shape
+        ctx._exchanger = exchanger
 
         partition_info: PartitionMessagePassingInfo = state.local_partition_info
 
-        received_features = feature_push_forward(features_to_push, partition_info)
+        received_features = exchanger.feature_push_forward(
+            features_to_push, partition_info
+        )
 
         return received_features
 
@@ -49,8 +53,9 @@ class FeaturePushToExchange(Function):
 
         state = ctx._state
         input_feature_shape = ctx._features_to_push_shape
+        exchanger = ctx._exchanger
 
-        recevied_features_grad = feature_push_backward(
+        recevied_features_grad = exchanger.feature_push_backward(
             grad_output, input_feature_shape, state.local_partition_info
         )
 

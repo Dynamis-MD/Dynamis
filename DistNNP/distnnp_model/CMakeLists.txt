@@ -47,6 +47,38 @@ find_package(Torch REQUIRED)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
+# Locate distnnp_state public headers.
+#
+# Two cases:
+#   Regular install : headers land at site-packages/distnnp_state/include/
+#                     (installed by distnnp_state's CMakeLists.txt)
+#   Editable install: scikit-build-core inplace mode places __init__.py in
+#                     src/distnnp_state/, so __file__ resolves to the source
+#                     tree.  We walk up two levels (src/distnnp_state ->
+#                     src -> project root) to reach the project's include/.
+#
+# We use importlib.util.find_spec rather than importing the package so that
+# this step never triggers distnnp_state's own imports (e.g. torch) and works
+# regardless of which Python interpreter CMake resolves.
+execute_process(
+    COMMAND "${Python_EXECUTABLE}" -c
+        "import importlib.util, os; \
+spec = importlib.util.find_spec('distnnp_state'); \
+pkg = spec.submodule_search_locations[0]; \
+installed = os.path.join(pkg, 'include'); \
+print(installed if os.path.isdir(installed) else \
+      os.path.join(os.path.dirname(os.path.dirname(pkg)), 'include'))"
+    OUTPUT_VARIABLE DISTNNP_STATE_INCLUDE_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _distnnp_state_result
+)
+if(NOT _distnnp_state_result EQUAL 0)
+    message(FATAL_ERROR
+        "Could not find distnnp_state. "
+        "Install it first: pip install -e ./distnnp_state")
+endif()
+message(STATUS "distnnp_state include dir: ${DISTNNP_STATE_INCLUDE_DIR}")
+
 python_add_library(distnnp_model_impl
     MODULE
     WITH_SOABI
@@ -58,6 +90,7 @@ target_include_directories(distnnp_model_impl
     PRIVATE
     include
     ${TORCH_INCLUDE_DIRS}
+    ${DISTNNP_STATE_INCLUDE_DIR}
 )
 
 # torch_python provides pybind11 type_casters for at::Tensor and must be
