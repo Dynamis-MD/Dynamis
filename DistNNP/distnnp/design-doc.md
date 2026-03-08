@@ -164,7 +164,7 @@ while total_done < config.total_steps:
 writer.flush()   # drain any remaining buffered snapshots at end of run
 ```
 
-Repartitioning (`should_rebalance`) triggers when `rebalance_interval > 0` and `total_done % rebalance_interval == 0`. The first repartition is at step 0 (i.e., before any integration), which means `setup()` performs the initial partition and `run()` re-checks and re-partitions immediately on the first step before calling the integrator. This avoids duplicating partition logic between `setup()` and `run()`.
+Repartitioning (`should_rebalance`) triggers when `rebalance_interval > 0` and `total_done % rebalance_interval == 0`. The first repartition is at step 0 (i.e., before any integration), which means `setup()` performs the initial partition and `run()` re-checks immediately on the first step before calling the integrator. This avoids duplicating partition logic between `setup()` and `run()`.
 
 > **Design note:** `setup()` does the first partition so that a user calling `step()` manually (without `run()`) has a valid state immediately after `setup()`.
 
@@ -189,8 +189,8 @@ The integrator is fully responsible for the model call(s) and state mutation. Th
 | Integrator | Model call pattern |
 |---|---|
 | `Euler` | `model(state)` once at the start of the step; then advances pos and vel |
-| `Verlet` | `halfstep1_()` → `model(state)` → `halfstep2_()` (BBK two-half-step) |
-| `Langevin` | `halfstep1_(noise1)` → `model(state)` → `halfstep2_(noise2)` |
+| `Verlet` | `halfstep1_()` → `model(state)` → `halfstep2_()` (two-half-step) |
+| `Langevin` | `halfstep1_(noise1)` → `model(state)` → `halfstep2_(noise2)` (BBK) |
 
 **Forces vs halo atoms:** Each integrator only updates `state.pos` and `state.vel` for the `num_local` owned atoms. The model is expected to return forces shaped `[num_local, 3]` with ghost contributions already accumulated via autograd on the owned atoms, as guaranteed by the `energy.backward()` design in `DistNNPModel.__call__`.
 
@@ -234,7 +234,7 @@ Snapshots are produced by the simulation loop at GPU speed (~millions of floats 
 Simulation thread                  Background I/O thread
 ──────────────────                 ─────────────────────
 integrator.step(...)         ─┐
-writer.submit(step, state)    │    queue.get() → serialize → write → fsync (periodic)
+writer.submit(step, state)    │    queue.get() → serialize → write → flush (periodic)
 integrator.step(...)         ─┘
 writer.submit(step, state)    │    queue.get() → ...
 ...                           │
@@ -249,7 +249,7 @@ The queue has a bounded capacity (`writer_buffer_size`). If the simulation produ
 class DistributedBufferedWriter:
     def __init__(
         self,
-        output_path: str,          # e.g. "results/rank_2_traj.npz"
+        output_path: str,          # e.g. "results/rank_2.traj"
         buffer_size: int = 10,     # max snapshots held in memory before blocking
         flush_interval: int = 500, # force a disk flush every N submitted snapshots
     ) -> None:
@@ -295,19 +295,29 @@ Each submitted snapshot captures, at minimum:
 | `atom_indices` | `[num_local]` | int64 |
 | `local_energy` | scalar | float32 |
 
-Fields are copied from `state.local_partition_info` to a CPU tensor on the simulation thread before being enqueued, so the background thread works entirely in CPU memory and never touches GPU tensors.
+Fields are copied from `state.local_partition_info` to CPU tensors on the simulation thread before being enqueued, so the background thread works entirely in CPU memory and never touches GPU tensors.
 
 ### Output format
 
-Each rank writes a single file: `{output_dir}/rank_{rank}_traj.npz`. The file is a NumPy `.npz` archive with one array per (field, step) pair, using a naming convention like `positions_0000100`, `positions_0000200`, etc. Appending to an existing file on resume requires re-reading it first; for large runs an HDF5-based format may be preferred (deferred to future work).
+The output format has not been decided. A custom binary format is the likely direction, as it gives full control over layout, header structure, append semantics, and alignment — without the overhead or constraints of general-purpose container formats.
+
+The key requirements any format must satisfy:
+
+- **Append without rewrite**: each new snapshot is appended sequentially; the file does not need to be re-read or re-written to add a record.
+- **Fixed-size records**: a record header (step index, atom count, field count, byte offsets) followed by raw float32/int64 payloads. Fixed-size records allow O(1) seeking to any step by index.
+- **No cross-rank synchronisation**: each rank writes its own file independently. There is no shared index, no collective operation, and no file locking.
+- **Crash recovery**: a partially written record at the end of a file (e.g., after a job preemption) must be detectable. A magic footer or record-length field written after the payload enables this.
+- **Post-processing**: per-rank files can be merged offline (step-aligned, by global atom index) to reconstruct the full trajectory. The merge step does not need to be real-time.
+
+The `DistributedBufferedWriter` interface is intentionally format-agnostic: `submit()` enqueues a CPU-side snapshot dict and the background thread calls a serialiser. Swapping the serialiser (e.g., from a prototype NPZ writer to the production binary format) does not change the writer's threading model or the caller API.
 
 ### Flush policy
 
-The background thread flushes (calls `file.flush()` / `os.fsync()`) in two situations:
+The background thread flushes (calls the file's `flush()` / `fsync()` equivalent) in two situations:
 1. Every `flush_interval` snapshots written, to limit data loss on a crash.
 2. When `flush()` is called by the simulation (end of run, or checkpoint).
 
-Individual `submit()` calls do not trigger a flush. This keeps per-step I/O cost to a queue append + CPU copy, with no syscall on the hot path.
+Individual `submit()` calls do not trigger a flush. This keeps per-step I/O cost to a queue append + CPU tensor copy, with no syscall on the simulation hot path.
 
 ### Contention model
 
@@ -319,8 +329,8 @@ Because each rank writes to its own file, there is no write contention between r
 
 ```python
 from distnnp import Simulator, SimulatorConfig
-from distnnp_model import LennardJonesPotentialModel   # example concrete model
-from distnnp_integrator import Langevin                # Langevin integrator
+from distnnp_model import LennardJonesPotentialModel
+from distnnp_integrator import Langevin
 
 config = SimulatorConfig(
     timestep_fs=0.5,
@@ -349,13 +359,13 @@ For manual control:
 ```python
 sim.setup("./system.xyz")
 for step in range(5000):
-    local_energy = sim.step()          # integrator calls model internally
+    local_energy = sim.step()
     if step % 100 == 0:
         total_energy = sim.reduce_energy(local_energy)
         if sim.rank == 0:
             print(f"Step {step}: E = {total_energy:.4f} eV")
     if step % 50 == 0:
-        sim._repartition()             # caller-driven rebalancing
+        sim._repartition()
     if step % 100 == 0:
         sim.writer.submit(step, sim.state)
 sim.writer.flush()
@@ -406,7 +416,7 @@ Simulator.step()
 (on traj_interval steps)
   writer.submit(step, state)
     │  CPU copy of positions/velocities/indices/energy (simulation thread)
-    └► background thread: serialize → append to rank_{rank}_traj.npz
+    └► background thread: serialize → append to rank_{rank} output file
 ```
 
 ---
@@ -464,10 +474,6 @@ The following functions and methods are referenced in this document but are not 
 
 3. **Checkpoint / restart**: `run()` has no restart support yet. A checkpoint mechanism would write `state.local_partition_info` (positions, velocities, atom indices) plus the step counter to disk via the `DistributedBufferedWriter`, so a run can be resumed without re-reading the input file from scratch.
 
-4. **Writer output format**: `.npz` is simple but requires loading the entire file to append. For long runs HDF5 (via `h5py`) allows true append and per-dataset chunked compression. The writer interface is format-agnostic; the serialisation strategy is an implementation detail.
+4. **Trajectory output format**: The binary format has not been specified. The key design decisions are: record layout (fixed-size vs length-prefixed), header fields (step, atom count, field descriptors), alignment for direct memory mapping, and crash-recovery sentinel values. The `DistributedBufferedWriter` interface is format-agnostic and the serialiser is a swappable implementation detail.
 
 5. **Writer back-pressure vs drop**: When `buffer_size` is full, `submit()` currently blocks. An alternative is to drop the snapshot and emit a warning. Blocking is safer for correctness (no data loss) but can stall the simulation on a slow filesystem. A configurable `on_full: "block" | "drop"` policy could cover both use cases.
-
-6. **GNN multi-layer halo depth**: For GNN-based `DistNNPModel` implementations, `gather_halo` must be called once per message-passing layer (not once per step) with the updated embedding tensor. The model itself must manage per-layer exchanges internally, using `state.local_partition_info` halo maps directly. The `Simulator` and integrator do not need to change for this.
-
-7. **`SimulatorConfig` vs injected `SimulationConfig`**: `SimulatorConfig` (this document) captures simulation control parameters. `SimulationConfig` (from `distnnp_state`) captures physical cell parameters. They should remain separate structs: `Simulator` constructs a `SimulationConfig` from the loaded structure file and passes it to the partitioner; the user never touches it directly.
