@@ -56,14 +56,17 @@ namespace distnnp_state
 
     struct DistNNPState
     {
-      // Distributed environment information
-      DistEnvironment dist_env;
+        // Distributed environment information
+        DistEnvironment dist_env;
 
-      // Molecular system information
-      MolecularInfo global_molecular_info; // Contains global atom information for the entire system
+        // Simulation configuration
+        SimulationConfig sim_config;
 
-      // Partitioned data information
-      PartitionMessagePassingInfo local_partition_info; // Contains local atom information for this partition
+        // Molecular system information
+        MolecularInfo global_molecular_info; // Contains global atom information for the entire system
+
+        // Partitioned data information
+        PartitionMessagePassingInfo local_partition_info; // Contains local atom information for this partition
 
     };
 } // namespace distnnp_state

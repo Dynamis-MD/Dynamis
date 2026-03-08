@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.25.0)
 project(
     distnnp_model
     VERSION 0.1.0
-    DESCRIPTION "A distributed state management library for neural network potentials"
+    DESCRIPTION "A distributed torch-based neural network potentials library"
     HOMEPAGE_URL "https://github.com/szaman19/DistNNP"
     LANGUAGES CXX CUDA
 )
@@ -47,17 +47,45 @@ find_package(Torch REQUIRED)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
+# Locate distnnp_state public headers using CMake-native find_path.
+#
+# No subprocess is needed — find_package(Python) above already resolved the
+# correct interpreter and set Python_SITEARCH / Python_SITELIB for this build.
+#
+# Search order:
+#   1. <sitearch>/distnnp_state/include/  — regular pip install; headers are
+#      placed there by distnnp_state's install(DIRECTORY include/ ...) rule.
+#   2. ../distnnp_state/include/  — editable install within this monorepo;
+#      CMAKE_CURRENT_SOURCE_DIR is distnnp_model/, so ../distnnp_state/include
+#      resolves to the sibling package's source include/ directory.
+find_path(DISTNNP_STATE_INCLUDE_DIR
+    NAMES distnnp_state/distnnp_state.hpp
+    HINTS
+        "${Python_SITEARCH}/distnnp_state/include"
+        "${Python_SITELIB}/distnnp_state/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../distnnp_state/include"
+    NO_DEFAULT_PATH
+)
+if(NOT DISTNNP_STATE_INCLUDE_DIR)
+    message(FATAL_ERROR
+        "Could not find distnnp_state headers. "
+        "Install it first: pip install -e ./distnnp_state")
+endif()
+message(STATUS "distnnp_state include dir: ${DISTNNP_STATE_INCLUDE_DIR}")
+
 python_add_library(distnnp_model_impl
     MODULE
     WITH_SOABI
     src/distnnp_model_bindings.cpp
     src/csrc/push_buffer.cu
+    src/csrc/exchanger.cu
 )
 
 target_include_directories(distnnp_model_impl
     PRIVATE
     include
     ${TORCH_INCLUDE_DIRS}
+    ${DISTNNP_STATE_INCLUDE_DIR}
 )
 
 # torch_python provides pybind11 type_casters for at::Tensor and must be
