@@ -2,6 +2,7 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <vector>
+#include "distnnp_state/distnnp_state.hpp"
 
 namespace distnnp_model
 {
@@ -36,29 +37,14 @@ public:
     ~IPCExchanger();
 
     // Allocate a tensor via raw cudaMalloc (bypasses PyTorch caching allocator).
-    // This is REQUIRED for CUDA IPC: cudaIpcGetMemHandle needs the base pointer
-    // of a cudaMalloc allocation. PyTorch's caching allocator sub-allocates from
-    // larger blocks, so tensor.data_ptr() is NOT a cudaMalloc base pointer.
-    //
-    // Returns a float tensor of shape [rows, cols] on the specified CUDA device.
-    // The tensor's destructor calls cudaFree.
+    // Required for CUDA IPC: cudaIpcGetMemHandle needs the base pointer
+    // of a cudaMalloc allocation.
     static torch::Tensor allocate_ipc_buffer(int64_t rows, int64_t cols, int64_t device_index);
 
     // Export CUDA IPC handle for a buffer allocated via allocate_ipc_buffer().
-    // Returns 64 bytes (sizeof cudaIpcMemHandle_t).
     std::vector<uint8_t> export_ipc_handle(torch::Tensor buffer);
 
     // Open remote IPC handles and compute push targets.
-    //   all_x_handles:      [W] x 64 bytes — IPC handles for all ranks' x_buffers
-    //   all_grad_handles:    [W] x 64 bytes — IPC handles for all ranks' grad_recv_buffers
-    //   send_offsets:        [W+1] CSR
-    //   send_local_indices:  [total_send]
-    //   recv_offsets:        [W+1] CSR (this rank's)
-    //   all_recv_offsets:    [W, W+1] — recv_offsets from every rank (for remote offset calc)
-    //   all_num_local:       [W] — N_local for every rank
-    //   num_local:           this rank's N_local
-    //   feature_dim:         F
-    //   rank, world_size
     void setup(
         torch::Tensor x_buffer,
         torch::Tensor grad_recv_buffer,
@@ -76,36 +62,17 @@ public:
 
     // Forward push: gather features from x_buffer at send_local_indices,
     // write directly into peers' x_buffer ghost regions.
-    //
-    // Strategy based on ce_threshold_bytes:
-    //   - Default 0: SM kernel push (all peers, single kernel, low latency for small data)
-    //   - > 0: if any peer's data >= threshold, switch to CE mode for ALL peers
-    //          (gather to staging + per-peer cudaMemcpyAsync via Copy Engine, high BW)
     void push_forward(torch::Tensor x_buffer, cudaStream_t stream = 0,
                       int64_t ce_threshold_bytes = 0);
 
-    // Backward push: gather gradients from x_buffer's ghost region,
+    // Backward push: gather gradients from ghost region,
     // write into peers' grad_recv_buffer.
-    // After sync, grad_recv_buffer is populated with incoming gradients.
     void push_backward(torch::Tensor grad_at_ghost, cudaStream_t stream = 0);
 
     // --- IPC Event synchronization ---
-
-    // Create a local interprocess event and return its IPC handle (64 bytes).
-    // The event is kept alive internally. Call once per rank before setup_events().
     std::vector<uint8_t> create_and_export_event();
-
-    // Open remote events from all ranks for stream-level sync.
-    //   all_event_handles:   [W] x 64 bytes, event handles from all ranks
-    //   (all_event_handles[rank] is this rank's own handle, will be skipped)
     void setup_events(const std::vector<std::vector<uint8_t>> &all_event_handles);
-
-    // Record this rank's completion event on the given stream.
-    // Call after push_forward/push_backward kernel launch.
     void record_push_complete(cudaStream_t stream = 0);
-
-    // Wait for all remote ranks' push to complete before proceeding on stream.
-    // Call before reading ghost region.
     void wait_for_pushes(cudaStream_t stream = 0);
 
     void teardown();
@@ -116,8 +83,6 @@ public:
     int64_t total_send() const { return total_send_; }
     int64_t total_recv() const { return total_recv_; }
     bool is_setup() const { return is_setup_; }
-
-    // Device tensor of send_local_indices (for autograd to save)
     torch::Tensor send_local_indices() const { return send_local_indices_; }
 
 private:
@@ -154,6 +119,71 @@ private:
     cudaEvent_t local_event_ = nullptr;           // this rank's event
     std::vector<cudaEvent_t> remote_events_;      // opened events from peers
     bool events_setup_ = false;
+};
+
+// High-level feature exchanger interface.
+// Wraps IPCExchanger for NVLink-based one-sided push.
+class FeatureExchanger
+{
+public:
+    FeatureExchanger() = default;
+    ~FeatureExchanger();
+
+    // --- Public interface ---
+    // Forward: copies local_features into IPC buffer, pushes to peers,
+    // returns [N_local + N_ghost, F] with ghost region populated.
+    torch::Tensor feature_push_forward(const torch::Tensor &local_features,
+                                       const distnnp_state::PartitionMessagePassingInfo &partition_info);
+
+    // Backward: pushes ghost grads to peers, scatter-adds received grads,
+    // returns [N_local, F].
+    torch::Tensor feature_push_backward(const torch::Tensor &grad_output,
+                                        const torch::IntArrayRef &grad_input_shape,
+                                        const distnnp_state::PartitionMessagePassingInfo &partition_info);
+
+    // --- IPC configuration (call from Python before first exchange) ---
+    static torch::Tensor allocate_ipc_buffer(int64_t rows, int64_t cols, int64_t device_index)
+    {
+        return IPCExchanger::allocate_ipc_buffer(rows, cols, device_index);
+    }
+
+    std::vector<uint8_t> export_ipc_handle(torch::Tensor buffer)
+    {
+        return ipc_.export_ipc_handle(buffer);
+    }
+
+    void setup_ipc(
+        torch::Tensor x_buffer,
+        torch::Tensor grad_recv_buffer,
+        const std::vector<std::vector<uint8_t>> &all_x_handles,
+        const std::vector<std::vector<uint8_t>> &all_grad_handles,
+        torch::Tensor send_offsets,
+        torch::Tensor send_local_indices,
+        torch::Tensor recv_offsets,
+        torch::Tensor all_recv_offsets,
+        torch::Tensor all_num_local,
+        int64_t num_local,
+        int64_t feature_dim,
+        int64_t rank,
+        int64_t world_size);
+
+    std::vector<uint8_t> create_and_export_event() { return ipc_.create_and_export_event(); }
+    void setup_events(const std::vector<std::vector<uint8_t>> &all_event_handles) { ipc_.setup_events(all_event_handles); }
+    void record_push_complete() { ipc_.record_push_complete(0); }
+    void wait_for_pushes() { ipc_.wait_for_pushes(0); }
+
+    void teardown();
+    bool is_ipc_setup() const { return ipc_.is_setup(); }
+    void set_ce_threshold_bytes(int64_t t) { ce_threshold_bytes_ = t; }
+    int64_t ce_threshold_bytes() const { return ce_threshold_bytes_; }
+
+private:
+    IPCExchanger ipc_;
+    int64_t ce_threshold_bytes_ = 0;
+
+    // References to IPC-allocated buffers (kept alive via torch::Tensor refcount)
+    torch::Tensor x_buffer_;           // [N_local + N_ghost, F]
+    torch::Tensor grad_recv_buffer_;   // [total_send, F]
 };
 
 } // namespace distnnp_model
