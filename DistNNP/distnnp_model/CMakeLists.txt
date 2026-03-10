@@ -68,8 +68,8 @@ python_add_library(distnnp_model_impl
     MODULE
     WITH_SOABI
     src/distnnp_model_bindings.cpp
-    src/exchange/ipc_exchanger.cpp
-    src/exchange/ipc_exchange_kernels.cu
+    src/csrc/exchange/ipc_exchanger.cpp
+    src/csrc/exchange/ipc_exchange_kernels.cu
     src/csrc/push_buffer.cu
     src/csrc/exchanger.cu
 )
