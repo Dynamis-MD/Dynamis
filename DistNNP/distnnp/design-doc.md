@@ -45,10 +45,10 @@ class SimulatorConfig:
 
     # Output
     output_dir: str = "./results"
-    traj_interval: int = 100          # Enqueue a trajectory snapshot every N steps (0 = disabled)
-    log_interval: int = 10            # Log energy/timing every N steps
-    writer_buffer_size: int = 10      # Max snapshots buffered in memory before a forced flush
-    writer_flush_interval: int = 500  # Flush writer to disk every N steps regardless of buffer size
+    traj_file: str = "trajectory.traj"  # Single shared output file (relative to output_dir)
+    traj_interval: int = 100            # Enqueue a trajectory snapshot every N steps (0 = disabled)
+    log_interval: int = 10              # Log energy/timing every N steps
+    writer_buffer_size: int = 10        # Max snapshots held in memory before submit() blocks
 
     # Distributed backend
     backend: str = "nccl"             # PyTorch distributed backend ("nccl" | "gloo")
@@ -68,7 +68,7 @@ class SimulatorConfig:
    b. Reduce energy across ranks for logging (on logging steps only).
    c. Enqueue a trajectory snapshot with the `DistributedBufferedWriter` (on output steps only).
 5. **Periodic repartitioning** — every `rebalance_interval` steps, re-run partition + halo map build.
-6. **Output** — delegate all I/O to a `DistributedBufferedWriter`; each rank writes independently to its own file.
+6. **Output** — delegate all I/O to a `DistributedBufferedWriter`; all ranks write concurrently to a single shared trajectory file using `pwrite()` with vertex-ID-based byte offsets, so no cross-rank coordination or file locking is required.
 
 ### Constructor
 
@@ -142,7 +142,7 @@ Steps performed (in order):
 
 6. **Writer initialisation**
 
-   Constructs a `DistributedBufferedWriter` bound to this rank's output file (see below). The writer's background thread is started here and runs for the lifetime of the simulation.
+   Constructs a `DistributedBufferedWriter` bound to the shared trajectory file (see below). On rank 0, writes the file front matter before any simulation steps. All ranks open the same file path for `pwrite()`. The writer's background thread is started here and runs for the lifetime of the simulation.
 
 ---
 
@@ -224,64 +224,118 @@ Timing uses CUDA events for accurate GPU-side measurement. The measured interval
 
 ### Overview
 
-`DistributedBufferedWriter` handles all trajectory and diagnostic output for a single rank. Each rank owns one writer instance that writes to its own file — there is no cross-rank coordination during writes, which eliminates lock contention on shared file handles.
+`DistributedBufferedWriter` handles all trajectory output for a single rank. All ranks write to a **single shared file** using the `pwrite()` system call with vertex-ID-based byte offsets, so no cross-rank locking or coordination is required during writes.
 
-Snapshots are produced by the simulation loop at GPU speed (~millions of floats per step) but written to disk at storage speed. The writer bridges this gap by accumulating snapshots in an in-memory queue and draining it on a background thread, so the simulation thread is never blocked by I/O.
+Snapshots are produced by the simulation loop at GPU speed but written to disk at storage speed. The writer bridges this gap by accumulating snapshots in an in-memory queue and draining it on a background thread, so the simulation thread is never blocked by I/O.
 
 ### Design
 
 ```
-Simulation thread                  Background I/O thread
-──────────────────                 ─────────────────────
-integrator.step(...)         ─┐
-writer.submit(step, state)    │    queue.get() → serialize → write → flush (periodic)
-integrator.step(...)         ─┘
-writer.submit(step, state)    │    queue.get() → ...
-...                           │
-writer.flush()  ──────────────┘    drain remaining items, close file
+Simulation thread                   Background I/O thread
+──────────────────                  ─────────────────────
+integrator.step(...)          ─┐
+writer.submit(step, state)     │    queue.get() → compute pwrite offsets → pwrite()
+integrator.step(...)          ─┘
+writer.submit(step, state)     │    queue.get() → ...
+...                            │
+writer.flush()  ───────────────┘    drain remaining items, close fd
 ```
 
-The queue has a bounded capacity (`writer_buffer_size`). If the simulation produces snapshots faster than the background thread can write them, `submit()` blocks until space is available. This provides back-pressure and prevents unbounded memory growth, at the cost of stalling the simulation — in practice this only happens when storage I/O is significantly slower than one step per `traj_interval` steps.
+The queue has a bounded capacity (`writer_buffer_size`). If the simulation produces snapshots faster than the background thread can write them, `submit()` blocks until space is available. For the initial implementation this is not expected to be a concern — the target deployment uses high-speed NFS where write throughput is sufficient.
+
+
+
+## Overview of the I/O Requirements
+- Random access of atom data by atom number at any frame, without reading the entire frame or trajectory.
+- A **single** file for the entire trajectory 
+- All data types aligned to a multiple of their size (64 bit alignment for 64-bit types, 32-bit alignment for 32-bit types)
+- Endianess: little-endian (standard on x86-64) 
+
 
 ### API
+### Trajectory file format
 
-```python
-class DistributedBufferedWriter:
-    def __init__(
-        self,
-        output_path: str,          # e.g. "results/rank_2.traj"
-        buffer_size: int = 10,     # max snapshots held in memory before blocking
-        flush_interval: int = 500, # force a disk flush every N submitted snapshots
-    ) -> None:
-        ...
+The trajectory uses a custom binary format designed for random access, concurrent multi-rank writes, and self-description without external metadata.
 
-    def submit(self, step: int, state: DistNNPState) -> None:
-        """
-        Enqueue a snapshot of the current state for writing.
-        Copies the relevant tensors to CPU immediately (on the simulation thread)
-        so that subsequent in-place updates by the integrator do not corrupt the
-        snapshot. The actual disk write happens on the background thread.
+#### Front matter
 
-        Blocks if the internal queue is full (back-pressure).
-        """
-        ...
+Rank 0 writes a fixed-size front matter block at byte offset 0 before any simulation steps. No other rank writes to this region. Fields:
 
-    def flush(self) -> None:
-        """
-        Block until all enqueued snapshots have been written and the output
-        file has been flushed to disk. Must be called before process exit
-        to guarantee no data is lost. Called automatically by run().
-        """
-        ...
+| Field | Type | Description |
+|---|---|---|
+| `magic` | `uint8[8]` | Magic string `DISTNNP\x00` identifying the file type |
+| `version` | `uint32` | Format version (currently `1`) |
+| `run_id` | `uint8[16]` | Unique run identifier (128-bit UUID, set at `setup()` time) |
+| `author` | `uint8[64]` | Null-terminated metadata string (hostname, user, or job ID) |
+| `total_atoms` | `uint64` | Global atom count; fixed for the lifetime of the simulation |
+| `bytes_per_atom` | `uint32` | Size of one atom record in bytes (see per-atom layout below) |
+| `field_count` | `uint32` | Number of fields stored per atom |
+| `field_descriptors` | `uint8[field_count × 32]` | Null-padded field names (e.g. `"position\0"`, `"velocity\0"`) |
+| `front_matter_size` | `uint64` | Total byte size of this header block; used to locate frame 0 |
 
-    def close(self) -> None:
-        """
-        Flush and shut down the background thread. After close(), submit()
-        must not be called. Implicitly called by flush() when used as a
-        context manager.
-        """
-        ...
+`front_matter_size` is always a multiple of 64 bytes for alignment.
+
+#### Per-frame layout
+
+Since `total_atoms` is constant throughout the simulation, every frame is the same size:
+
 ```
+frame_size = total_atoms × bytes_per_atom
+```
+
+Frame `i` starts at byte offset:
+
+```
+frame_offset(i) = front_matter_size + i × (8 + frame_size)
+```
+
+Each frame starts with an array of `total_atoms` values of `unint64` vertex IDs (8 bytes/atom) for random access, followed by the per-atom records. This allows a reader to quickly locate the data for any given atom in any frame by computing the byte offset from the vertex ID, without needing to read the entire frame or maintain an external index. An `offset_map` can be computed per frame by mapping the vertex IDs to the index in this array.
+
+#### Per-atom record
+
+Within a frame, atom `v` (by global vertex ID) is stored at:
+
+```
+atom_offset(frame_i, vertex_id) = frame_offset(frame_i) + 8 + offset_map(frame_i, vertex_id) × bytes_per_atom
+```
+
+Simple per-atom layout (32 bytes):
+
+| Field | Type | Bytes |
+|---|---|---|
+| `px, py, pz` | `float32 × 3` | 12 |
+| `vx, vy, vz` | `float32 × 3` | 12 |
+
+Total: **24 bytes/atom**. The field descriptors in the front matter reflect the actual fields stored. This requires combining the ids, positions, and velocities into a single CPU tensor before enqueuing for writing, but it keeps the on-disk format simple and compact.
+
+
+<!-- #### Concurrent writes with `pwrite()`
+
+Each rank computes the `atom_offset` for each of its owned atoms using the global vertex IDs assigned at simulation setup. It then calls `pwrite(fd, buf, nbytes, atom_offset)` — a single syscall that writes to an arbitrary file position without seeking, making it safe to call from multiple ranks simultaneously on the same open file descriptor.
+
+Because atom records do not overlap (each vertex ID maps to a unique byte range), no file locking is needed. On POSIX-compliant NFS and Lustre filesystems, concurrent `pwrite()` calls to non-overlapping regions are atomic and do not require coordination. -->
+
+#### C++ writer implementation
+
+The writer is implemented in C++ and exposed to Python via pybind11. 
+<!-- It uses `open(O_WRONLY | O_CREAT)` and `pwrite()` directly — no `fwrite`, no `fflush`, and no explicit `fsync`. The OS page cache handles write coalescing and durability. This avoids the overhead of `FILE*` buffering and eliminates the need for explicit flush commands in the Python simulation loop. -->
+
+> **Assumed symbol**: `distnnp_model_impl.TrajectoryWriter` — C++ class with `write_front_matter(total_atoms, run_id, author)` and `write_frame(fd, frame_idx, vertex_ids, positions, velocities)` methods. To be implemented in `distnnp_model` or a new `distnnp_io` extension.
+
+### Write bandwidth requirements
+
+Per-atom record size: 32 bytes (vertex ID + positions + velocities).
+
+| System size | Steps/s | Frame size | Required write bandwidth |
+|---|---|---|---|
+| 100k atoms | 10 | 3.2 MB | 32 MB/s |
+| 100k atoms | 20 | 3.2 MB | 64 MB/s |
+| 100k atoms | 50 | 3.2 MB | 160 MB/s |
+| 1M atoms | 10 | 32 MB | 320 MB/s |
+| 1M atoms | 20 | 32 MB | 640 MB/s |
+| 1M atoms | 50 | 32 MB | 1.6 GB/s |
+
+For reference: typical NFS throughput on HPC systems is 1–10 GB/s aggregate across clients. At 1M atoms / 50 steps/s each process writes `1.6 GB/s ÷ world_size`, which is comfortably within range for 4–16 GPU jobs. At larger scales or higher step rates, storage bandwidth becomes the binding constraint.
 
 ### Snapshot content
 
@@ -289,39 +343,15 @@ Each submitted snapshot captures, at minimum:
 
 | Field | Shape | dtype |
 |---|---|---|
-| `step` | scalar | int64 |
+| `vertex_ids` | `[num_local]` | int64 |
 | `positions` | `[num_local, 3]` | float32 |
 | `velocities` | `[num_local, 3]` | float32 |
-| `atom_indices` | `[num_local]` | int64 |
-| `local_energy` | scalar | float32 |
 
 Fields are copied from `state.local_partition_info` to CPU tensors on the simulation thread before being enqueued, so the background thread works entirely in CPU memory and never touches GPU tensors.
 
-### Output format
-
-The output format has not been decided. A custom binary format is the likely direction, as it gives full control over layout, header structure, append semantics, and alignment — without the overhead or constraints of general-purpose container formats.
-
-The key requirements any format must satisfy:
-
-- **Append without rewrite**: each new snapshot is appended sequentially; the file does not need to be re-read or re-written to add a record.
-- **Fixed-size records**: a record header (step index, atom count, field count, byte offsets) followed by raw float32/int64 payloads. Fixed-size records allow O(1) seeking to any step by index.
-- **No cross-rank synchronisation**: each rank writes its own file independently. There is no shared index, no collective operation, and no file locking.
-- **Crash recovery**: a partially written record at the end of a file (e.g., after a job preemption) must be detectable. A magic footer or record-length field written after the payload enables this.
-- **Post-processing**: per-rank files can be merged offline (step-aligned, by global atom index) to reconstruct the full trajectory. The merge step does not need to be real-time.
-
-The `DistributedBufferedWriter` interface is intentionally format-agnostic: `submit()` enqueues a CPU-side snapshot dict and the background thread calls a serialiser. Swapping the serialiser (e.g., from a prototype NPZ writer to the production binary format) does not change the writer's threading model or the caller API.
-
-### Flush policy
-
-The background thread flushes (calls the file's `flush()` / `fsync()` equivalent) in two situations:
-1. Every `flush_interval` snapshots written, to limit data loss on a crash.
-2. When `flush()` is called by the simulation (end of run, or checkpoint).
-
-Individual `submit()` calls do not trigger a flush. This keeps per-step I/O cost to a queue append + CPU tensor copy, with no syscall on the simulation hot path.
-
 ### Contention model
 
-Because each rank writes to its own file, there is no write contention between ranks on a shared filesystem. The only contention is between the simulation thread and the background I/O thread for the queue lock, which is a lightweight `threading.Queue` operation and not a bottleneck. On NFS or Lustre filesystems, per-rank files also avoid the metadata bottleneck that would arise from all ranks writing to a single shared file simultaneously.
+Because all ranks use `pwrite()` to non-overlapping byte regions, there is no write contention between ranks on a POSIX-compliant filesystem. The only lock is the Python-side queue between the simulation thread and the background I/O thread, which is a lightweight `threading.Queue` operation. Back-pressure (a full queue stalling the simulation thread) is not expected to be an issue on high-speed NFS systems in the initial deployment.
 
 ---
 
@@ -342,8 +372,8 @@ config = SimulatorConfig(
     traj_interval=100,
     log_interval=10,
     output_dir="./md_results",
+    traj_file="trajectory.traj",
     writer_buffer_size=10,
-    writer_flush_interval=500,
 )
 
 model      = LennardJonesPotentialModel(epsilon=0.01, sigma=3.4)
@@ -415,8 +445,8 @@ Simulator.step()
 
 (on traj_interval steps)
   writer.submit(step, state)
-    │  CPU copy of positions/velocities/indices/energy (simulation thread)
-    └► background thread: serialize → append to rank_{rank} output file
+    │  CPU copy of vertex_ids/positions/velocities (simulation thread)
+    └► background thread: compute pwrite() offsets by vertex_id → pwrite() to shared traj file
 ```
 
 ---
@@ -454,7 +484,7 @@ The following functions and methods are referenced in this document but are not 
 | `redistribute_atoms(local_data, partition_id, dist_env)` | `distnnp` | `all_to_all`-based atom redistribution after repartition |
 | `DistNNPModel.gather_halo(state)` | `distnnp_model` | Executes GPU-to-GPU halo exchange; appends ghost atoms to position tensors in `state` |
 | `state.energy` | `distnnp_state` | Field on `DistNNPState` for the integrator to store the last computed local energy |
-| `state.pos`, `state.vel`, `state.forces`, `state.mass` | `distnnp_state` | Convenience aliases (or properties) on `DistNNPState` for the fields in `local_partition_info` |
+| `state.pos`, `state.vel`, `state.forces`, `state.mass`, `state.vertex_ids` | `distnnp_state` | Convenience aliases (or properties) on `DistNNPState` for the fields in `local_partition_info` |
 
 **Integrators (implemented):**
 
@@ -474,6 +504,9 @@ The following functions and methods are referenced in this document but are not 
 
 3. **Checkpoint / restart**: `run()` has no restart support yet. A checkpoint mechanism would write `state.local_partition_info` (positions, velocities, atom indices) plus the step counter to disk via the `DistributedBufferedWriter`, so a run can be resumed without re-reading the input file from scratch.
 
-4. **Trajectory output format**: The binary format has not been specified. The key design decisions are: record layout (fixed-size vs length-prefixed), header fields (step, atom count, field descriptors), alignment for direct memory mapping, and crash-recovery sentinel values. The `DistributedBufferedWriter` interface is format-agnostic and the serialiser is a swappable implementation detail.
+4. **Trajectory format extensibility**: The current per-atom record is fixed at 32 bytes (vertex ID + positions + velocities). Adding fields (e.g. forces, per-atom energies) requires bumping `bytes_per_atom` and `version`, making old readers incompatible unless a migration path is defined. The `field_descriptors` array in the front matter provides enough metadata for readers to introspect fields, but a versioned field-extension scheme has not been designed yet.
 
-5. **Writer back-pressure vs drop**: When `buffer_size` is full, `submit()` currently blocks. An alternative is to drop the snapshot and emit a warning. Blocking is safer for correctness (no data loss) but can stall the simulation on a slow filesystem. A configurable `on_full: "block" | "drop"` policy could cover both use cases.
+5. **Writer back-pressure**: For the initial implementation on high-speed NFS systems, `submit()` blocks when the queue is full. This is the safe default (no data loss) and is not expected to stall the simulation in practice. A future `on_full: "block" | "drop"` policy option can be added if slow-storage deployments become a concern.
+
+6. **Vertex ID assignment**: Each atom needs a globally unique, stable vertex number assigned once at `setup()` time and preserved across repartitioning. The simplest scheme is to number atoms 0…N-1 in the order they appear in the input file. This must be stored in `MolecularInfo` and tracked through `all_to_all` redistribution so each rank always knows the vertex IDs of its currently owned atoms.
+
