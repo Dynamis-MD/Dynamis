@@ -116,7 +116,7 @@ namespace distnnp_integrator
     int threads = 256;
     int blocks = (num_atoms + threads - 1) / threads;
 
-    auto device_index = positions.device().index();
+    auto device_index = velocities.device().index();
     auto stream = at::cuda::getCurrentCUDAStream(device_index);
 
     langevin_halfstep2_kernel<<<blocks, threads, 0, stream>>>(
