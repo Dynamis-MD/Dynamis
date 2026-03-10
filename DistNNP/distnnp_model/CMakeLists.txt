@@ -27,6 +27,12 @@ set(CUDA_TOOLKIT_ROOT_DIR "${CUDAToolkit_ROOT}" CACHE PATH "" FORCE)
 set(CUDA_INCLUDE_DIRS "${CUDAToolkit_INCLUDE_DIRS}" CACHE PATH "" FORCE)
 
 
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(Torch REQUIRED)
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+
+# Locate torch_python after find_package(Torch) so TORCH_LIBRARIES paths are available.
 if (TORCH_LIBRARY)
   get_filename_component(TORCH_LIB_DIR "${TORCH_LIBRARY}" DIRECTORY)
 endif ()
@@ -35,29 +41,14 @@ find_library(TORCH_PYTHON_LIBRARY
   torch_python
   HINTS
   ${TORCH_LIB_DIR}
+  ${TORCH_INSTALL_PREFIX}/lib
   $ENV{Python_SITELIB}/torch/lib64
   $ENV{Python_SITELIB}/torch/lib
   NO_DEFAULT_PATH)
 
 find_library(TORCH_PYTHON_LIBRARY torch_python REQUIRED)
 
-
-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-find_package(Torch REQUIRED)
-
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
-
 # Locate distnnp_state public headers using CMake-native find_path.
-#
-# No subprocess is needed — find_package(Python) above already resolved the
-# correct interpreter and set Python_SITEARCH / Python_SITELIB for this build.
-#
-# Search order:
-#   1. <sitearch>/distnnp_state/include/  — regular pip install; headers are
-#      placed there by distnnp_state's install(DIRECTORY include/ ...) rule.
-#   2. ../distnnp_state/include/  — editable install within this monorepo;
-#      CMAKE_CURRENT_SOURCE_DIR is distnnp_model/, so ../distnnp_state/include
-#      resolves to the sibling package's source include/ directory.
 find_path(DISTNNP_STATE_INCLUDE_DIR
     NAMES distnnp_state/distnnp_state.hpp
     HINTS
@@ -77,6 +68,8 @@ python_add_library(distnnp_model_impl
     MODULE
     WITH_SOABI
     src/distnnp_model_bindings.cpp
+    src/exchange/ipc_exchanger.cpp
+    src/exchange/ipc_exchange_kernels.cu
     src/csrc/push_buffer.cu
     src/csrc/exchanger.cu
 )
@@ -85,6 +78,7 @@ target_include_directories(distnnp_model_impl
     PRIVATE
     include
     ${TORCH_INCLUDE_DIRS}
+    ${CUDAToolkit_INCLUDE_DIRS}
     ${DISTNNP_STATE_INCLUDE_DIR}
 )
 
@@ -110,6 +104,7 @@ set_target_properties(distnnp_model_impl
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
     CUDA_EXTENSIONS OFF
+    CUDA_ARCHITECTURES "70;80;90"
 
     INSTALL_RPATH_USE_LINK_PATH ON
 )
@@ -123,4 +118,3 @@ install(FILES
     DESTINATION .
     OPTIONAL
 )
-

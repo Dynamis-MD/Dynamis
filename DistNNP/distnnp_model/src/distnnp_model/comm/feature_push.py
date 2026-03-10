@@ -59,4 +59,4 @@ class FeaturePushToExchange(Function):
             grad_output, input_feature_shape, state.local_partition_info
         )
 
-        return recevied_features_grad, None  # No gradients for state
+        return recevied_features_grad, None, None  # No gradients for state or exchanger
