@@ -43,9 +43,14 @@ class KDTreePartitioner : public AbstractPartitioner
   //   3. Auto-weighted: edge_counts undefined + SimulationConfig provided
   //      → builds graph at cutoff, computes edge_counts, stores edge_index
 public:
-  // Modes 1 & 2: unweighted or user-provided weights
+  // Modes 1: unweighted
   PartitionMessagePassingInfo partition(const MolecularInfo &state,
                                         const DistEnvironment &env) override;
+
+  // Mode 2: user-provided weights
+  PartitionMessagePassingInfo partition(const MolecularInfo &state,
+                                        const DistEnvironment& env,
+                                        const torch::Tensor &weights);
 
   // Mode 3: auto-compute edge weights via radius_graph_pbc (CUDA only).
   // Builds graph at config.cutoff, counts edges per atom, partitions by cost.
@@ -71,9 +76,14 @@ class SFCPartitioner : public AbstractPartitioner
 public:
   explicit SFCPartitioner(SFCCurveType ct = SFCCurveType::Morton) : curve_type_(ct) {}
 
-  // Modes 1 & 2: unweighted or user-provided weights
+  // Modes 1: unweighted
   PartitionMessagePassingInfo partition(const MolecularInfo &state,
                                         const DistEnvironment &env) override;
+
+  // Mode 2: user-provided weights
+  PartitionMessagePassingInfo partition(const MolecularInfo &state,
+                                        const DistEnvironment& env,
+                                        const torch::Tensor &weights);
 
   // Mode 3: auto-compute edge weights via radius_graph_pbc (CUDA only).
   PartitionMessagePassingInfo partition(const MolecularInfo &state,
