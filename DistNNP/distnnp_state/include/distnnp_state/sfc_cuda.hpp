@@ -6,7 +6,7 @@
 // curve_type: 0 = Morton, 1 = Hilbert
 at::Tensor sfc_partition_cuda(
     at::Tensor pos,       // [N, 3] float32 CUDA
-    at::Tensor weights,   // [N] or undefined
+    at::Tensor weights,   // [N]
     int64_t W,            // number of partitions
     int64_t curve_type    // 0=Morton, 1=Hilbert
 );

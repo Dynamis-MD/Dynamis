@@ -75,7 +75,7 @@ namespace distnnp_state
     static PartitionMessagePassingInfo do_partition(
         const MolecularInfo &state,
         const DistEnvironment &env,
-        const std::optional<torch::Tensor> &weights) // may be undefined
+        const std::optional<torch::Tensor> &weights) 
     {
         PartitionMessagePassingInfo info;
         auto device = state.atom_positions.device();
@@ -149,7 +149,7 @@ namespace distnnp_state
     PartitionMessagePassingInfo KDTreePartitioner::partition(
         const MolecularInfo &state,
         const DistEnvironment &env,
-        const SimulationConfig &config)
+        const GeometryConfig &config)
     {
         auto pos = state.atom_positions;
         auto device = pos.device();

@@ -20,7 +20,7 @@ public:
   void build_halo_maps(PartitionMessagePassingInfo &info,
                        const MolecularInfo &global_state,
                        const DistEnvironment &env,
-                       const SimulationConfig &config);
+                       const GeometryConfig &config);
 };
 
 class SimpleSpatialPartitioner : public AbstractPartitioner
@@ -38,9 +38,9 @@ class KDTreePartitioner : public AbstractPartitioner
   // for large systems with non-uniform atom distributions.
   //
   // Three partition modes:
-  //   1. Unweighted: edge_counts undefined, no SimulationConfig
+  //   1. Unweighted: edge_counts undefined, no GeometryConfig
   //   2. User-weighted: edge_counts set on MolecularInfo
-  //   3. Auto-weighted: edge_counts undefined + SimulationConfig provided
+  //   3. Auto-weighted: edge_counts undefined + GeometryConfig provided
   //      → builds graph at cutoff, computes edge_counts, stores edge_index
 public:
   // Modes 1: unweighted
@@ -57,7 +57,7 @@ public:
   // Stores the graph in info.edge_index for downstream use.
   PartitionMessagePassingInfo partition(const MolecularInfo &state,
                                         const DistEnvironment &env,
-                                        const SimulationConfig &config);
+                                        const GeometryConfig &config);
 };
 
 enum class SFCCurveType : int { Morton = 0, Hilbert = 1 };
@@ -68,9 +68,9 @@ class SFCPartitioner : public AbstractPartitioner
   // the atoms. Good locality and load balancing for certain systems.
   //
   // Three partition modes (same as KDTreePartitioner):
-  //   1. Unweighted: edge_counts undefined, no SimulationConfig
+  //   1. Unweighted: edge_counts undefined, no GeometryConfig
   //   2. User-weighted: edge_counts set on MolecularInfo
-  //   3. Auto-weighted: edge_counts undefined + SimulationConfig provided
+  //   3. Auto-weighted: edge_counts undefined + GeometryConfig provided
   //      → builds graph at cutoff, computes edge_counts, stores edge_index
   SFCCurveType curve_type_;
 public:
@@ -88,7 +88,7 @@ public:
   // Mode 3: auto-compute edge weights via radius_graph_pbc (CUDA only).
   PartitionMessagePassingInfo partition(const MolecularInfo &state,
                                         const DistEnvironment &env,
-                                        const SimulationConfig &config);
+                                        const GeometryConfig &config);
 };
 
 } // namespace distnnp_state
