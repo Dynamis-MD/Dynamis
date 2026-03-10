@@ -145,9 +145,6 @@ void AbstractPartitioner::build_halo_maps(
     info.recv_ghost_indices = recv_ghost_indices_t;
     info.interior_mask = interior_mask;
 
-    // Store halo graph for downstream NNP model use
-    info.edge_index_halo = edge_index;
-
     // Update send_recv_matrix with halo counts (vectorized, no CPU sync)
     auto send_counts_per_rank = send_offsets_t.slice(0, 1, W + 1) - send_offsets_t.slice(0, 0, W);
     info.global_send_recv_matrix.select(0, R).copy_(send_counts_per_rank);

@@ -17,6 +17,7 @@ namespace distnnp_state
         unsigned long global_rank;
         unsigned long world_size;
         unsigned long gpus_per_node;
+        unsigned long gpu_per_rank;
         unsigned long num_nodes;
         unsigned long local_rank;
     };
@@ -62,7 +63,7 @@ namespace distnnp_state
         MolecularInfo global_molecular_info; 
 
         // Partitioned Local Molecular information
-        MolecularInfo local_molecular_info; // Used for computation
+        MolecularInfo local_molecular_info; // Used for computation on GPU
 
         // Partitioned data information
         PartitionMessagePassingInfo local_partition_info; // Contains local atom information for this partition
