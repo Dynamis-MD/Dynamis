@@ -6,8 +6,8 @@ namespace distnnp_state
     struct MolecularInfo
     {
         unsigned long num_atoms;          // Number of atoms in this partition
-        torch::Tensor atom_vertex_number; // Tensor of shape [num_atoms] containing global atom indices
-        torch::Tensor atom_types;         // Tensor of shape [num_atoms] containing global atom types
+        torch::Tensor atom_vertex_number; // Tensor of shape [num_atoms] containing atom indices
+        torch::Tensor atom_types;         // Tensor of shape [num_atoms] containing atom types
         torch::Tensor atom_positions;     // Tensor of shape [num_atoms, 3] containing atomic positions
         torch::Tensor atom_velocities;    // Tensor of shape [num_atoms, 3] containing atomic velocities
     };
