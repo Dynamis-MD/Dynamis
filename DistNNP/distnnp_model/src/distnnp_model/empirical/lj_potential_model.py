@@ -78,21 +78,21 @@ class LennardJonesPotentialModel(DistNNPModel):
             local_atom_types.float(), distributed_state, self._feature_exchanger
         ).long()  # type: ignore
 
-        local_positions = torch.cat([local_positions, boundary_positions], dim=0)  # type: ignore
-        local_atom_types = torch.cat([local_atom_types, boundary_atom_types], dim=0)  # type: ignore
+        positions = torch.cat([local_positions, boundary_positions], dim=0)  # type: ignore
+        atom_types = torch.cat([local_atom_types, boundary_atom_types], dim=0)  # type: ignore
 
         # Construct the radius graph with PBC using the local positions (including boundary atoms)
 
         sim_config = distributed_state.simulation_config
         # Ensure autograd is not tracking the radius graph construction
-        n_atoms = local_positions.shape[0]
+        n_atoms = positions.shape[0]
         with torch.no_grad():
             edge_index, _, _ = radius_graph_pbc_cuda(
                 data=type(
                     "Data",
                     (object,),
                     {
-                        "pos": local_positions,
+                        "pos": positions,
                         "cell": sim_config.cell,
                         "natoms": n_atoms,
                         "pbc": sim_config.pbc,
@@ -105,7 +105,7 @@ class LennardJonesPotentialModel(DistNNPModel):
 
         # Compute the Lennard-Jones potential energy using the local atom types, positions, and edge index
         energy = lennard_jones_potential(
-            local_atom_types, local_positions, edge_index, self.epsilon, self.sigma
+            atom_types, positions, edge_index, self.epsilon, self.sigma
         )
 
         energy.backward()
