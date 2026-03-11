@@ -178,6 +178,30 @@ public:
     torch::Tensor feature_push_backward(const torch::Tensor &grad_output,
                                         const torch::IntArrayRef &grad_input_shape,
                                         const distnnp_state::PartitionMessagePassingInfo &partition_info);
+  class FeatureExchanger
+  {
+    private:
+      ncclComm_t comm_;
+      int rank_;
+      int world_size_;
+
+      // Number of atoms that go to and from each rank
+      std::vector<int64_t> cached_send_splits_;
+      std::vector<int64_t> cached_recv_splits_;
+
+      // Convert CSR offsets to per-rank split sizes for ncclSend/ncclRecv
+      void update_splits_cache_(const distnnp_state::PartitionMessagePassingInfo &partition_info);
+
+  public:
+    FeatureExchanger(ncclComm_t comm, int rank, int world_size);
+
+    at::Tensor feature_push_forward(const at::Tensor &local_features,
+                                    const distnnp_state::PartitionMessagePassingInfo &partition_info);
+
+    at::Tensor feature_push_backward(const at::Tensor &grad_output,
+                                     const at::IntArrayRef &grad_input_shape,
+                                     const distnnp_state::PartitionMessagePassingInfo &partition_info);
+  };
 
     // --- IPC configuration (call from Python before first exchange) ---
     static torch::Tensor allocate_ipc_buffer(int64_t rows, int64_t cols, int64_t device_index)

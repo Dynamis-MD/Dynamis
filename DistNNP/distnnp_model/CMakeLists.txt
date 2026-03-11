@@ -26,6 +26,14 @@ find_package(CUDAToolkit REQUIRED)
 set(CUDA_TOOLKIT_ROOT_DIR "${CUDAToolkit_ROOT}" CACHE PATH "" FORCE)
 set(CUDA_INCLUDE_DIRS "${CUDAToolkit_INCLUDE_DIRS}" CACHE PATH "" FORCE)
 
+# NCCL — required for FeatureExchanger p2p communication
+find_library(NCCL_LIBRARY nccl
+    HINTS ${CUDAToolkit_LIBRARY_DIR} $ENV{NCCL_ROOT}/lib)
+if(NOT NCCL_LIBRARY)
+    message(FATAL_ERROR "Could not find NCCL library. Set NCCL_ROOT or install nccl.")
+endif()
+message(STATUS "NCCL library: ${NCCL_LIBRARY}")
+
 
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(Torch REQUIRED)
