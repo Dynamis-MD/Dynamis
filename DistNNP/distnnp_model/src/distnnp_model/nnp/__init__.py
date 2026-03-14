@@ -1,4 +1,4 @@
-from distnnp_model.npp.uma import (
+from distnnp_model.nnp.uma import (
     UMAModel,
 )
 

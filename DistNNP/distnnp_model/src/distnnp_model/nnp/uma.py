@@ -5,12 +5,37 @@ from distnnp_state import DistNNPState, radius_graph_pbc_cuda
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 
 class UMAModel(eSCNMDMoeBackbone, DistNNPModel):
-    def __init__(self, **kwargs):
-        # Initialize the underlying eSCN MOE model
-        eSCNMDMoeBackbone.__init__(self, **kwargs)
+    def __init__(
+        self, 
+        num_experts: int = 8,
+        moe_dropout: float = 0.0,
+        use_global_embedding: bool = False,  # obsolete
+        use_composition_embedding: bool = False,
+        moe_expert_coefficient_norm: str = "softmax",
+        act=torch.nn.SiLU,
+        layers_moe=None,
+        moe_layer_type: str = "pytorch",
+        moe_single: bool = False,
+        moe_type: str = "so2",
+        model_version: float = 1.0,
+        **kwargs
+    ):
+        eSCNMDMoeBackbone.__init__(
+            self,
+            num_experts,
+            moe_dropout,
+            use_global_embedding,
+            use_composition_embedding,
+            moe_expert_coefficient_norm,
+            act,
+            layers_moe,
+            moe_layer_type,
+            moe_single,
+            moe_type,
+            model_version,
+            **kwargs
+        )
         DistNNPModel.__init__(self)
-        
-        self.parent_kwargs = kwargs
 
     def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
         # 1. Setup initial local tensors
