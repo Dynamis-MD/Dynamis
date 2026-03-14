@@ -129,16 +129,18 @@ class Simulator:
         self.global_rank = global_rank
         self.world_size = world_size
 
-        self.dist_env = DistEnvironment(
-            global_rank=global_rank,
-            world_size=world_size,
-            gpus_per_node=num_gpus_per_node,
-            local_rank=local_rank,
-            num_nodes=num_nodes,
-        )
+        self.dist_env = DistEnvironment()
+        self.dist_env.global_rank = global_rank
+        self.dist_env.world_size = world_size
+        self.dist_env.gpus_per_node = num_gpus_per_node
+        self.dist_env.local_rank = local_rank
+        self.dist_env.num_nodes = num_nodes
 
     def setup(self, file_path: str) -> None:
         pass
 
-    def step(self, state: DistNNPState, step_size: float):
-        self.integrator.step(state, self.model, step_size)
+    def _set_state(self, state: DistNNPState):
+        self.state = state
+
+    def step(self, step_size: float):
+        self.integrator.step(self.state, self.model, step_size)
