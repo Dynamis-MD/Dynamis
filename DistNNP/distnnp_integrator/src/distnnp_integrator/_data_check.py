@@ -34,12 +34,7 @@ def check_mass_shape(mass, pos):
 def check_shapes_match(*args):
     """
     Check that input tensors have compatible shapes.
-
-    Args:
-        pos (torch.Tensor): Positions of shape (N, D).
-        vel (torch.Tensor): Velocities of shape (N, D).
-        frc (torch.Tensor): Forces of shape (N, D).
-
+    
     Raises:
         ValueError: If the tensor shapes are not compatible.
     """
