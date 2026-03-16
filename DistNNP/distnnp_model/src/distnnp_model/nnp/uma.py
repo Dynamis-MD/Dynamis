@@ -88,16 +88,13 @@ class UMAModel(eSCNMDMoeBackbone, DistNNPModel):
 
             # Synchronize intermediate features via Direct-Push IPC
             if i < len(self.interactions) - 1:
-                # Extract the updated local features to push
-                local_features = x[:n_local_atoms]
-                
                 # Fetch updated boundary features from neighbors
                 boundary_features = FeaturePushToExchange.apply(
-                    local_features, distributed_state, self._feature_exchanger
+                    x, distributed_state, self._feature_exchanger
                 )
                 
                 # Re-concatenate the synchronized features for the next layer
-                x = torch.cat([local_features, boundary_features], dim=0)
+                x = torch.cat([x, boundary_features], dim=0)
 
         # Compute total local energy using only the local atoms
         energy = self.output_head(x[:n_local_atoms])
