@@ -62,7 +62,7 @@ python_add_library(distnnp_state_impl
     src/partition/build_halo_maps.cpp
     src/radius_pbc/radius_pbc_.cpp
     src/radius_pbc/radius_pbc.cu
-    src/md_io.cpp
+    src/trajectory_writer.cpp
 )
 
 target_include_directories(distnnp_state_impl

@@ -90,6 +90,22 @@ PYBIND11_MODULE(distnnp_state_impl, m)
            "Partition: auto-compute edge weights via radius_graph_pbc (CUDA)")
       .def("build_halo_maps", &distnnp_state::SFCPartitioner::build_halo_maps);
 
+  py::class_<distnnp_state::TrajectoryWriter>(m, "TrajectoryWriter")
+        .def(py::init<distnnp_state::TrajectoryWriter>())
+        .def("load_state", &distnnp_state::TrajectoryWriter::load_state,
+            "Returns environment from an xyz file",
+            py::arg("xyz_file_name"))
+        .def("write_front_matter", &distnnp_state::TrajectoryWriter::write_front_matter,
+             "Writes the front matter to the binary file",
+             py::arg("total_atoms"),
+             py::arg("run_id"),
+             py::arg("author"))
+        .def("write_frame", &distnnp_state::TrajectoryWriter::write_frame,
+             "Writes the frame to the binary file",
+             py::arg("fd"),
+             py::arg("frame_idx"),
+             py::arg("atom_info"));
+
   m.def("radius_graph_pbc", &radius_graph_pbc,
         "CUDA cell-list radius graph with selective PBC tiling",
         py::arg("pos"),
@@ -98,8 +114,4 @@ PYBIND11_MODULE(distnnp_state_impl, m)
         py::arg("radius"),
         py::arg("max_num_neighbors"),
         py::arg("enforce_max_strictly"));
-
-  m.def("load_state", &distnnp_state::load_state,
-        "Returns environment from an xyz file",
-        py::arg("xyz_file_name"));
 }

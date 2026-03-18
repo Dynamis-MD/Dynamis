@@ -1,11 +1,11 @@
-#include "distnnp_state/md_io.hpp"
+#include "distnnp_state/trajectory_writer.hpp"
 #include <fstream>
 #include <iostream>
 #include <string>
 
 namespace distnnp_state {
 
-MolecularInfo load_state(std::string xyz_file_name) {
+MolecularInfo TrajectoryWriter::load_state(std::string xyz_file_name) {
     MolecularInfo atoms;
 
     // open the file
@@ -98,4 +98,10 @@ MolecularInfo load_state(std::string xyz_file_name) {
     return atoms;
 }
 
+void TrajectoryWriter::write_front_matter(uint64_t total_atoms, char* run_id, char* author) {
+
+}
+void TrajectoryWriter::write_frame(int fd, uint32_t frame_idx, MolecularInfo atom_info) {
+
+}
 } // namespace distnnp_state
