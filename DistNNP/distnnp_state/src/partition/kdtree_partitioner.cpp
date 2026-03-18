@@ -95,7 +95,7 @@ static PartitionMessagePassingInfo do_partition(
     auto my_indices = torch::nonzero(my_mask).squeeze(-1);
     int64_t num_local = my_indices.size(0);
 
-    info.partition_indices     = state.atom_indices.index_select(0, my_indices);
+    info.partition_indices     = state.atom_vertex_numbers.index_select(0, my_indices);
     info.local_atom_positions  = state.atom_positions.index_select(0, my_indices);
     info.local_atom_velocities = state.atom_velocities.index_select(0, my_indices);
 

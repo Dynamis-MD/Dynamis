@@ -54,6 +54,7 @@ MolecularInfo load_state(std::string xyz_file_name) {
     }
 
     // read in all of the positions
+    std::vector<uint8_t> types;
     std::vector<float> positions;
     std::vector<float> velocities;
     while (std::getline(xyz_file, line)) {
@@ -64,6 +65,7 @@ MolecularInfo load_state(std::string xyz_file_name) {
             std::cerr << "Line failed to parse" << std::endl;
             return atoms;
         }
+        types.emplace_back(periodic_table.at(element));
         positions.emplace_back(std::stof(xstr));
         positions.emplace_back(std::stof(ystr));
         positions.emplace_back(std::stof(zstr));
@@ -87,7 +89,8 @@ MolecularInfo load_state(std::string xyz_file_name) {
 
     // tensor setup
     atoms.num_atoms = num_atoms;
-    atoms.atom_indices = torch::arange(0, num_atoms, 1);
+    atoms.atom_vertex_numbers = torch::arange(0, num_atoms, 1);
+    atoms.atom_types = torch::from_blob(types.data(), {num_atoms}, torch::kByte).clone();
     atoms.atom_positions = torch::from_blob(positions.data(), {num_atoms, 3}).clone();
 
     if (velocity_index == -1)

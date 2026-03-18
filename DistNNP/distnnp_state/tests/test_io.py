@@ -16,9 +16,10 @@ def test_xyz_extended_io():
     velocities = velocities.reshape(6, 3)
 
     assert env.num_atoms == 6
+    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1]), env.atom_types)
     assert torch.equal(positions, env.atom_positions)
     assert torch.equal(velocities, env.atom_velocities)
-    assert torch.equal(torch.arange(0, 6, 1), env.atom_indices)
+    assert torch.equal(torch.arange(0, 6, 1), env.atom_vertex_numbers)
 
 def test_xyz_io():
     """Regular xyz test"""
@@ -28,6 +29,7 @@ def test_xyz_io():
     positions = torch.concat((values, values), dim=0)
     positions = positions.reshape([6, 3])
     assert env.num_atoms == 6
+    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1]), env.atom_types)
     assert torch.equal(positions, env.atom_positions)
     assert torch.equal(torch.zeros([6, 3]), env.atom_velocities)
-    assert torch.equal(torch.arange(0, 6, 1), env.atom_indices)
+    assert torch.equal(torch.arange(0, 6, 1), env.atom_vertex_numbers)

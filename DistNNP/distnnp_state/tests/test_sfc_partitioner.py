@@ -16,7 +16,7 @@ def _make_global_state(num_atoms: int, device: torch.device) -> MolecularInfo:
     """Create a MolecularInfo with random positions in a 10x10x10 box."""
     state = MolecularInfo()
     state.num_atoms = num_atoms
-    state.atom_indices = torch.arange(num_atoms, dtype=torch.long, device=device)
+    state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long, device=device)
     state.atom_positions = torch.rand(num_atoms, 3, device=device) * 10.0
     state.atom_velocities = torch.randn(num_atoms, 3, device=device) * 0.1
     return state
@@ -146,7 +146,7 @@ class TestSFCPartitioner:
 
         state = MolecularInfo()
         state.num_atoms = N
-        state.atom_indices = torch.arange(N, dtype=torch.long, device=device)
+        state.atom_vertex_numbers = torch.arange(N, dtype=torch.long, device=device)
         state.atom_positions = pos
         state.atom_velocities = torch.zeros(N, 3, device=device)
 
@@ -272,7 +272,7 @@ class TestSFCCUDAProperties:
 
         cuda_state = MolecularInfo()
         cuda_state.num_atoms = N
-        cuda_state.atom_indices = cpu_state.atom_indices.cuda()
+        cuda_state.atom_vertex_numbers = cpu_state.atom_vertex_numbers.cuda()
         cuda_state.atom_positions = cpu_state.atom_positions.cuda()
         cuda_state.atom_velocities = cpu_state.atom_velocities.cuda()
 
@@ -306,7 +306,7 @@ class TestSFCCUDAProperties:
 
         cuda_state = MolecularInfo()
         cuda_state.num_atoms = N
-        cuda_state.atom_indices = cpu_state.atom_indices.cuda()
+        cuda_state.atom_vertex_numbers = cpu_state.atom_vertex_numbers.cuda()
         cuda_state.atom_positions = cpu_state.atom_positions.cuda()
         cuda_state.atom_velocities = cpu_state.atom_velocities.cuda()
         cuda_state.edge_counts = weights.cuda()
