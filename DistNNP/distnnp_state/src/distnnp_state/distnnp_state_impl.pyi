@@ -43,7 +43,7 @@ class DistNNPState:
     def __init__(self) -> None:
         ...
 class MolecularInfo:
-    atom_indices: torch.Tensor
+    atom_vertex_numbers: torch.Tensor
     atom_positions: torch.Tensor
     atom_velocities: torch.Tensor
     edge_counts: torch.Tensor
