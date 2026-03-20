@@ -5,6 +5,45 @@
 
 namespace distnnp_state {
 
+TrajectoryWriter::TrajectoryWriter(uint32_t global_rank, uint32_t world_size, std::string xyz_file_name, char* run_id, char* author) {
+    current_state = load_state(xyz_file_name);
+    std::string xyz_dir = ".";
+    if (xyz_file_name.find_last_of("/") != std::string::npos)
+        xyz_dir = xyz_file_name.substr(0, xyz_file_name.find_last_of("/"));
+
+    std::string dir = output_directory.value_or(xyz_dir);
+
+    fd = open(dir + "/trajectory.xyzbin", O_RDWR | O_CREAT);
+
+    if (fd < 0) {
+        std::cerr << "Failed to open " << dir << "/trajectory.xyzbin" << std::endl;
+        exit(1);
+    }
+
+    // everyone else is done with setup
+    if (global_rank != 0) return;
+
+    // TODO make sure there is a sync with all threads after this file resize/write
+    write_front_matter(run_id, author);
+}
+
+void TrajectoryWriter::write_front_matter(uint32_t world_size, char* run_id, char* author) {
+    // figure out sizes of header and each rank size
+    // resize file to the correct size
+
+    // write the front_matter
+}
+void TrajectoryWriter::write_frame(int fd, uint32_t frame_idx, MolecularInfo atom_info) {
+
+    // to make this easier, i think im going to write each tensor one after the other
+    // so it will be
+    // vertex_ids | uint8 x frame_size
+    // atom_types | uint8 x frame_size 
+    // atom_positions | 3 x float32 x frame_size
+    // atom_velocities | 3 x float32 x frame_size
+
+}
+
 MolecularInfo TrajectoryWriter::load_state(std::string xyz_file_name) {
     MolecularInfo atoms;
 
@@ -96,12 +135,5 @@ MolecularInfo TrajectoryWriter::load_state(std::string xyz_file_name) {
         atoms.atom_velocities = torch::from_blob(velocities.data(), {num_atoms, 3}).clone();
 
     return atoms;
-}
-
-void TrajectoryWriter::write_front_matter(uint64_t total_atoms, char* run_id, char* author) {
-
-}
-void TrajectoryWriter::write_frame(int fd, uint32_t frame_idx, MolecularInfo atom_info) {
-
 }
 } // namespace distnnp_state
