@@ -268,37 +268,162 @@ Rank 0 writes a fixed-size front matter block at byte offset 0 before any simula
 | `run_id` | `uint8[16]` | Unique run identifier (128-bit UUID, set at `setup()` time) |
 | `author` | `uint8[64]` | Null-terminated metadata string (hostname, user, or job ID) |
 | `total_atoms` | `uint64` | Global atom count; fixed for the lifetime of the simulation |
+| `time_per_step` | `float32`| The amount of time elapsed per step | 
+| `steps_per_write` | `uint32` | The frquency of logging. Frame i is the `steps_per_write` * i-th step in the simulation|
 | `bytes_per_atom` | `uint32` | Size of one atom record in bytes (see per-atom layout below) |
 | `field_count` | `uint32` | Number of fields stored per atom |
 | `field_descriptors` | `uint8[field_count × 32]` | Null-padded field names (e.g. `"position\0"`, `"velocity\0"`) |
 | `front_matter_size` | `uint64` | Total byte size of this header block; used to locate frame 0 |
 
+
 `front_matter_size` is always a multiple of 64 bytes for alignment.
 
 #### Per-frame layout
 
+
 Since `total_atoms` is constant throughout the simulation, every frame is the same size:
 
 ```
-frame_size = total_atoms × bytes_per_atom
+frame_size = total_atoms × 8 + total_atoms × 12 + total_atoms × 12
+           = total_atoms × 32
 ```
 
 Frame `i` starts at byte offset:
 
 ```
-frame_offset(i) = front_matter_size + i × (8 + frame_size)
+frame_offset(i) = front_matter_size + i × frame_size
 ```
 
-Each frame starts with an array of `total_atoms` values of `unint64` vertex IDs (8 bytes/atom) for random access, followed by the per-atom records. This allows a reader to quickly locate the data for any given atom in any frame by computing the byte offset from the vertex ID, without needing to read the entire frame or maintain an external index. An `offset_map` can be computed per frame by mapping the vertex IDs to the index in this array.
+Each frame starts with, `vertex_number_list`, an array of `total_atoms` values of `unint64` vertex IDs (8 bytes/atom) for random access, followed by the per-atom records. Each process calculates calculates a starting offset, which is the sum of previous processes local atoms, and writes its `PartitionMEssagePassingInfo.partition_indices`.  
+
+> Reasoning: This allows a reader to quickly locate the data for any given atom in any frame by computing the byte offset from the vertex ID, without needing to read the entire frame or maintain an external index. An `offset_map` can be computed per frame by mapping the vertex IDs to the index in this array.
+
+***Note: Assuming all processes are numbered from [0, world_size). This requires all processes to know how many `local_atoms` each previous process has, to calculate the appropriate offset.***
+
+Python code representation the `local_frame_offset` calculation:
+
+```python
+local_frame_offset = 0
+for prev_process in range(current_process):
+    local_frame_offset += num_local_atoms[prev_process]
+```
+In practice this should be calculated and stored during initial partitioning and subsequent repartitionings. 
+
+For frame `i`, process writes it's contiguous array representing the `vertex_number_list` at byte offset:
+
+```
+frame_offset[i] + local_frame_offset * 8
+```
+
+
+Within each frame, the atoms are stored in arbitray order. Each `process` writes it's local data in sequential order. 
+
+
+Each frame therefore has the following layout:
+
+| Field | Type | Description |
+|---|---|---|
+| `vertex_number_list` | `uint64[total_atoms]` | The ordering of the `vertex IDs` on this frame |
+| `positions` | `float32[total_atoms x 3]` | The positions of the atoms on this frame. The atoms are ordered as per `vertex_number_list`|
+| `velocities` | `float32[total_atoms x 3]` | The velocities of the atoms on this frame. The atoms are ordered as per `vertex_number_list` |
+
+
 
 #### Per-atom record
 
-Within a frame, atom `v` (by global vertex ID) is stored at:
+Within a frame, the positions of atom `v` (by global vertex ID) is stored at:
 
 ```
-atom_offset(frame_i, vertex_id) = frame_offset(frame_i) + 8 + offset_map(frame_i, vertex_id) × bytes_per_atom
+pos_atom_offset(i, v) = frame_offset(i) + total_atoms × 8 + offset_map[v] × 12
 ```
 
+The velocities for a given atom `v` (by global vertex ID) is stored at: 
+
+```
+vel_atom_offset(i, v) = frame_offset(i) + total_atoms × 8 + total_atoms × 12 + offset_map[v] × 12
+```
+
+> Reasoning: The `positions` and `velocities` are stored in contiguous memory when updated by the `integrator`. Matching the ordering in memory and on disk will allow for reading and writing with a single system call. 
+
+From frame `i`, each process writes it's `vertex_number_list`, `positions`, and  `velocities` writes at the offset based on `frame_offset[i]` and `local_frame_offset`. The offsets are:
+```
+vertex_id_write_offset   = frame_offset(i) + local_frame_offset × 8
+position_write_offset    = frame_offset(i) + total_atoms × 8 + local_frame_offset × 12
+velocity_write_offset    = frame_offset(i) + total_atoms × 8 + total_atoms × 12 + local_frame_offset × 12
+```
+
+
+#### Note: Random access cost
+
+Reading a single atom from a given frame requires first reading the
+`vertex_number_list` for that frame (total_atoms × 8 bytes) to build the
+`offset_map`. For a 1M-atom system this is ~8 MB per frame. This is
+considered acceptable for post-processing workflows, which will typically
+build the map once per frame and reuse it across many atom lookups.
+
+For analysis tools that need to track a small subset of atoms across many
+frames, the recommended pattern is:
+  1. Read the `vertex_number_list` for each frame of interest.
+  2. Cache the offset_map per frame.
+  3. Issue targeted reads for only the atoms needed.
+
+
+#### Repartitioning and write offset recalculation
+
+After a repartition event, the number of local atoms on each rank changes.
+Since all per-process write offsets depend on local_frame_offset (the
+cumulative atom count of all processes < current process), this value must be
+recalculated before the next frame write.
+
+Required steps after repartitioning:
+
+  1. Each process computes its new num_local_atoms.
+  2. An allgather collects num_local_atoms from every process into a
+     shared array of length world_size.
+  3. Each process recomputes local_frame_offset as:
+       local_frame_offset = sum(num_local_atoms[0 : process])
+  4. The writer is updated with the new local_frame_offset and
+     num_local_atoms before the next submit() call.
+
+This is the same allgather that the initial partitioning performs, so no
+new communication primitive is needed.
+> Note on cross-frame consistency: repartitioning changes the vertex ordering between frames. Analysis tools that diff consecutive frames (e.g., displacement calculations) should be aware that the underlying rank layout may have changed.
+
+
+#### Reader validation requirements
+
+Before interpreting any data, a reader must validate the front matter
+in the following order:
+
+  1. Read the first 8 bytes and verify they match the magic string
+     DISTNNP\0. If they do not match, reject the file.
+  2. Read the version field (uint32). If the version is not recognized,
+     the reader should refuse to parse the file rather than guess at
+     the layout, unless it is a generic introspection tool using
+     field_descriptors.
+  3. Validate bytes_per_atom against the expected value for the format
+     version. For v1 this is 24 (3×float32 position + 3×float32
+     velocity). A mismatch indicates either corruption or a version
+     the reader does not support.
+  4. Validate that front_matter_size is a multiple of 64 bytes.
+  5. Validate that total_atoms > 0.
+
+Endianness: the format is little-endian throughout. Readers running on
+big-endian architectures must byte-swap all multi-byte fields. Since the
+target platform is x86-64 (natively little-endian), the reference reader
+implementation does not perform byte-swapping but should include a
+compile-time or runtime check:
+
+    assert(system_is_little_endian(),
+           "Big-endian host detected; byte-swapping not implemented");
+
+A portable reader should check the first bytes of the magic string and
+infer endianness from the version field: if reading version as
+little-endian yields a recognized version number, the file is
+little-endian. If not, try byte-swapping. This avoids adding an explicit
+endianness marker to the header.
+
+<!-- 
 Simple per-atom layout (32 bytes):
 
 | Field | Type | Bytes |
@@ -306,7 +431,7 @@ Simple per-atom layout (32 bytes):
 | `px, py, pz` | `float32 × 3` | 12 |
 | `vx, vy, vz` | `float32 × 3` | 12 |
 
-Total: **24 bytes/atom**. The field descriptors in the front matter reflect the actual fields stored. This requires combining the ids, positions, and velocities into a single CPU tensor before enqueuing for writing, but it keeps the on-disk format simple and compact.
+Total: **24 bytes/atom**. The field descriptors in the front matter reflect the actual fields stored. This requires combining the ids, positions, and velocities into a single CPU tensor before enqueuing for writing, but it keeps the on-disk format simple and compact. -->
 
 
 <!-- #### Concurrent writes with `pwrite()`
