@@ -268,8 +268,8 @@ Rank 0 writes a fixed-size front matter block at byte offset 0 before any simula
 | `run_id` | `uint8[16]` | Unique run identifier (128-bit UUID, set at `setup()` time) |
 | `author` | `uint8[64]` | Null-terminated metadata string (hostname, user, or job ID) |
 | `total_atoms` | `uint64` | Global atom count; fixed for the lifetime of the simulation |
-| `time_per_step` | `float32`| The amount of time elapsed per step | 
-| `steps_per_write` | `uint32` | The frquency of logging. Frame i is the `steps_per_write` * i-th step in the simulation|
+| `time_per_step` | `float32`| The amount of time elapsed per step |
+| `steps_per_write` | `uint32` | The frequency of logging. Frame i is the `steps_per_write` * i-th step in the simulation |
 | `bytes_per_atom` | `uint32` | Size of one atom record in bytes (see per-atom layout below) |
 | `field_count` | `uint32` | Number of fields stored per atom |
 | `field_descriptors` | `uint8[field_count × 32]` | Null-padded field names (e.g. `"position\0"`, `"velocity\0"`) |
@@ -294,58 +294,58 @@ Frame `i` starts at byte offset:
 frame_offset(i) = front_matter_size + i × frame_size
 ```
 
-Each frame starts with, `vertex_number_list`, an array of `total_atoms` values of `unint64` vertex IDs (8 bytes/atom) for random access, followed by the per-atom records. Each process calculates calculates a starting offset, which is the sum of previous processes local atoms, and writes its `PartitionMEssagePassingInfo.partition_indices`.  
+Each frame starts with `vertex_number_list`, an array of `total_atoms` values of `uint64` vertex IDs (8 bytes/atom) for random access, followed by the per-atom records. Each process calculates a starting offset, which is the sum of previous processes' local atoms, and writes its `PartitionMessagePassingInfo.partition_indices`.
 
 > Reasoning: This allows a reader to quickly locate the data for any given atom in any frame by computing the byte offset from the vertex ID, without needing to read the entire frame or maintain an external index. An `offset_map` can be computed per frame by mapping the vertex IDs to the index in this array.
 
 ***Note: Assuming all processes are numbered from [0, world_size). This requires all processes to know how many `local_atoms` each previous process has, to calculate the appropriate offset.***
 
-Python code representation the `local_frame_offset` calculation:
+Python code representation of the `local_frame_offset` calculation:
 
 ```python
 local_frame_offset = 0
 for prev_process in range(current_process):
     local_frame_offset += num_local_atoms[prev_process]
 ```
-In practice this should be calculated and stored during initial partitioning and subsequent repartitionings. 
+In practice this should be calculated and stored during initial partitioning and subsequent repartitionings.
 
-For frame `i`, process writes it's contiguous array representing the `vertex_number_list` at byte offset:
+For frame `i`, a process writes its contiguous array representing the `vertex_number_list` at byte offset:
 
 ```
 frame_offset[i] + local_frame_offset * 8
 ```
 
 
-Within each frame, the atoms are stored in arbitray order. Each `process` writes it's local data in sequential order. 
+Within each frame, the atoms are stored in arbitrary order. Each process writes its local data in sequential order.
 
 
 Each frame therefore has the following layout:
 
 | Field | Type | Description |
 |---|---|---|
-| `vertex_number_list` | `uint64[total_atoms]` | The ordering of the `vertex IDs` on this frame |
-| `positions` | `float32[total_atoms x 3]` | The positions of the atoms on this frame. The atoms are ordered as per `vertex_number_list`|
+| `vertex_number_list` | `uint64[total_atoms]` | The ordering of the vertex IDs on this frame |
+| `positions` | `float32[total_atoms x 3]` | The positions of the atoms on this frame. The atoms are ordered as per `vertex_number_list` |
 | `velocities` | `float32[total_atoms x 3]` | The velocities of the atoms on this frame. The atoms are ordered as per `vertex_number_list` |
 
 
 
 #### Per-atom record
 
-Within a frame, the positions of atom `v` (by global vertex ID) is stored at:
+Within a frame, the positions of atom `v` (by global vertex ID) are stored at:
 
 ```
 pos_atom_offset(i, v) = frame_offset(i) + total_atoms × 8 + offset_map[v] × 12
 ```
 
-The velocities for a given atom `v` (by global vertex ID) is stored at: 
+The velocities for a given atom `v` (by global vertex ID) are stored at:
 
 ```
 vel_atom_offset(i, v) = frame_offset(i) + total_atoms × 8 + total_atoms × 12 + offset_map[v] × 12
 ```
 
-> Reasoning: The `positions` and `velocities` are stored in contiguous memory when updated by the `integrator`. Matching the ordering in memory and on disk will allow for reading and writing with a single system call. 
+> Reasoning: The `positions` and `velocities` are stored in contiguous memory when updated by the `integrator`. Matching the ordering in memory and on disk will allow for reading and writing with a single system call.
 
-From frame `i`, each process writes it's `vertex_number_list`, `positions`, and  `velocities` writes at the offset based on `frame_offset[i]` and `local_frame_offset`. The offsets are:
+From frame `i`, each process writes its `vertex_number_list`, `positions`, and `velocities` at the offset based on `frame_offset[i]` and `local_frame_offset`. The offsets are:
 ```
 vertex_id_write_offset   = frame_offset(i) + local_frame_offset × 8
 position_write_offset    = frame_offset(i) + total_atoms × 8 + local_frame_offset × 12
@@ -353,7 +353,7 @@ velocity_write_offset    = frame_offset(i) + total_atoms × 8 + total_atoms × 1
 ```
 
 
-#### Note: Random access cost
+#### Random access cost
 
 Reading a single atom from a given frame requires first reading the
 `vertex_number_list` for that frame (total_atoms × 8 bytes) to build the
@@ -372,7 +372,7 @@ frames, the recommended pattern is:
 
 After a repartition event, the number of local atoms on each rank changes.
 Since all per-process write offsets depend on local_frame_offset (the
-cumulative atom count of all processes < current process), this value must be
+cumulative atom count of all processes with rank less than the current process), this value must be
 recalculated before the next frame write.
 
 Required steps after repartitioning:
