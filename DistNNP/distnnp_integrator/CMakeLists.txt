@@ -26,6 +26,8 @@ find_package(CUDAToolkit REQUIRED)
 set(CUDA_TOOLKIT_ROOT_DIR "${CUDAToolkit_ROOT}" CACHE PATH "" FORCE)
 set(CUDA_INCLUDE_DIRS "${CUDAToolkit_INCLUDE_DIRS}" CACHE PATH "" FORCE)
 
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(Torch REQUIRED)
 
 if (TORCH_LIBRARY)
   get_filename_component(TORCH_LIB_DIR "${TORCH_LIBRARY}" DIRECTORY)
@@ -40,10 +42,6 @@ find_library(TORCH_PYTHON_LIBRARY
   NO_DEFAULT_PATH)
 
 find_library(TORCH_PYTHON_LIBRARY torch_python REQUIRED)
-
-
-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-find_package(Torch REQUIRED)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
