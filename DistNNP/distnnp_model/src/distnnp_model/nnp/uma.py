@@ -1,5 +1,5 @@
 import torch
-from baseline.local_fairchem.models.uma.escn_moe import eSCNMDMoeBackbone
+from fairchem.core.models.uma.escn_moe import eSCNMDMoeBackbone
 from distnnp_model.potential import DistNNPModel
 from distnnp_state import DistNNPState, radius_graph_pbc_cuda
 from distnnp_model.comm.feature_push import FeaturePushToExchange
