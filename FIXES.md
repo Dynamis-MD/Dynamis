@@ -73,20 +73,29 @@ if type(integrator).__name__ not in AVALIABLE_INTEGRATORS:
 
 **File:** `DistNNP/distnnp/src/distnnp/simulator.py`
 
+### 4a. `DistNNPState` is a C++ pybind11 class without dynamic attribute support
+
 **Problem:**
 The C++ pybind11 class `DistNNPState` is bound without
 `py::dynamic_attr()`, so arbitrary Python attributes cannot be added to
-it.  The integrators access `state.pos`, `state.vel`, and `state.mass`,
-none of which are direct fields on `DistNNPState`.
+it.  The integrators access `state.pos`, `state.vel`, `state.forces`,
+and `state.mass`, none of which are direct fields on `DistNNPState`.
 
-**Fix:** Add a `SimState` Python wrapper that proxies `pos`/`vel`/`mass`
-through `local_partition_info` and forwards everything else to the
+**Fix:** Add a `SimState` Python wrapper that proxies `pos`/`vel`
+through `local_partition_info`, initializes `forces` and `mass` as
+concrete Python attributes, and forwards everything else to the
 underlying `_state`:
 
 ```python
 class SimState:
     def __init__(self, dist_nnp_state: DistNNPState):
         self._state = dist_nnp_state
+        pi = dist_nnp_state.local_partition_info
+        self.forces = torch.zeros_like(pi.local_atom_positions)
+        self.mass = torch.ones(
+            pi.local_atom_positions.shape[0],
+            device=pi.local_atom_positions.device,
+        )
 
     @property
     def pos(self):
@@ -95,10 +104,6 @@ class SimState:
     @property
     def vel(self):
         return self._state.local_partition_info.local_atom_velocities
-
-    @property
-    def mass(self):
-        return self._state.local_partition_info.local_atom_masses
 
     def __getattr__(self, name):
         return getattr(self._state, name)
@@ -112,6 +117,38 @@ def _set_state(self, state: DistNNPState):
     self.model.setup(state)
     self.state = SimState(state)
 ```
+
+### 4b. Verlet reads `state.forces` before the first force computation
+
+**Problem:**
+The Velocity Verlet integrator performs a half-step velocity update
+using the *previous* forces before computing new ones:
+```python
+self.halfstep1_(state.pos, state.vel, state.forces, state.mass, step_size)
+```
+On the very first step, no forces have been computed yet.  `SimState`
+must initialize `self.forces` to a zero tensor so this read is valid.
+This is handled in `SimState.__init__` (see 4a above).
+
+### 4c. `PartitionMessagePassingInfo` has no `local_atom_masses` field
+
+**Problem:**
+An initial `SimState` implementation tried to expose mass via a
+property:
+```python
+@property
+def mass(self):
+    return self._state.local_partition_info.local_atom_masses  # does not exist
+```
+`local_atom_masses` is not a field on `PartitionMessagePassingInfo`
+(confirmed from the pybind11 stubs).  When the property getter raises
+`AttributeError` internally, Python catches it and falls through to
+`__getattr__('mass')`, which also fails.
+
+**Fix:** Initialize `self.mass` as a concrete Python attribute (unit
+masses) in `SimState.__init__` rather than computing it from the C++
+struct.  This is also the correct behaviour for the synthetic
+experiment, which has no per-atom mass data.
 
 ---
 
@@ -265,7 +302,9 @@ removed for production runs.
 | 1 | `distnnp/experiments/synthetic/main.py` | Wrong import path (`distnnp.src.distnnp.simulator`) | Fixed to `distnnp.simulator` |
 | 2 | `distnnp_integrator/src/distnnp_integrator/euler.py` | Imported non-existent `check_shapes`; called with wrong args | Changed to `check_shapes_match(pos, vel, frc)` |
 | 3 | `distnnp/src/distnnp/simulator.py` | `check_integrator` compared instance to string list | Fixed to `type(integrator).__name__ not in …` |
-| 4 | `distnnp/src/distnnp/simulator.py` | `DistNNPState` (C++ pybind11) has no dynamic attributes; `state.pos/vel/mass` failed | Added `SimState` wrapper class; updated `_set_state` |
+| 4a | `distnnp/src/distnnp/simulator.py` | `DistNNPState` (C++ pybind11) has no dynamic attributes; `state.pos/vel/forces/mass` failed | Added `SimState` wrapper class; updated `_set_state` |
+| 4b | same | Verlet reads `state.forces` before first force computation | Initialized `self.forces = torch.zeros_like(pos)` in `SimState.__init__` |
+| 4c | same | `local_atom_masses` does not exist on `PartitionMessagePassingInfo`; property raised `AttributeError` caught by `__getattr__` | Initialized `self.mass = torch.ones(n_local, …)` as concrete Python attribute |
 | 5 | `distnnp_model/src/distnnp_model/potential.py` | `FeatureExchanger` IPC never initialised | Added full `setup()` method with buffer allocation, handle exchange, and event setup |
 | 6a | `distnnp_model/src/distnnp_model/empirical/lj_potential_model.py` | `distributed_state.simulation_config` does not exist | Changed to `distributed_state.sim_config` |
 | 6b | same | `natoms=n_atoms` (int) instead of list | Changed to `natoms=[n_atoms]` |
