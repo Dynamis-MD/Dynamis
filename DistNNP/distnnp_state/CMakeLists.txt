@@ -102,6 +102,11 @@ set_target_properties(distnnp_state_impl
 install(TARGETS distnnp_state_impl
 LIBRARY DESTINATION .)
 
+# Install public headers so downstream packages (e.g. distnnp_model) can find
+# them after `pip install distnnp_state`.  They land at:
+#   site-packages/distnnp_state/include/distnnp_state/*.hpp
+install(DIRECTORY include/ DESTINATION distnnp_state/include)
+
 # Manually install the type marker and stubs if they exist
 install(FILES
     "src/distnnp_state/py.typed"

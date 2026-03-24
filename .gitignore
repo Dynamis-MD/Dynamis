@@ -222,4 +222,5 @@ build/
 cmake_install.cmake
 CMakeInit.txt
 .skbuild*
+skbuild
 build.ninja

@@ -1,6 +1,11 @@
 import torch
 from distnnp_integrator.distnnp_integrator_impl import VerletIntegrator
-from distnnp_integrator._data_check import check_devices, check_shapes
+from distnnp_integrator._data_check import (
+    check_devices,
+    check_shape_2D,
+    check_mass_shape,
+    check_shapes_match,
+)
 from distnnp_integrator.integrator import DistNNPIntegrator
 
 
@@ -30,7 +35,9 @@ class Verlet(DistNNPIntegrator):
             dt (float): Time step size.
         """
         check_devices(pos, vel, frc, mass)
-        check_shapes(pos, vel, frc, mass)
+        check_shape_2D(pos)
+        check_mass_shape(mass, pos)
+        check_shapes_match(pos, vel, frc)
         self.cpp_integrator.halfstep1(pos, vel, frc, mass, dt)
 
     def halfstep2_(
@@ -51,7 +58,10 @@ class Verlet(DistNNPIntegrator):
             dt (float): Time step size.
         """
         check_devices(vel, frc, mass)
-        check_shapes(vel, frc, mass)
+        check_shape_2D(vel)
+        check_mass_shape(mass, vel)
+        check_shapes_match(vel, frc)
+
         self.cpp_integrator.halfstep2(vel, frc, mass, dt)
 
     def step(self, state, model, dt=None):
@@ -67,13 +77,13 @@ class Verlet(DistNNPIntegrator):
             step_size = dt
         else:
             step_size = self.dt
-            
+
         # 1. Update v to half-step, and pos to full-step
         self.halfstep1_(state.pos, state.vel, state.forces, state.mass, step_size)
-        
+
         # 2. Recompute forces at new positions
         energy, new_forces = model(state)
         state.forces = new_forces
-        
+
         # 3. Complete the velocity full-step update
         self.halfstep2_(state.vel, state.forces, state.mass, step_size)
