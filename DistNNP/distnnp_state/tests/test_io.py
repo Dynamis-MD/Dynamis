@@ -7,7 +7,11 @@ from distnnp_state import (MolecularInfo, TrajectoryWriter)
 
 def test_xyz_extended_io():
     """Extended xyz test"""
-    # env = load_state("tests/extended_xyz.xyz")
+
+    # the 1 makes sure it only loads in the file and doesn't do front_matter stuff
+    writer = TrajectoryWriter(1, b"1234", "author", "./")
+
+    env = writer.initialize("tests/extended_xyz.xyz", 1.0, 1.0)
     values = torch.arange(0, 9, 1)
 
     positions = torch.concat((values, values), dim=0)
@@ -22,7 +26,11 @@ def test_xyz_extended_io():
 
 def test_xyz_io():
     """Regular xyz test"""
-    # env = load_state("tests/xyz.xyz")
+
+    # the 1 makes sure it only loads in the file and doesn't do front_matter stuff
+    writer = TrajectoryWriter(1, b"1234", "author", "./")
+
+    env = writer.initialize("tests/xyz.xyz", 1.0, 1.0)
     values = torch.arange(0, 9, 1)
 
     positions = torch.concat((values, values), dim=0)
