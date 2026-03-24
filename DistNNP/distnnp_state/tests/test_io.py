@@ -3,11 +3,11 @@
 import torch
 import pytest
 
-from distnnp_state import (MolecularInfo, load_state)
+from distnnp_state import (MolecularInfo, TrajectoryWriter)
 
 def test_xyz_extended_io():
     """Extended xyz test"""
-    env = load_state("tests/extended_xyz.xyz")
+    # env = load_state("tests/extended_xyz.xyz")
     values = torch.arange(0, 9, 1)
 
     positions = torch.concat((values, values), dim=0)
@@ -22,7 +22,7 @@ def test_xyz_extended_io():
 
 def test_xyz_io():
     """Regular xyz test"""
-    env = load_state("tests/xyz.xyz")
+    # env = load_state("tests/xyz.xyz")
     values = torch.arange(0, 9, 1)
 
     positions = torch.concat((values, values), dim=0)

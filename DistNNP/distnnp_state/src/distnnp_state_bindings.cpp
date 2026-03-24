@@ -91,20 +91,26 @@ PYBIND11_MODULE(distnnp_state_impl, m)
       .def("build_halo_maps", &distnnp_state::SFCPartitioner::build_halo_maps);
 
   py::class_<distnnp_state::TrajectoryWriter>(m, "TrajectoryWriter")
-        .def(py::init<distnnp_state::TrajectoryWriter>())
-        .def("load_state", &distnnp_state::TrajectoryWriter::load_state,
-            "Returns environment from an xyz file",
-            py::arg("xyz_file_name"))
-        .def("write_front_matter", &distnnp_state::TrajectoryWriter::write_front_matter,
-             "Writes the front matter to the binary file",
-             py::arg("total_atoms"),
+        .def(py::init<uint32_t, py::bytes, const std::string&, std::string>(),
+             py::arg("global_rank"),
              py::arg("run_id"),
-             py::arg("author"))
+             py::arg("author"),
+             py::arg("output_dir") = "./trajectory")
+        .def("initialize", &distnnp_state::TrajectoryWriter::initialize,
+            "Writes front matter and initializes environment from an xyz file",
+            py::arg("xyz_file_name"),
+            py::arg("time_per_step"),
+            py::arg("steps_per_write"))
+        .def("update_atom_counts", &distnnp_state::TrajectoryWriter::update_atom_counts,
+             "Update the rank offsets. Should be called after every repartition",
+             py::arg("counts"))
         .def("write_frame", &distnnp_state::TrajectoryWriter::write_frame,
              "Writes the frame to the binary file",
              py::arg("fd"),
              py::arg("frame_idx"),
-             py::arg("atom_info"));
+             py::arg("indices"),
+             py::arg("positions"),
+             py::arg("velocities"));
 
   m.def("radius_graph_pbc", &radius_graph_pbc,
         "CUDA cell-list radius graph with selective PBC tiling",

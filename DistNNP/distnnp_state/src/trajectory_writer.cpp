@@ -1,50 +1,169 @@
 #include "distnnp_state/trajectory_writer.hpp"
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace distnnp_state {
 
-TrajectoryWriter::TrajectoryWriter(uint32_t global_rank, uint32_t world_size, std::string xyz_file_name, char* run_id, char* author) {
-    current_state = load_state(xyz_file_name);
-    std::string xyz_dir = ".";
-    if (xyz_file_name.find_last_of("/") != std::string::npos)
-        xyz_dir = xyz_file_name.substr(0, xyz_file_name.find_last_of("/"));
-
-    std::string dir = output_directory.value_or(xyz_dir);
-
-    fd = open(dir + "/trajectory.xyzbin", O_RDWR | O_CREAT);
+TrajectoryWriter::TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, std::string output_dir)
+    : rank(global_rank)
+    // TODO validate both of these
+    , run_id(run_id)
+    , author(author)
+{
+    // currently just overwriting, TODO increment number over time
+    fd = open((output_dir + "/trajectory.xyzbin").c_str(), O_RDWR | O_CREAT, 0644);
 
     if (fd < 0) {
-        std::cerr << "Failed to open " << dir << "/trajectory.xyzbin" << std::endl;
+        std::cerr << "Failed to open " << output_dir << "/trajectory.xyzbin" << std::endl;
         exit(1);
     }
-
-    // everyone else is done with setup
-    if (global_rank != 0) return;
-
-    // TODO make sure there is a sync with all threads after this file resize/write
-    write_front_matter(run_id, author);
 }
 
-void TrajectoryWriter::write_front_matter(uint32_t world_size, char* run_id, char* author) {
+MolecularInfo TrajectoryWriter::initialize(std::string xyz_file_name, float time_per_step, float steps_per_write) {
+    auto state = load_file(xyz_file_name);
+
+    if (rank != 0) return state;
+
+    write_front_matter(time_per_step, steps_per_write, state);
+
+    return state;
+}
+
+void TrajectoryWriter::write_front_matter(float time_per_step, float steps_per_write, MolecularInfo state) {
     // figure out sizes of header and each rank size
     // resize file to the correct size
 
     // write the front_matter
+
+    // 220 bytes, TODO need to pad for alignment out to 256 bytes
+    uint64_t front_matter_size = 8  // magic
+                               + 4  // version
+                               + 16 // run_id 
+                               + 64 // author
+                               + 8  // total_atoms
+                               + 4  // time_per_step
+                               + 4  // steps_per_write
+                               + 4  // bytes_per_atom
+                               + 4  // field_count
+                               + 96 // 3x32 byte fields
+                               + 8  // front_matter_size
+                               + 36; // padding to align with 256 bytes for this part of the front_matter
+
+    // 32 bit ints for easier alignment
+    // TODO figure out padding for this
+    front_matter_size += state.num_atoms * 4; // 32 bit unsigned ints for each atom
+
+    // create a buffer
+    std::vector<uint8_t> buf(front_matter_size);
+
+    uint32_t offset = 0;
+
+    // magic
+    const char* magic = "DISTNNP\x00";
+    memcpy(buf.data() + offset, magic, strlen(magic));
+    offset += strlen(magic);
+
+    // version
+    const uint32_t version = 1;
+    memcpy(buf.data() + offset, &version, sizeof(version));
+    offset += sizeof(version);
+
+    // run_id
+    std::string r = run_id;
+    memcpy(buf.data() + offset, r.data(), 16);
+    offset += 16;
+
+    // author
+    memcpy(buf.data() + offset, author.data(), author.size());
+    memset(buf.data() + offset + author.size(), 0, 64 - author.size());
+    offset += 64;
+
+    // total_atoms
+    memcpy(buf.data() + offset, &state.num_atoms, sizeof(state.num_atoms));
+    offset += sizeof(state.num_atoms);
+
+    // time_per_step
+    memcpy(buf.data() + offset, &time_per_step, sizeof(time_per_step));
+    offset += sizeof(time_per_step);
+
+    // steps_per_write 
+    memcpy(buf.data() + offset, &steps_per_write, sizeof(steps_per_write));
+    offset += sizeof(time_per_step);
+
+    // bytes_per_atom, id, position, velocity
+    const uint32_t bytes_per_atom = 8 + (3 * 4) + (3 * 4);
+    memcpy(buf.data() + offset, &bytes_per_atom, sizeof(bytes_per_atom));
+    offset += sizeof(bytes_per_atom);
+
+    // field_count
+    const uint32_t field_count = 3;
+    memcpy(buf.data() + offset, &field_count, sizeof(field_count));
+    offset += sizeof(field_count);
+
+    // fields
+
+    // id
+    const char* id_str = "id\0";
+    uint32_t id_size = strlen(id_str);
+    memcpy(buf.data() + offset, id_str, id_size);
+    memset(buf.data() + offset + id_size, 0, 32 - id_size);
+    offset += id_size;
+
+    // position 
+    const char* pos_str = "position\0";
+    uint32_t pos_size = strlen(pos_str);
+    memcpy(buf.data() + offset, pos_str, pos_size);
+    memset(buf.data() + offset + pos_size, 0, 32 - pos_size);
+    offset += pos_size;
+
+    // velocity 
+    const char* vel_str = "velocity\0";
+    uint32_t vel_size = strlen(vel_str);
+    memcpy(buf.data() + offset, vel_str, vel_size);
+    memset(buf.data() + offset + vel_size, 0, 32 - vel_size);
+    offset += vel_size;
+
+    // front_matter_size
+    memcpy(buf.data() + offset, &front_matter_size, sizeof(front_matter_size));
+    offset += front_matter_size;
+
+    // padding
+    uint8_t padding = 36;
+    memset(buf.data() + offset, 0, padding);
+    offset += padding;
+
+    // tensor of atomic numbers
+    // TODO this could be large and its own separate write to the file to make things easier probably
+    auto t = state.atom_types.contiguous();
+
+    size_t tensor_bytes = t.numel() * t.element_size();
+    memcpy(buf.data() + offset, t.data_ptr(), tensor_bytes);
+    offset += tensor_bytes;
+
+    // write to the file
+    ssize_t written = write(fd, buf.data(), buf.size());
+    if (written < 0) {
+        throw std::runtime_error("write failed: " + std::string(strerror(errno)));
+    }
+    if (static_cast<size_t>(written) != buf.size()) {
+        throw std::runtime_error("partial write");
+    }
 }
-void TrajectoryWriter::write_frame(int fd, uint32_t frame_idx, MolecularInfo atom_info) {
+void TrajectoryWriter::write_frame(int fd, uint32_t frame_idx, torch::Tensor indices, torch::Tensor positions, torch::Tensor velocities) {
 
     // to make this easier, i think im going to write each tensor one after the other
     // so it will be
     // vertex_ids | uint8 x frame_size
-    // atom_types | uint8 x frame_size 
     // atom_positions | 3 x float32 x frame_size
     // atom_velocities | 3 x float32 x frame_size
 
 }
 
-MolecularInfo TrajectoryWriter::load_state(std::string xyz_file_name) {
+MolecularInfo TrajectoryWriter::load_file(std::string xyz_file_name) {
     MolecularInfo atoms;
 
     // open the file
