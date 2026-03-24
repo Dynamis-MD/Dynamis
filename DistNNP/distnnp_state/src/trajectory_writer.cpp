@@ -161,6 +161,53 @@ void TrajectoryWriter::write_frame(int fd, uint32_t frame_idx, torch::Tensor ind
     // atom_positions | 3 x float32 x frame_size
     // atom_velocities | 3 x float32 x frame_size
 
+    if (writes = 0) {
+        // first write, don't have these values saved
+        // need to read in total_atoms, bytes_per_atom, front_matter_size
+
+        // TODO need to guarentee that rank 0 is done writing
+
+        auto n = pread(fd, &total_atoms, sizeof(total_atoms), 92); // TODO check offset
+        if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+        if (n != sizeof(total_atoms)) throw std::runtime_error("unexpected end of file");
+
+        n = pread(fd, &bytes_per_atom, sizeof(bytes_per_atom), 100); // TODO check offset
+        if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+        if (n != sizeof(bytes_per_atom)) throw std::runtime_error("unexpected end of file");
+
+        n = pread(fd, &front_matter_size, sizeof(front_matter_size), 212); // TODO check offset
+        if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+        if (n != sizeof(front_matter_size)) throw std::runtime_error("unexpected end of file");
+    }
+
+    uint32_t init_offset = front_matter_size + (writes * total_atoms * bytes_per_atom);
+    uint32_t in_frame_offset = 0;
+    for (int i = 0; i < rank; i++) {
+        in_frame_offset += rank_atom_counts.at(i) * bytes_per_atom; // this will error if the vector is setup wrong
+    }
+
+    // TODO check this math
+    uint32_t offset = init_offset + in_frame_offset;
+
+
+    auto write_tensor = [&](torch::Tensor t, uint32_t off) -> uint32_t {
+        size_t tensor_bytes = t.numel() * t.element_size();
+        ssize_t written = pwrite(fd, t.data_ptr(), tensor_bytes, off);
+
+        // TODO might have to make this a loop if cant write the entire tensor at once
+        if (written < 0) throw std::runtime_error("pwrite failed: " + std::string(strerror(errno)));
+        if (static_cast<size_t>(written) != tensor_bytes) throw std::runtime_error("partial write");
+
+        off += tensor_bytes;
+        return off;
+    };
+
+    offset = write_tensor(indices.contiguous(), offset); // TODO make sure on CPU
+    offset = write_tensor(positions.contiguous(), offset); // TODO make sure on CPU
+    offset = write_tensor(velocities.contiguous(), offset); // TODO make sure on CPU
+
+    // to calculate frame offsets better
+    writes += 1;
 }
 
 MolecularInfo TrajectoryWriter::load_file(std::string xyz_file_name) {

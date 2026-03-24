@@ -25,6 +25,12 @@ private:
     py::bytes run_id;
     std::string author;
 
+    uint32_t writes{ 0 };
+
+    uint32_t total_atoms;
+    uint32_t bytes_per_atom;
+    uint32_t front_matter_size;
+
     int fd; // fd of the output file
     uint32_t rank; // rank of the current process
     std::vector<uint32_t> rank_atom_counts; // atom offsets
