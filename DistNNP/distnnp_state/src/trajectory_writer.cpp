@@ -64,43 +64,52 @@ void TrajectoryWriter::write_front_matter(float time_per_step, float steps_per_w
 
     // magic
     const char* magic = "DISTNNP\x00";
+    std::cerr << "copying " << magic << std::endl;
     memcpy(buf.data() + offset, magic, strlen(magic));
     offset += strlen(magic);
 
     // version
     const uint32_t version = 1;
+    std::cerr << "copying " << version << std::endl;
     memcpy(buf.data() + offset, &version, sizeof(version));
     offset += sizeof(version);
 
     // run_id
     std::string r = run_id;
+    std::cerr << "copying " << r << std::endl;
     memcpy(buf.data() + offset, r.data(), 16);
     offset += 16;
 
     // author
+    std::cerr << "copying " << author << std::endl;
     memcpy(buf.data() + offset, author.data(), author.size());
     memset(buf.data() + offset + author.size(), 0, 64 - author.size());
     offset += 64;
 
     // total_atoms
+    std::cerr << "copying " << state.num_atoms << std::endl;
     memcpy(buf.data() + offset, &state.num_atoms, sizeof(state.num_atoms));
     offset += sizeof(state.num_atoms);
 
     // time_per_step
+    std::cerr << "copying " << time_per_step << std::endl;
     memcpy(buf.data() + offset, &time_per_step, sizeof(time_per_step));
     offset += sizeof(time_per_step);
 
     // steps_per_write 
+    std::cerr << "copying " << steps_per_write << std::endl;
     memcpy(buf.data() + offset, &steps_per_write, sizeof(steps_per_write));
     offset += sizeof(time_per_step);
 
     // bytes_per_atom, id, position, velocity
     const uint32_t bytes_per_atom = 8 + (3 * 4) + (3 * 4);
+    std::cerr << "copying " << bytes_per_atom << std::endl;
     memcpy(buf.data() + offset, &bytes_per_atom, sizeof(bytes_per_atom));
     offset += sizeof(bytes_per_atom);
 
     // field_count
     const uint32_t field_count = 3;
+    std::cerr << "copying " << field_count << std::endl;
     memcpy(buf.data() + offset, &field_count, sizeof(field_count));
     offset += sizeof(field_count);
 
@@ -138,11 +147,11 @@ void TrajectoryWriter::write_front_matter(float time_per_step, float steps_per_w
 
     // tensor of atomic numbers
     // TODO this could be large and its own separate write to the file to make things easier probably
-    auto t = state.atom_types.contiguous();
-
-    size_t tensor_bytes = t.numel() * t.element_size();
-    memcpy(buf.data() + offset, t.data_ptr(), tensor_bytes);
-    offset += tensor_bytes;
+    // auto t = state.atom_types.contiguous();
+    //
+    // size_t tensor_bytes = t.numel() * t.element_size();
+    // memcpy(buf.data() + offset, t.data_ptr(), tensor_bytes);
+    // offset += tensor_bytes;
 
     // write to the file
     ssize_t written = write(fd, buf.data(), buf.size());
