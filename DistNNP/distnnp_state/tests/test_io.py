@@ -50,7 +50,7 @@ def test_write_front_matter():
     # since it is rank 0 it writes to the file
     env = writer.initialize("tests/xyz.xyz", 1.0, 1.0)
 
-    fixed_format = "<8sI16s64sQfIII32s32s32sQ"
+    fixed_format = "<8sI16s64sQfIII32s32s32sQ36x6I58x"
     fixed_size = struct.calcsize(fixed_format)
 
     with open("./trajectory.xyzbin", "rb") as f:
@@ -76,6 +76,7 @@ def test_write_front_matter():
             "position":        vals[10].decode('utf-8').rstrip('\x00'),
             "velocity":        vals[11].decode('utf-8').rstrip('\x00'),
             "front_matter_size": vals[12],
+            "atom_types":      vals[13:19]
         }
 
         # Check to see if it matches expected
@@ -91,4 +92,5 @@ def test_write_front_matter():
         assert h["id"] == "id"
         assert h["position"] == "position"
         assert h["velocity"] == "velocity"
-        assert h["front_matter_size"] == 256 + (6 * 4)
+        assert h["front_matter_size"] == 320
+        assert h["atom_types"] == [20, 35, 1, 6, 1, 1]
