@@ -33,7 +33,7 @@ MolecularInfo TrajectoryWriter::initialize(std::string xyz_file_name, float time
     return state;
 }
 
-void TrajectoryWriter::write_front_matter(float time_per_step, float steps_per_write, MolecularInfo state) {
+void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state) {
     // figure out sizes of header and each rank size
     // resize file to the correct size
 
@@ -65,8 +65,8 @@ void TrajectoryWriter::write_front_matter(float time_per_step, float steps_per_w
     // magic
     const char* magic = "DISTNNP\x00";
     std::cerr << "copying " << magic << std::endl;
-    memcpy(buf.data() + offset, magic, strlen(magic));
-    offset += strlen(magic);
+    memcpy(buf.data() + offset, magic, 8);
+    offset += 8;
 
     // version
     const uint32_t version = 1;
@@ -120,21 +120,21 @@ void TrajectoryWriter::write_front_matter(float time_per_step, float steps_per_w
     uint32_t id_size = strlen(id_str);
     memcpy(buf.data() + offset, id_str, id_size);
     memset(buf.data() + offset + id_size, 0, 32 - id_size);
-    offset += id_size;
+    offset += 32;
 
     // position 
     const char* pos_str = "position\0";
     uint32_t pos_size = strlen(pos_str);
     memcpy(buf.data() + offset, pos_str, pos_size);
     memset(buf.data() + offset + pos_size, 0, 32 - pos_size);
-    offset += pos_size;
+    offset += 32;
 
     // velocity 
     const char* vel_str = "velocity\0";
     uint32_t vel_size = strlen(vel_str);
     memcpy(buf.data() + offset, vel_str, vel_size);
     memset(buf.data() + offset + vel_size, 0, 32 - vel_size);
-    offset += vel_size;
+    offset += 32;
 
     // front_matter_size
     memcpy(buf.data() + offset, &front_matter_size, sizeof(front_matter_size));
@@ -147,11 +147,11 @@ void TrajectoryWriter::write_front_matter(float time_per_step, float steps_per_w
 
     // tensor of atomic numbers
     // TODO this could be large and its own separate write to the file to make things easier probably
-    // auto t = state.atom_types.contiguous();
-    //
-    // size_t tensor_bytes = t.numel() * t.element_size();
-    // memcpy(buf.data() + offset, t.data_ptr(), tensor_bytes);
-    // offset += tensor_bytes;
+    auto t = state.atom_types.contiguous();
+
+    size_t tensor_bytes = t.numel() * t.element_size();
+    memcpy(buf.data() + offset, t.data_ptr(), tensor_bytes);
+    offset += tensor_bytes;
 
     // write to the file
     ssize_t written = write(fd, buf.data(), buf.size());

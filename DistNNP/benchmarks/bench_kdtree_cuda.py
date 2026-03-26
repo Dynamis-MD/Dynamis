@@ -32,7 +32,7 @@ from distnnp_state import MolecularInfo, DistEnvironment, KDTreePartitioner
 def _make_state(N: int, device: torch.device) -> MolecularInfo:
     state = MolecularInfo()
     state.num_atoms = N
-    state.atom_indices = torch.arange(N, dtype=torch.long, device=device)
+    state.atom_vertex_numbers = torch.arange(N, dtype=torch.long, device=device)
     state.atom_positions = torch.rand(N, 3, dtype=torch.float32, device=device) * 20.0
     state.atom_velocities = torch.zeros(N, 3, dtype=torch.float32, device=device)
     return state
@@ -118,7 +118,7 @@ def run_benchmark(sizes: List[int], k_values: List[int], warmup: int, repeats: i
             def fn_cuda_uw():
                 s = MolecularInfo()
                 s.num_atoms = N
-                s.atom_indices = indices
+                s.atom_vertex_numbers = indices
                 s.atom_positions = positions
                 s.atom_velocities = velocities
                 return p.partition(s, env)
@@ -131,7 +131,7 @@ def run_benchmark(sizes: List[int], k_values: List[int], warmup: int, repeats: i
             def fn_cuda_wt():
                 s = MolecularInfo()
                 s.num_atoms = N
-                s.atom_indices = indices
+                s.atom_vertex_numbers = indices
                 s.atom_positions = positions
                 s.atom_velocities = velocities
                 s.edge_counts = weights

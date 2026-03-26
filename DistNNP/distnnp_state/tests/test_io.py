@@ -22,9 +22,10 @@ def test_xyz_extended_io():
     velocities = velocities.reshape(6, 3)
 
     assert env.num_atoms == 6
+    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1]), env.atom_types)
     assert torch.equal(positions, env.atom_positions)
     assert torch.equal(velocities, env.atom_velocities)
-    assert torch.equal(torch.arange(0, 6, 1), env.atom_indices)
+    assert torch.equal(torch.arange(0, 6, 1), env.atom_vertex_numbers)
 
 def test_xyz_io():
     """Regular xyz test"""
@@ -38,9 +39,10 @@ def test_xyz_io():
     positions = torch.concat((values, values), dim=0)
     positions = positions.reshape([6, 3])
     assert env.num_atoms == 6
+    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1]), env.atom_types)
     assert torch.equal(positions, env.atom_positions)
     assert torch.equal(torch.zeros([6, 3]), env.atom_velocities)
-    assert torch.equal(torch.arange(0, 6, 1), env.atom_indices)
+    assert torch.equal(torch.arange(0, 6, 1), env.atom_vertex_numbers)
 
 def test_write_front_matter():
     writer = TrajectoryWriter(0, b"1234", "author", "./")
@@ -79,17 +81,14 @@ def test_write_front_matter():
         # Check to see if it matches expected
         assert h["magic"] == b"DISTNNP\x00"
         assert h["version"] == 1
-        assert h["run_id"] == b"1234"
+        assert h["run_id"] == uuid.UUID(bytes=b"1234".ljust(16, b'\x00'))
         assert h["author"] == "author"
         assert h["total_atoms"] == 6
         assert h["time_per_step"] == 1.0
         assert h["steps_per_write"] == 1
-        assert h["bytes_per_atom"] == 28
+        assert h["bytes_per_atom"] == 32
         assert h["field_count"] == 3
         assert h["id"] == "id"
         assert h["position"] == "position"
         assert h["velocity"] == "velocity"
-        assert h["front_matter_size"] == 256
-
-        
-        return header
+        assert h["front_matter_size"] == 256 + (6 * 4)

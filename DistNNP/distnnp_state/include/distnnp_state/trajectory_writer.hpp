@@ -20,7 +20,7 @@ public:
 
 private:
     MolecularInfo load_file(std::string xyz_file_name);
-    void write_front_matter(float time_per_step, float steps_per_write, MolecularInfo state);
+    void write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state);
 
     py::bytes run_id;
     std::string author;
