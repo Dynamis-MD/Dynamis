@@ -23,7 +23,7 @@ TrajectoryWriter::TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const
     }
 }
 
-MolecularInfo TrajectoryWriter::initialize(std::string xyz_file_name, float time_per_step, float steps_per_write) {
+MolecularInfo TrajectoryWriter::initialize(std::string xyz_file_name, float time_per_step, uint32_t steps_per_write) {
     auto state = load_file(xyz_file_name);
 
     if (rank != 0) return state;
@@ -33,7 +33,7 @@ MolecularInfo TrajectoryWriter::initialize(std::string xyz_file_name, float time
     return state;
 }
 
-void TrajectoryWriter::write_front_matter(float time_per_step, float steps_per_write, MolecularInfo state) {
+void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state) {
     // figure out sizes of header and each rank size
     // resize file to the correct size
 
@@ -55,17 +55,13 @@ void TrajectoryWriter::write_front_matter(float time_per_step, float steps_per_w
     // should pad the front_matter_size so this block is on a 64 byte boundary
     uint32_t front_matter_padding = 256 - front_matter_size;
     front_matter_size += 256 - front_matter_size;
-    std::cerr << "front_matter_padding = " << front_matter_padding << std::endl;
-    std::cerr << "front matter size = " << front_matter_size << std::endl;
 
     // then the atom types start at a 64 byte boundary and then
     // I will insert padding at the end to make sure they stay on the 64 byte boundary
 
-    front_matter_size += state.num_atoms; // 8 bit unsigned ints for each atom
-    uint32_t atom_type_padding = 64 - ((state.num_atoms) % 64);
+    front_matter_size += state.num_atoms * 4; // 32 bit unsigned ints for each atom
+    uint32_t atom_type_padding = 64 - ((state.num_atoms * 4) % 64);
     front_matter_size += atom_type_padding;
-    std::cerr << "atom_type_padding = " << atom_type_padding << std::endl;
-    std::cerr << "front matter size = " << front_matter_size << std::endl;
 
     // create a buffer
     std::vector<uint8_t> buf(front_matter_size);
@@ -121,25 +117,25 @@ void TrajectoryWriter::write_front_matter(float time_per_step, float steps_per_w
     uint32_t id_size = strlen(id_str);
     memcpy(buf.data() + offset, id_str, id_size);
     memset(buf.data() + offset + id_size, 0, 32 - id_size);
-    offset += id_size;
+    offset += 32;
 
     // position 
     const char* pos_str = "position\0";
     uint32_t pos_size = strlen(pos_str);
     memcpy(buf.data() + offset, pos_str, pos_size);
     memset(buf.data() + offset + pos_size, 0, 32 - pos_size);
-    offset += pos_size;
+    offset += 32;
 
     // velocity 
     const char* vel_str = "velocity\0";
     uint32_t vel_size = strlen(vel_str);
     memcpy(buf.data() + offset, vel_str, vel_size);
     memset(buf.data() + offset + vel_size, 0, 32 - vel_size);
-    offset += vel_size;
+    offset += 32;
 
     // front_matter_size
     memcpy(buf.data() + offset, &front_matter_size, sizeof(front_matter_size));
-    offset += front_matter_size;
+    offset += sizeof(front_matter_size);
 
     // padding
     memset(buf.data() + offset, 0, front_matter_padding);
@@ -272,7 +268,7 @@ MolecularInfo TrajectoryWriter::load_file(std::string xyz_file_name) {
     }
 
     // read in all of the positions
-    std::vector<uint8_t> types;
+    std::vector<uint32_t> types;
     std::vector<float> positions;
     std::vector<float> velocities;
     while (std::getline(xyz_file, line)) {
@@ -308,7 +304,7 @@ MolecularInfo TrajectoryWriter::load_file(std::string xyz_file_name) {
     // tensor setup
     atoms.num_atoms = num_atoms;
     atoms.atom_vertex_numbers = torch::arange(0, num_atoms, 1);
-    atoms.atom_types = torch::from_blob(types.data(), {num_atoms}, torch::kByte).clone();
+    atoms.atom_types = torch::from_blob(types.data(), {num_atoms}, torch::kUInt32).clone();
     atoms.atom_positions = torch::from_blob(positions.data(), {num_atoms, 3}).clone();
 
     if (velocity_index == -1)

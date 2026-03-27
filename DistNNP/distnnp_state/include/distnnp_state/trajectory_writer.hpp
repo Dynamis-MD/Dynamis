@@ -11,7 +11,7 @@ public:
     explicit TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, std::string output_dir = "./trajectory");
 
     // TODO eventually this can be initialize with the custom binary format as a file
-    MolecularInfo initialize(std::string xyz_file_name, float time_per_step, float steps_per_write);
+    MolecularInfo initialize(std::string xyz_file_name, float time_per_step, uint32_t steps_per_write);
 
     void write_frame(int fd, uint32_t frame_idx, torch::Tensor indices, torch::Tensor positions, torch::Tensor velocities);
 
@@ -21,7 +21,7 @@ public:
 
 private:
     MolecularInfo load_file(std::string xyz_file_name);
-    void write_front_matter(float time_per_step, float steps_per_write, MolecularInfo state);
+    void write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state);
 
     py::bytes run_id;
     std::string author;
@@ -40,7 +40,7 @@ private:
 
 // TODO figure out a better way to do this
 // only doing up to Lead as idk if we need any of the unstable elements
-static const std::unordered_map<std::string, uint8_t> periodic_table = {
+static const std::unordered_map<std::string, uint32_t> periodic_table = {
     {"H", 1},
     {"He", 2},
     {"Li", 3},
