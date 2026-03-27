@@ -1,6 +1,6 @@
 from setup_system import create_dist_nnp_state, sync_and_repartition
 from distnnp_model.empirical import LennardJonesPotentialModel
-from distnnp.src.distnnp.simulator import Simulator, SimulatorConfig
+from distnnp.simulator import Simulator, SimulatorConfig
 from distnnp_integrator import Verlet
 from distnnp_state import DistNNPState
 import torch
