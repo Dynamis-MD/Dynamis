@@ -88,6 +88,9 @@ class Langevin(DistNNPIntegrator):
 
         # Langevin requires normally distributed noise for thermal kicks
         noise1 = torch.randn_like(state.vel)
+        
+        energy, new_forces = model(state)
+        state.forces = new_forces
         self.halfstep1_(
             state.pos, state.vel, state.forces, state.mass, noise1, step_size
         )

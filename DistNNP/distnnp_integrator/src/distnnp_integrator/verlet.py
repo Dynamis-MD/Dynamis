@@ -78,6 +78,8 @@ class Verlet(DistNNPIntegrator):
         else:
             step_size = self.dt
 
+        energy, new_forces = model(state)
+        state.forces = new_forces
         # 1. Update v to half-step, and pos to full-step
         self.halfstep1_(state.pos, state.vel, state.forces, state.mass, step_size)
 
