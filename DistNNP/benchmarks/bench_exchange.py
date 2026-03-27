@@ -25,7 +25,7 @@ from distnnp_state import (
 def make_global_state(num_atoms, device):
     state = MolecularInfo()
     state.num_atoms = num_atoms
-    state.atom_indices = torch.arange(num_atoms, dtype=torch.long, device=device)
+    state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long, device=device)
     state.atom_positions = torch.rand(num_atoms, 3, device=device) * 10.0
     state.atom_velocities = torch.zeros(num_atoms, 3, device=device)
     return state
