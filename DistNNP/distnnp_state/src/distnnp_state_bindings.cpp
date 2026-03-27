@@ -106,7 +106,6 @@ PYBIND11_MODULE(distnnp_state_impl, m)
              py::arg("counts"))
         .def("write_frame", &distnnp_state::TrajectoryWriter::write_frame,
              "Writes the frame to the binary file",
-             py::arg("fd"),
              py::arg("frame_idx"),
              py::arg("indices"),
              py::arg("positions"),

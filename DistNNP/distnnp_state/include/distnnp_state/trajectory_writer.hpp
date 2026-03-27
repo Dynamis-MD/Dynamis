@@ -9,11 +9,12 @@ namespace distnnp_state {
 class TrajectoryWriter {
 public:
     explicit TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, std::string output_dir = "./trajectory");
+    ~TrajectoryWriter();
 
     // TODO eventually this can be initialize with the custom binary format as a file
     MolecularInfo initialize(std::string xyz_file_name, float time_per_step, uint32_t steps_per_write);
 
-    void write_frame(int fd, uint32_t frame_idx, torch::Tensor indices, torch::Tensor positions, torch::Tensor velocities);
+    void write_frame(uint32_t frame_idx, torch::Tensor indices, torch::Tensor positions, torch::Tensor velocities);
 
     void update_atom_counts(std::vector<uint32_t> counts) {
         rank_atom_counts = std::move(counts);
@@ -28,7 +29,7 @@ private:
 
     uint32_t writes{ 0 };
 
-    uint32_t total_atoms;
+    uint64_t total_atoms;
     uint32_t bytes_per_atom;
     uint32_t front_matter_size;
 

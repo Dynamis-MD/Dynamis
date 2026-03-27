@@ -25,7 +25,7 @@ def test_xyz_extended_io():
     assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.uint32), env.atom_types)
     assert torch.equal(positions, env.atom_positions)
     assert torch.equal(velocities, env.atom_velocities)
-    assert torch.equal(torch.arange(0, 6, 1), env.atom_vertex_numbers)
+    assert torch.equal(torch.arange(0, 6, 1).to(torch.uint64), env.atom_vertex_numbers)
 
 def test_xyz_io():
     """Regular xyz test"""
@@ -42,7 +42,7 @@ def test_xyz_io():
     assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.uint32), env.atom_types)
     assert torch.equal(positions, env.atom_positions)
     assert torch.equal(torch.zeros([6, 3]), env.atom_velocities)
-    assert torch.equal(torch.arange(0, 6, 1), env.atom_vertex_numbers)
+    assert torch.equal(torch.arange(0, 6, 1).to(torch.uint64), env.atom_vertex_numbers)
 
 def test_write_front_matter():
     writer = TrajectoryWriter(0, b"1234", "author", "./")
@@ -94,3 +94,60 @@ def test_write_front_matter():
         assert h["velocity"] == "velocity"
         assert h["front_matter_size"] == 320
         assert h["atom_types"] == (20, 35, 1, 6, 1, 1)
+
+def test_write_frame():
+    """Testing 2 objects writing to the same file"""
+    base_writer = TrajectoryWriter(0, b"1234", "author", "./")
+    writer1 = TrajectoryWriter(1, b"1234", "author", "./")
+
+    env1 = base_writer.initialize("tests/xyz.xyz", 1.0, 1)
+    env2 = writer1.initialize("tests/xyz.xyz", 1.0, 1)
+
+    # split up the envs
+    # 6 atoms
+    env1.num_atoms = 3
+    env1.atom_vertex_numbers = torch.split(env1.atom_vertex_numbers, 3)[0]
+    env1.atom_types = torch.split(env1.atom_types, 3)[0]
+    env1.atom_positions = torch.split(env1.atom_positions, 3)[0]
+    env1.atom_velocities = torch.split(env1.atom_velocities, 3)[0]
+
+    env2.num_atoms = 3
+    env2.atom_vertex_numbers = torch.split(env2.atom_vertex_numbers, 3)[1]
+    env2.atom_types = torch.split(env2.atom_types, 3)[1]
+    env2.atom_positions = torch.split(env2.atom_positions, 3)[1]
+    env2.atom_velocities = torch.split(env2.atom_velocities, 3)[1]
+
+    base_writer.update_atom_counts([3, 3])
+    writer1.update_atom_counts([3, 3])
+
+    # we are assuming the front matter is fine, just reading the frame
+    base_writer.write_frame(0, env1.atom_vertex_numbers, env1.atom_positions, env1.atom_velocities)
+    writer1.write_frame(0, env2.atom_vertex_numbers, env2.atom_positions, env2.atom_velocities)
+
+    # front matter size is 320
+    format = "<320x 6Q 18f 18f"
+    size = struct.calcsize(format)
+
+    with open("./trajectory.xyzbin", "rb") as f:
+        raw = f.read(size)
+        if len(raw) < size:
+            raise ValueError(f"File too small to contain a valid header. got {len(raw)} expected {size}")
+
+        # Unpack the raw bytes into a tuple
+        vals = struct.unpack(format, raw)
+
+        # Mapping tuple to a dictionary for readability
+        h = {
+            "indices":      vals[:6],
+            "positions":    vals[6:24],
+            "velocities":   vals[24:]
+        }
+
+        assert h["indices"] == (0, 1, 2, 3, 4, 5)
+        assert h["positions"] == (0.0, 1.0, 2.0
+                                  , 3.0, 4.0, 5.0
+                                  , 6.0, 7.0, 8.0
+                                  , 0.0, 1.0, 2.0
+                                  , 3.0, 4.0, 5.0
+                                  , 6.0, 7.0, 8.0)
+        assert h["velocities"] == (0.0,) * 18
