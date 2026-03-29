@@ -93,8 +93,8 @@ class LennardJonesPotentialModel(DistNNPModel):
                     (object,),
                     {
                         "pos": positions,
-                        "cell": sim_config.cell,
-                        "natoms": n_atoms,
+                        "cell": sim_config.cell.unsqueeze(0),  # [1, 3, 3]
+                        "natoms": [n_atoms],
                         "pbc": sim_config.pbc,
                     },
                 )(),

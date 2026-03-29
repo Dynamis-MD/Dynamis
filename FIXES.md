@@ -39,44 +39,7 @@ Key details that were non-obvious:
 
 ---
 
-## 6. `lj_potential_model.py` — multiple bugs
 
-**File:** `DistNNP/distnnp_model/src/distnnp_model/empirical/lj_potential_model.py`
-
-### 6a. `simulation_config` attribute does not exist
-
-```python
-sim_config = distributed_state.simulation_config  # broken
-sim_config = distributed_state.sim_config          # fixed
-```
-
-### 6b. `natoms` must be a list, not a scalar
-
-```python
-"natoms": n_atoms,    # broken
-"natoms": [n_atoms],  # fixed
-```
-
-### 6c. `cell` must be `[1, 3, 3]` (batched), not `[3, 3]`
-
-The radius graph wrapper indexes `data.cell[0]`, so a batch dimension
-is required:
-
-```python
-"cell": sim_config.cell,             # broken — [3, 3]
-"cell": sim_config.cell.unsqueeze(0), # fixed — [1, 3, 3]
-```
-
-### 6d. `epsilon` and `sigma` must be moved to the same device as `positions`
-
-```python
-# fixed
-energy = lennard_jones_potential(
-    atom_types, positions, edge_index,
-    self.epsilon.to(positions.device),
-    self.sigma.to(positions.device),
-)
-```
 
 ### 6e. Double IPC exchange for atom_types — CUDA event race corruption
 
