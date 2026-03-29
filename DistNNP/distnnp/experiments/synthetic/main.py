@@ -38,9 +38,11 @@ def create_and_run_experiment(num_atoms: int):
 
     dist_nnp_state = create_dist_nnp_state(num_atoms)
 
-    potential = LennardJonesPotentialModel(
-        epsilon=torch.randn((100,)), sigma=torch.randn((100,))
-    )
+    epsilons = torch.rand(100, requires_grad=True).to(device="cuda")
+    sigmas = torch.rand(100, requires_grad=True).to(device="cuda")
+
+    potential = LennardJonesPotentialModel(epsilon=epsilons, sigma=sigmas)
+
     integrator = Verlet(sim_config.timestep_fs)
     simulator = Simulator(potential, integrator, sim_config)
 

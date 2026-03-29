@@ -173,14 +173,6 @@ pi = distributed_state.local_partition_info
 boundary_atom_types = pi.recv_ghost_indices
 ```
 
-### 6f. LJ singularity at r ≈ 0
-
-Random initial positions can place atoms very close together.
-`(sigma / r)^6` diverges, producing `inf`/`NaN` energy and gradients.
-
-```python
-distances = torch.linalg.norm(dr, dim=1).clamp(min=0.1)
-```
 
 ### 6g. Positions drift outside the simulation box, crashing `radius_graph_pbc`
 
@@ -200,17 +192,6 @@ positions_folded = positions - torch.floor(positions / box_lengths) * box_length
 ```python
 forces = -local_positions.grad
 forces = forces.clamp(-1.0, 1.0)
-```
-
-### 6h. `epsilon` and `sigma` must be non-negative for `torch.sqrt`
-
-```python
-# broken — randn produces negative values; sqrt(negative * negative product) = NaN
-epsilon=torch.randn((100,))
-
-# fixed (in main.py)
-epsilon=torch.abs(torch.randn((100,)))
-sigma=torch.abs(torch.randn((100,)))
 ```
 
 ---
