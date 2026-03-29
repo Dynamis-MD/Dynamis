@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 from distnnp_state import DistNNPState, radius_graph_pbc_cuda, SimState
 from distnnp_model.comm.feature_push import FeaturePushToExchange
+from distnnp_model import FeatureExchanger
 
 
 def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma):
@@ -69,6 +70,52 @@ class LennardJonesPotentialModel(DistNNPModel):
         )
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
         local_atom_types = distributed_state.local_partition_info.partition_indices
+
+        if not self._feature_exchanger.is_ipc_setup:
+            n_local = local_positions.shape[0]
+            rank = distributed_state.dist_env.global_rank
+
+            world_size = distributed_state.dist_env.world_size
+            total_recv = (
+                distributed_state.local_partition_info.global_send_recv_matrix.sum(
+                    dim=0
+                )[rank].item()
+            )
+            total_send = (
+                distributed_state.local_partition_info.global_send_recv_matrix.sum(
+                    dim=1
+                )[rank].item()
+            )
+            F = local_positions.shape[1]
+            x_buffer = FeatureExchanger.allocate_ipc_buffer(
+                n_local + total_recv, F, rank
+            )
+            grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(total_send, F, rank)
+
+            x_handle = self._feature_exchanger.export_ipc_handle(x_buffer)
+            grad_handle = self._feature_exchanger.export_ipc_handle(grad_recv_buffer)
+
+            handle_size = len(x_handle)
+            x_handle_tensor = torch.tensor(
+                x_handle, dtype=torch.uint8, device=local_positions.device
+            )
+            grad_handle_tensor = torch.tensor(
+                grad_handle, dtype=torch.uint8, device=local_positions.device
+            )
+            all_x_handles_tensor = [
+                torch.zeros(
+                    handle_size, dtype=torch.uint8, device=local_positions.device
+                )
+                for _ in range(world_size)
+            ]
+            all_grad_handles_tensor = [
+                torch.zeros(
+                    handle_size, dtype=torch.uint8, device=local_positions.device
+                )
+                for _ in range(world_size)
+            ]
+
+            # self._feature_exchanger.setup_ipc()
 
         boundary_positions = FeaturePushToExchange.apply(
             local_positions, distributed_state, self._feature_exchanger
