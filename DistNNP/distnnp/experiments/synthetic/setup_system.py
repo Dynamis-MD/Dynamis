@@ -4,11 +4,12 @@ import torch.distributed as dist
 
 from distnnp_state import (
     MolecularInfo,
-    DistNNPState,
     DistEnvironment,
     SimulationConfig,
     SFCPartitioner,
     SFCCurveType,
+    SimState,
+    DistNNPState,
 )
 
 # Side length (Å) of the synthetic simulation box.
@@ -45,7 +46,7 @@ def generate_synthetic_dataset(num_atoms: int) -> MolecularInfo:
     return mol_info
 
 
-def create_dist_nnp_state(num_atoms: int) -> DistNNPState:
+def create_dist_nnp_state(num_atoms: int) -> SimState:
     """
     This helper function creates a starting DistNNPState to use with the Simulator.
     Given the number of atoms, it:
@@ -116,11 +117,14 @@ def create_dist_nnp_state(num_atoms: int) -> DistNNPState:
     nnp_state.sim_config = sim_config
     nnp_state.global_molecular_info = mol_info
     nnp_state.local_partition_info = partition_info
+    nnp_state = SimState(
+        nnp_state
+    )  # Wrap in SimState for use with Simulator and potential models.
 
     return nnp_state
 
 
-def sync_and_repartition(state: DistNNPState) -> DistNNPState:
+def sync_and_repartition(state: SimState) -> SimState:
     """
     Gathers updated atom positions and velocities from all ranks, rebuilds the
     global MolecularInfo, re-partitions, and returns a new DistNNPState with
@@ -130,18 +134,18 @@ def sync_and_repartition(state: DistNNPState) -> DistNNPState:
     in place.
 
     Args:
-        state (DistNNPState): current simulation state after one or more steps
+        state (SimState): current simulation state after one or more steps
     Returns:
-        (DistNNPState): new state with updated partitioning and halo maps
+        (SimState): new state with updated partitioning and halo maps
     """
     dist_env = state.dist_env
     world_size = dist_env.world_size
     device = state.local_partition_info.local_atom_positions.device
 
     pi = state.local_partition_info
-    local_indices = pi.partition_indices        # [num_local] — global atom IDs
-    local_positions = pi.local_atom_positions   # [num_local, 3]
-    local_velocities = pi.local_atom_velocities # [num_local, 3]
+    local_indices = pi.partition_indices  # [num_local] — global atom IDs
+    local_positions = pi.local_atom_positions  # [num_local, 3]
+    local_velocities = pi.local_atom_velocities  # [num_local, 3]
 
     global_mol_info = state.global_molecular_info
 
@@ -159,9 +163,13 @@ def sync_and_repartition(state: DistNNPState) -> DistNNPState:
         gathered = [None] * world_size
         dist.all_gather_object(gathered, local_data)
 
-        all_indices = torch.cat([g["indices"] for g in gathered])       # [N]
-        all_positions = torch.cat([g["positions"] for g in gathered])   # [N, 3]
-        all_velocities = torch.cat([g["velocities"] for g in gathered]) # [N, 3]
+        assert all(
+            [g is not None for g in gathered]
+        ), "Gather failed: some ranks did not contribute data."
+
+        all_indices = torch.cat([g["indices"] for g in gathered])  # type: ignore # [N]
+        all_positions = torch.cat([g["positions"] for g in gathered])  # [N, 3]
+        all_velocities = torch.cat([g["velocities"] for g in gathered])  # [N, 3]
 
         # Restore canonical atom order (0 … N-1).
         sort_order = torch.argsort(all_indices)
@@ -171,12 +179,18 @@ def sync_and_repartition(state: DistNNPState) -> DistNNPState:
     # Re-partition on the updated positions and rebuild halo maps.
     partitioner = SFCPartitioner(SFCCurveType.Morton)
     partition_info = partitioner.partition(global_mol_info, dist_env)
-    partitioner.build_halo_maps(partition_info, global_mol_info, dist_env, state.sim_config)
+    partitioner.build_halo_maps(
+        partition_info, global_mol_info, dist_env, state.sim_config
+    )
 
     new_state = DistNNPState()
     new_state.dist_env = dist_env
     new_state.sim_config = state.sim_config
     new_state.global_molecular_info = global_mol_info
     new_state.local_partition_info = partition_info
+
+    new_state = SimState(
+        new_state
+    )  # Wrap in SimState for use with Simulator and potential models.
 
     return new_state

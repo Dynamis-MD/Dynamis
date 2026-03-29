@@ -2,11 +2,11 @@ from setup_system import create_dist_nnp_state, sync_and_repartition
 from distnnp_model.empirical import LennardJonesPotentialModel
 from distnnp.simulator import Simulator, SimulatorConfig
 from distnnp_integrator import Verlet
-from distnnp_state import DistNNPState
+from distnnp_state import SimState
 import torch
 
 
-def log_state(state: DistNNPState, step_num: int):
+def log_state(state: SimState, step_num: int):
     # Placeholder writer
     rank = state.dist_env.global_rank
 

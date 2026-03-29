@@ -1,7 +1,7 @@
 from distnnp_model.potential import DistNNPModel
 import torch
 import torch.nn.functional as F
-from distnnp_state import DistNNPState, radius_graph_pbc_cuda
+from distnnp_state import DistNNPState, radius_graph_pbc_cuda, SimState
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 
 
@@ -63,7 +63,7 @@ class LennardJonesPotentialModel(DistNNPModel):
         self.epsilon = epsilon
         self.sigma = sigma
 
-    def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
+    def __call__(self, distributed_state: SimState, *args, **kwargs):
         prev_local_positions = (
             distributed_state.local_partition_info.local_atom_positions
         )
