@@ -29,7 +29,7 @@ def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma):
     idx_j = idx_j[mask]
 
     dr = positions[idx_i] - positions[idx_j]
-    distances = torch.linalg.norm(dr, dim=1)
+    distances = torch.linalg.norm(dr, dim=1).clamp(min=1e-6)  # Avoid division by zero
 
     # 2. Retrieve atom types for each pair
     type_i = atom_types[idx_i]
@@ -83,7 +83,7 @@ class LennardJonesPotentialModel(DistNNPModel):
 
         # Construct the radius graph with PBC using the local positions (including boundary atoms)
 
-        sim_config = distributed_state.simulation_config
+        sim_config = distributed_state.sim_config
         # Ensure autograd is not tracking the radius graph construction
         n_atoms = positions.shape[0]
         with torch.no_grad():

@@ -241,3 +241,12 @@ find the rank that actually printed the traceback — the
 the other died.
 </content>
 </invoke>
+
+### CMAKE error:  
+  ```undefined reference to `dlvsym@GLIBC_2.2.5'
+  ```
+`CMake` will look for libraries in `$LD_LIBRARY_PATH` when building the extensions.  Make sure it includes the path to the CUDA libraries and standard system libraries:
+
+```bash
+export LD_LIBRARY_PATH=/usr/lib64:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+```
