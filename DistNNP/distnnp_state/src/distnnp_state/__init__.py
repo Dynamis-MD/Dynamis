@@ -15,6 +15,7 @@ SFCCurveType = distnnp_state_impl.SFCCurveType
 
 # CUDA radius graph with PBC
 from distnnp_state.radius_graph_pbc_cuda import radius_graph_pbc_cuda
+from distnnp_state.state_wrapper import SimState
 
 # IO
 TrajectoryWriter = distnnp_state_impl.TrajectoryWriter
@@ -31,4 +32,5 @@ __all__ = [
     "SFCCurveType",
     "TrajectoryWriter",
     "radius_graph_pbc_cuda",
+    "SimState",
 ]

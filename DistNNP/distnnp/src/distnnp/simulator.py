@@ -4,12 +4,7 @@ from distnnp_state import (
     SFCPartitioner,
 )
 from distnnp_model import DistNNPModel
-from distnnp_state import (
-    DistNNPState,
-    DistEnvironment,
-    MolecularInfo,
-    PartitionMessagePassingInfo,
-)
+from distnnp_state import DistNNPState, DistEnvironment, SimState
 from distnnp_integrator import Euler, Verlet, Langevin, AVALIABLE_INTEGRATORS
 from typing import Union, Literal
 from dataclasses import dataclass
@@ -139,7 +134,7 @@ class Simulator:
     def setup(self, file_path: str) -> None:
         pass
 
-    def _set_state(self, state: DistNNPState):
+    def _set_state(self, state: SimState):
         self.state = state
 
     def step(self, step_size: float):

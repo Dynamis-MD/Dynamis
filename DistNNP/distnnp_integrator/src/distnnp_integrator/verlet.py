@@ -7,6 +7,7 @@ from distnnp_integrator._data_check import (
     check_shapes_match,
 )
 from distnnp_integrator.integrator import DistNNPIntegrator
+from distnnp_state import SimState
 
 
 class Verlet(DistNNPIntegrator):
@@ -64,7 +65,7 @@ class Verlet(DistNNPIntegrator):
 
         self.cpp_integrator.halfstep2(vel, frc, mass, dt)
 
-    def step(self, state, model, dt=None):
+    def step(self, state: SimState, model, dt=None):
         """
         Update positions and velocities based on the Velocity Verlet integration method.
 
