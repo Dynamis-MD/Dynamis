@@ -8,67 +8,6 @@ Verlet steps and writes checkpoint files for both ranks.
 
 ---
 
-## 1. Wrong import path in `main.py`
-
-**File:** `DistNNP/distnnp/experiments/synthetic/main.py`
-
-**Problem:**
-```python
-from distnnp.src.distnnp.simulator import Simulator, SimulatorConfig
-```
-The package is installed as `distnnp`; the `src/` layout is only a
-source-tree convention and is not part of the importable path.
-
-**Fix:**
-```python
-from distnnp.simulator import Simulator, SimulatorConfig
-```
-
----
-
-## 2. Wrong function name in `euler.py` — `check_shapes` does not exist
-
-**File:** `DistNNP/distnnp_integrator/src/distnnp_integrator/euler.py`
-
-**Problem — import:**
-```python
-from distnnp_integrator._data_check import check_devices, check_shapes
-```
-The module exports `check_shapes_match`, not `check_shapes`.
-
-**Problem — call signature:**
-```python
-check_shapes(pos, vel, frc, mass)   # mass is not accepted
-```
-`check_shapes_match` only takes `pos, vel, frc`.
-
-**Fix:**
-```python
-from distnnp_integrator._data_check import check_devices, check_shapes_match
-…
-check_shapes_match(pos, vel, frc)
-```
-
----
-
-## 3. `check_integrator` compared instances to a list of strings
-
-**File:** `DistNNP/distnnp/src/distnnp/simulator.py`
-
-**Problem:**
-```python
-if integrator not in AVALIABLE_INTEGRATORS:
-```
-`AVALIABLE_INTEGRATORS` is a list of strings (`["Euler", "Verlet", …]`).
-An integrator instance will never equal a string.
-
-**Fix:**
-```python
-if type(integrator).__name__ not in AVALIABLE_INTEGRATORS:
-```
-
----
-
 ## 4. `DistNNPState` does not support dynamic attributes — `SimState` wrapper needed
 
 **File:** `DistNNP/distnnp/src/distnnp/simulator.py`
@@ -118,17 +57,6 @@ def _set_state(self, state: DistNNPState):
     self.state = SimState(state)
 ```
 
-### 4b. Verlet reads `state.forces` before the first force computation
-
-**Problem:**
-The Velocity Verlet integrator performs a half-step velocity update
-using the *previous* forces before computing new ones:
-```python
-self.halfstep1_(state.pos, state.vel, state.forces, state.mass, step_size)
-```
-On the very first step, no forces have been computed yet.  `SimState`
-must initialize `self.forces` to a zero tensor so this read is valid.
-This is handled in `SimState.__init__` (see 4a above).
 
 ### 4c. `PartitionMessagePassingInfo` has no `local_atom_masses` field
 

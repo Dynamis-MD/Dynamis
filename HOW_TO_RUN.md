@@ -1,4 +1,4 @@
-# How to Run DistNNP on NCSA Delta
+# How to Run DistNNP on HPC systems NCSA Delta 
 
 This document assumes you have just logged into Delta and cloned the
 repository. It covers every step needed to install dependencies, build
@@ -42,29 +42,6 @@ module load cudatoolkit/25.3_12.8   # CUDA 12.8 runtime + nvcc
 module load gcc-native/13.2         # C++ compiler for building extensions
 module load slurm-env/0.1           # sbatch / squeue / etc.
 ```
-
-### Modules that are loaded by default but are NOT needed
-
-The default login environment on Delta loads many Cray PE modules.
-They do not conflict with DistNNP but they are dead weight — none of
-them are used:
-
-| Module | Why it is not needed |
-|--------|----------------------|
-| `craype/2.7.34` | Cray compiler wrapper (`cc`/`CC`). We build with plain `gcc`/`nvcc` via CMake. |
-| `craype-network-ofi` | Cray OpenFabrics networking. NCCL and gloo use their own transports. |
-| `craype-x86-milan` | Sets AMD EPYC micro-arch flags for Cray wrappers. Not used. |
-| `craype-accel-nvidia80` | Tells Cray wrappers to target A100. CMake/nvcc detect the GPU directly. |
-| `cray-libsci/25.03.0` | Cray BLAS/LAPACK. PyTorch bundles its own math libraries. |
-| `cray-dsmml/0.3.1` | Cray distributed shared memory. DistNNP uses CUDA IPC, not this. |
-| `cray-mpich/8.1.32` | Cray MPI. DistNNP uses `torch.distributed` with the `nccl` backend. |
-| `libfabric/1.22.0` | High-speed fabric driver for MPI. Not used for single-node NCCL jobs. |
-| `PrgEnv-gnu/8.6.0` | Meta-module that loads the Cray GNU toolchain. Once `gcc-native` is loaded directly this adds nothing. |
-| `cue-login-env/1.1` | Login-node convenience utilities. Irrelevant inside batch jobs. |
-| `default` | Placeholder that loads the system default set. No effect once you have set up your own environment. |
-
-If you want a clean environment you can unload them all, but it is safe
-to simply leave them loaded — they will not break anything.
 
 ---
 
