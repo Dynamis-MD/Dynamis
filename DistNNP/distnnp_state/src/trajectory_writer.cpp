@@ -47,27 +47,28 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
     // write the front_matter
 
     // 220 bytes
-    uint64_t front_matter_size = 8  // magic
-                               + 4  // version
-                               + 16 // run_id 
-                               + 64 // author
-                               + 8  // total_atoms
-                               + 4  // time_per_step
-                               + 4  // steps_per_write
-                               + 4  // bytes_per_atom
-                               + 4  // field_count
-                               + 96 // 3x32 byte fields
-                               + 8; // front_matter_size
+    uint64_t front_matter_size = sizeof(uint8_t) * 8  // magic
+                               + sizeof(uint32_t)  // version
+                               + sizeof(uint8_t) * 16 // run_id
+                               + sizeof(uint8_t) * 64 // author
+                               + sizeof(uint64_t)  // total_atoms
+                               + sizeof(float)  // time_per_step
+                               + sizeof(uint32_t)  // steps_per_write
+                               + sizeof(uint32_t)  // bytes_per_atom
+                               + sizeof(uint32_t)  // field_count
+                               + 3 * sizeof(uint8_t) * 32 // 3x32 byte fields
+                               + sizeof(uint64_t); // front_matter_size
 
-    // should pad the front_matter_size so this block is on a 64 byte boundary
-    uint32_t front_matter_padding = 256 - front_matter_size;
-    front_matter_size += 256 - front_matter_size;
+    // should pad the front_matter_size so this block is on a 8 byte boundary
+    // this should pad out to 224 bytes
+    uint32_t front_matter_padding = 8 - (front_matter_size % 8);
+    front_matter_size += front_matter_padding;
 
-    // then the atom types start at a 64 byte boundary and then
-    // I will insert padding at the end to make sure they stay on the 64 byte boundary
+    // then the atom types start at a 8 byte boundary and then
+    // I will insert padding at the end to make sure they stay on the 8 byte boundary
 
-    front_matter_size += state.num_atoms * 4; // 32 bit unsigned ints for each atom
-    uint32_t atom_type_padding = 64 - ((state.num_atoms * 4) % 64);
+    front_matter_size += state.num_atoms; // 8 bit unsigned ints for each atom
+    uint32_t atom_type_padding = 8 - (state.num_atoms % 8);
     front_matter_size += atom_type_padding;
 
     // create a buffer
@@ -198,7 +199,7 @@ void TrajectoryWriter::write_frame(uint32_t frame_idx, torch::Tensor indices, to
 
     uint32_t offset = front_matter_size + (writes * total_atoms * bytes_per_atom);
 
-    if (offset < 256)
+    if (offset < 220)
         throw std::runtime_error("Illegal offset");
 
 
@@ -282,7 +283,7 @@ MolecularInfo TrajectoryWriter::load_file(std::string xyz_file_name) {
     }
 
     // read in all of the positions
-    std::vector<uint32_t> types;
+    std::vector<uint8_t> types;
     std::vector<float> positions;
     std::vector<float> velocities;
     while (std::getline(xyz_file, line)) {
@@ -318,7 +319,7 @@ MolecularInfo TrajectoryWriter::load_file(std::string xyz_file_name) {
     // tensor setup
     atoms.num_atoms = num_atoms;
     atoms.atom_vertex_numbers = torch::arange(0, num_atoms, 1).to(torch::kUInt64);
-    atoms.atom_types = torch::from_blob(types.data(), {num_atoms}, torch::kUInt32).clone();
+    atoms.atom_types = torch::from_blob(types.data(), {num_atoms}, torch::kUInt8).clone();
     atoms.atom_positions = torch::from_blob(positions.data(), {num_atoms, 3}).clone();
 
     if (velocity_index == -1)

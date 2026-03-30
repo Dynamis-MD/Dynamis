@@ -22,7 +22,7 @@ def test_xyz_extended_io():
     velocities = velocities.reshape(6, 3)
 
     assert env.num_atoms == 6
-    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.uint32), env.atom_types)
+    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.uint8), env.atom_types)
     assert torch.equal(positions, env.atom_positions)
     assert torch.equal(velocities, env.atom_velocities)
     assert torch.equal(torch.arange(0, 6, 1).to(torch.uint64), env.atom_vertex_numbers)
@@ -39,7 +39,7 @@ def test_xyz_io():
     positions = torch.concat((values, values), dim=0)
     positions = positions.reshape([6, 3])
     assert env.num_atoms == 6
-    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.uint32), env.atom_types)
+    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.uint8), env.atom_types)
     assert torch.equal(positions, env.atom_positions)
     assert torch.equal(torch.zeros([6, 3]), env.atom_velocities)
     assert torch.equal(torch.arange(0, 6, 1).to(torch.uint64), env.atom_vertex_numbers)
@@ -50,7 +50,7 @@ def test_write_front_matter():
     # since it is rank 0 it writes to the file
     env = writer.initialize("tests/xyz.xyz", 1.0, 1)
 
-    fixed_format = "<8sI16s64sQfIII32s32s32sQ36x6I40x"
+    fixed_format = "<8sI16s64sQfIII32s32s32sQ4x6B2x"
     fixed_size = struct.calcsize(fixed_format)
 
     with open("./trajectory.xyzbin", "rb") as f:
@@ -92,7 +92,7 @@ def test_write_front_matter():
         assert h["id"] == "id"
         assert h["position"] == "position"
         assert h["velocity"] == "velocity"
-        assert h["front_matter_size"] == 320
+        assert h["front_matter_size"] == 232
         assert h["atom_types"] == (20, 35, 1, 6, 1, 1)
 
 def test_write_frame():
@@ -125,7 +125,7 @@ def test_write_frame():
     writer1.write_frame(0, env2.atom_vertex_numbers, env2.atom_positions, env2.atom_velocities)
 
     # front matter size is 320
-    format = "<320x 6Q 18f 18f"
+    format = "<232x 6Q 18f 18f"
     size = struct.calcsize(format)
 
     with open("./trajectory.xyzbin", "rb") as f:

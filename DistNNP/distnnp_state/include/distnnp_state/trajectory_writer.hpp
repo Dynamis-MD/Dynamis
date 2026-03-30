@@ -41,7 +41,7 @@ private:
 
 // TODO figure out a better way to do this
 // only doing up to Lead as idk if we need any of the unstable elements
-static const std::unordered_map<std::string, uint32_t> periodic_table = {
+static const std::unordered_map<std::string, uint8_t> periodic_table = {
     {"H", 1},
     {"He", 2},
     {"Li", 3},
