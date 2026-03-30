@@ -388,6 +388,41 @@ The exchange pattern is:
 
 Each exchange call uses the same halo maps from `partition_info` (the maps encode the graph topology which is fixed for the step), but a different feature tensor with potentially different feature dimension `F_l`.
 
+### IPC Buffer Lifecycle and Persistent Buffers
+
+The CUDA IPC mechanism requires buffers to be allocated via raw `cudaMalloc` rather than PyTorch's caching allocator, because `cudaIpcGetMemHandle` requires the exact base pointer of a `cudaMalloc` allocation. Caching-allocator tensors are offsets into pooled slabs and cannot be directly shared via IPC. This has two consequences.
+
+**Mandatory copy per exchange.** GNN layer outputs are standard PyTorch tensors from the caching allocator. They cannot be IPC-shared directly. Before each push, `feature_push_forward` copies the local features into the pre-allocated IPC buffer:
+
+```cpp
+x_buffer_.narrow(1, 0, F).narrow(0, 0, N_local).copy_(local_features);  // unavoidable
+ipc_.push_forward(x_buffer_, stream, ...);
+```
+
+This copy is an async `cudaMemcpyAsync` on the compute stream, bandwidth-bound at O(N\_local × F × sizeof(float)), and pipelines naturally with surrounding computation. There is no way to eliminate it without having the GNN layer write its output directly into the IPC buffer (which would require coupling the model to the exchanger's internal buffers).
+
+**One-time IPC setup, cheap per-layer reconfiguration.** Opening IPC handles (`cudaIpcOpenMemHandle`) is an expensive kernel-mode operation requiring cross-process coordination. It must not be repeated per GNN layer. The design separates two concerns:
+
+- **Topology setup** (once per partition): allocate `x_buffer [N_local + N_ghost, max_F]` and `grad_recv_buffer [total_send, max_F]` for the maximum feature dimension across all layers; export and exchange handles via a single `all_gather`; open remote handles; compute and upload `PushTarget` arrays.
+- **Feature dimension reconfiguration** (once per layer, O(1)): call `reconfigure_feature_dim(F_l)` to update the active column count. This writes a single integer field — no IPC operations, no collectives, no buffer reallocation.
+
+```python
+# One-time initialization (per partition topology)
+exchanger.initialize(max_feature_dim=256, partition_info=..., device=rank)
+    # → cudaMalloc, all_gather handles, cudaIpcOpenMemHandle, PushTarget upload
+
+# Per-layer exchange
+for layer in gnn_layers:
+    exchanger.set_feature_dim(layer.feature_dim)  # O(1): no IPC ops
+    ghost_h = FeaturePushToExchange.apply(h[:N_local], state, exchanger)
+    h = cat([h[:N_local], ghost_h], dim=0)
+    h = layer(h, edge_index)
+```
+
+`set_feature_dim` / `reconfigure_feature_dim` only updates `feature_dim_` (active transfer width) and validates `new_F <= max_feature_dim_` (the allocated row stride). `PushTarget.remote_offset` is stored in atoms (rows), so it remains valid for any `feature_dim <= max_feature_dim`; the kernel computes byte offsets as `remote_offset * max_feature_dim * sizeof(float)`, keeping atom boundaries correct regardless of active feature count.
+
+The memory overhead of this approach is `(max_F - active_F) * sizeof(float)` per row of unused padding for layers with smaller F. For typical GNN embedding schedules this is negligible compared to the cost of repeated handle exchange.
+
 **Implementation pattern for GNN subclasses:**
 
 ```python
@@ -448,7 +483,7 @@ Because `FeaturePushToExchange` is called `L` times in the forward pass, `energy
 
 1. **Backend dispatch granularity**: The current plan dispatches per rank pair. An alternative is to batch all intra-node sends into one fused copy and all inter-node sends into one RDMA operation, which reduces the number of kernel launches and QP posts but requires more complex buffer management.
 
-2. **Buffer reuse across feature dimensions**: Each GNN layer may have a different feature dimension `F_l`. If buffers are allocated for `F_max`, smaller layers waste bandwidth. If buffers are allocated per layer, more memory is needed. A reuse pool (allocate-on-first-use, keep for the run) is a reasonable middle ground.
+2. **Buffer reuse across feature dimensions**: Resolved — allocate once for `max_feature_dim` at topology setup time; switch the active transfer width cheaply via `reconfigure_feature_dim(F_l)` per layer (no IPC operations). Layers with `F_l < max_feature_dim` leave the tail columns of each row unused, which is acceptable. See *IPC Buffer Lifecycle and Persistent Buffers* above.
 
 3. **Asynchronous exchange and computation overlap**: The baseline (`cfg.dist.overlap`) can overlap the NNP compute on interior atoms (identified by `interior_mask` in `PartitionMessagePassingInfo`) with the halo exchange for boundary atoms. This requires splitting the NNP forward pass into two phases: interior atoms first (while communication runs), then boundary atoms after the exchange completes. The `FeatureExchanger` must expose an async `begin_send_recv()` / `wait()` interface for this.
 
