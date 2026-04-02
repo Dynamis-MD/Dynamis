@@ -390,28 +390,34 @@ Each exchange call uses the same halo maps from `partition_info` (the maps encod
 
 ### IPC Buffer Lifecycle and Persistent Buffers
 
-The CUDA IPC mechanism requires buffers to be allocated via raw `cudaMalloc` rather than PyTorch's caching allocator, because `cudaIpcGetMemHandle` requires the exact base pointer of a `cudaMalloc` allocation. Caching-allocator tensors are offsets into pooled slabs and cannot be directly shared via IPC. This has two consequences.
+CUDA IPC registration is a **destination** requirement, not a source requirement. `cudaIpcGetMemHandle` — which requires the exact base pointer of a raw `cudaMalloc` allocation — is only called on the buffer that **receives** peer writes. The rank doing the writing reads from its own local memory (any device pointer, including a caching-allocator tensor) and writes into the IPC-opened pointer on the remote rank. No IPC registration is needed on the sender side.
 
-**Mandatory copy per exchange.** GNN layer outputs are standard PyTorch tensors from the caching allocator. They cannot be IPC-shared directly. Before each push, `feature_push_forward` copies the local features into the pre-allocated IPC buffer:
+This means:
 
-```cpp
-x_buffer_.narrow(1, 0, F).narrow(0, 0, N_local).copy_(local_features);  // unavoidable
-ipc_.push_forward(x_buffer_, stream, ...);
+- `x_buffer_` on each rank is the **receive** buffer for ghost atoms written by peers. It must be a `cudaMalloc` allocation so its handle can be exported and opened by peers.
+- `local_features` (a standard PyTorch caching-allocator tensor) is the **source** read by the push kernel. No IPC handle is needed for it.
+- **No copy of local features into the IPC buffer is required.** The push kernel reads directly from `local_features[send_local_indices[i]]` and writes to `peer_x_buffer[remote_offset + ghost_idx]`.
+
+As a result, `x_buffer_` only needs to be sized `[N_ghost, max_F]` — it holds only the ghost receive region. After the exchange, the caller concatenates:
+
+```python
+ghost_h = FeaturePushToExchange.apply(h[:N_local], state, exchanger)
+h = cat([h[:N_local], ghost_h], dim=0)  # caller's responsibility
 ```
 
-This copy is an async `cudaMemcpyAsync` on the compute stream, bandwidth-bound at O(N\_local × F × sizeof(float)), and pipelines naturally with surrounding computation. There is no way to eliminate it without having the GNN layer write its output directly into the IPC buffer (which would require coupling the model to the exchanger's internal buffers).
+This matches the `FeaturePushToExchange` API contract: it returns ghost features only; the caller concatenates with local features.
 
 **One-time IPC setup, cheap per-layer reconfiguration.** Opening IPC handles (`cudaIpcOpenMemHandle`) is an expensive kernel-mode operation requiring cross-process coordination. It must not be repeated per GNN layer. The design separates two concerns:
 
-- **Topology setup** (once per partition): allocate `x_buffer [N_local + N_ghost, max_F]` and `grad_recv_buffer [total_send, max_F]` for the maximum feature dimension across all layers; export and exchange handles via a single `all_gather`; open remote handles; compute and upload `PushTarget` arrays.
+- **Topology setup** (once per partition): allocate `x_buffer [N_ghost, max_F]` and `grad_recv_buffer [total_send, max_F]` for the maximum feature dimension across all layers; export and exchange handles via a single `all_gather`; open remote handles; compute and upload `PushTarget` arrays.
 - **Feature dimension reconfiguration** (once per layer, O(1)): call `reconfigure_feature_dim(F_l)` to update the active column count. This writes a single integer field — no IPC operations, no collectives, no buffer reallocation.
 
 ```python
 # One-time initialization (per partition topology)
 exchanger.initialize(max_feature_dim=256, partition_info=..., device=rank)
-    # → cudaMalloc, all_gather handles, cudaIpcOpenMemHandle, PushTarget upload
+    # → cudaMalloc [N_ghost, 256], all_gather handles, cudaIpcOpenMemHandle, PushTarget upload
 
-# Per-layer exchange
+# Per-layer exchange (no copy of local features needed)
 for layer in gnn_layers:
     exchanger.set_feature_dim(layer.feature_dim)  # O(1): no IPC ops
     ghost_h = FeaturePushToExchange.apply(h[:N_local], state, exchanger)
@@ -419,9 +425,9 @@ for layer in gnn_layers:
     h = layer(h, edge_index)
 ```
 
-`set_feature_dim` / `reconfigure_feature_dim` only updates `feature_dim_` (active transfer width) and validates `new_F <= max_feature_dim_` (the allocated row stride). `PushTarget.remote_offset` is stored in atoms (rows), so it remains valid for any `feature_dim <= max_feature_dim`; the kernel computes byte offsets as `remote_offset * max_feature_dim * sizeof(float)`, keeping atom boundaries correct regardless of active feature count.
+`set_feature_dim` / `reconfigure_feature_dim` only updates `feature_dim_` (active transfer width) and validates `new_F <= max_feature_dim_` (the allocated row stride). `PushTarget.remote_offset` is stored in atoms (rows), remaining valid for any `feature_dim <= max_feature_dim`.
 
-The memory overhead of this approach is `(max_F - active_F) * sizeof(float)` per row of unused padding for layers with smaller F. For typical GNN embedding schedules this is negligible compared to the cost of repeated handle exchange.
+The memory overhead of this approach is `(max_F - active_F) * sizeof(float)` per ghost row for layers with smaller F — negligible compared to the cost of repeated handle exchange.
 
 **Implementation pattern for GNN subclasses:**
 
