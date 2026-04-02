@@ -27,7 +27,7 @@ PartitionMessagePassingInfo SimpleSpatialPartitioner::partition(
     long start = R * atoms_per_rank;
     long end = (R == W - 1) ? N : start + atoms_per_rank;
 
-    info.partition_indices     = state.atom_indices.slice(0, start, end).contiguous();
+    info.partition_indices     = state.atom_vertex_numbers.slice(0, start, end).contiguous();
     info.local_atom_positions  = state.atom_positions.slice(0, start, end).contiguous();
     info.local_atom_velocities = state.atom_velocities.slice(0, start, end).contiguous();
 

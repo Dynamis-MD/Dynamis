@@ -1,6 +1,7 @@
 #include "distnnp_state/distnnp_state.hpp"
 #include "distnnp_state/partitioner.hpp"
 #include "distnnp_state/radius_pbc.hpp"
+#include "distnnp_state/trajectory_writer.hpp"
 #include <torch/extension.h>
 
 PYBIND11_MODULE(distnnp_state_impl, m)
@@ -8,10 +9,10 @@ PYBIND11_MODULE(distnnp_state_impl, m)
   py::class_<distnnp_state::MolecularInfo>(m, "MolecularInfo")
       .def(py::init<>())
       .def_readwrite("num_atoms", &distnnp_state::MolecularInfo::num_atoms)
-      .def_readwrite("atom_indices", &distnnp_state::MolecularInfo::atom_indices)
+      .def_readwrite("atom_vertex_numbers", &distnnp_state::MolecularInfo::atom_vertex_numbers)
+      .def_readwrite("atom_types", &distnnp_state::MolecularInfo::atom_types)
       .def_readwrite("atom_positions", &distnnp_state::MolecularInfo::atom_positions)
-      .def_readwrite("atom_velocities", &distnnp_state::MolecularInfo::atom_velocities)
-      .def_readwrite("edge_counts", &distnnp_state::MolecularInfo::edge_counts);
+      .def_readwrite("atom_velocities", &distnnp_state::MolecularInfo::atom_velocities);
 
   py::class_<distnnp_state::DistEnvironment>(m, "DistEnvironment")
       .def(py::init<>())
@@ -88,6 +89,27 @@ PYBIND11_MODULE(distnnp_state_impl, m)
                &distnnp_state::SFCPartitioner::partition),
            "Partition: auto-compute edge weights via radius_graph_pbc (CUDA)")
       .def("build_halo_maps", &distnnp_state::SFCPartitioner::build_halo_maps);
+
+  py::class_<distnnp_state::TrajectoryWriter>(m, "TrajectoryWriter")
+        .def(py::init<uint32_t, py::bytes, const std::string&, std::string>(),
+             py::arg("global_rank"),
+             py::arg("run_id"),
+             py::arg("author"),
+             py::arg("output_dir") = "./trajectory")
+        .def("initialize", &distnnp_state::TrajectoryWriter::initialize,
+            "Writes front matter and initializes environment from an xyz file",
+            py::arg("xyz_file_name"),
+            py::arg("time_per_step"),
+            py::arg("steps_per_write"))
+        .def("update_atom_counts", &distnnp_state::TrajectoryWriter::update_atom_counts,
+             "Update the rank offsets. Should be called after every repartition",
+             py::arg("counts"))
+        .def("write_frame", &distnnp_state::TrajectoryWriter::write_frame,
+             "Writes the frame to the binary file",
+             py::arg("frame_idx"),
+             py::arg("indices"),
+             py::arg("positions"),
+             py::arg("velocities"));
 
   m.def("radius_graph_pbc", &radius_graph_pbc,
         "CUDA cell-list radius graph with selective PBC tiling",

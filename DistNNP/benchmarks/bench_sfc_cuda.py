@@ -27,7 +27,7 @@ except ImportError:
 def make_state(N, device):
     state = MolecularInfo()
     state.num_atoms = N
-    state.atom_indices = torch.arange(N, dtype=torch.long, device=device)
+    state.atom_vertex_numbers = torch.arange(N, dtype=torch.long, device=device)
     state.atom_positions = torch.rand(N, 3, device=device) * 100.0
     state.atom_velocities = torch.zeros(N, 3, device=device)
     return state
