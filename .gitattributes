@@ -1,0 +1,3 @@
+# Molecular data files — treat as binary (no diff, no linguist stats)
+*.xyz linguist-language=data binary
+*.pdb linguist-language=data binary
