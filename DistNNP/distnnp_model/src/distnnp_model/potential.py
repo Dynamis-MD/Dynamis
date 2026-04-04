@@ -6,7 +6,9 @@ import torch
 
 
 class DistNNPModel(ABC):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+    ) -> None:
         super().__init__()
 
     @abstractmethod

@@ -3,9 +3,10 @@ import torch
 # Uncomment when the communication engine is implemented
 # from distnnp_model.distnnp_model_impl import feature_push
 
-from distnnp_state import DistNNPState, SimulationConfig, PartitionMessagePassingInfo
+from distnnp_state import DistNNPState, PartitionMessagePassingInfo
 from torch.autograd import Function
-from distnnp_model.distnnp_model_impl import FeatureExchanger
+from distnnp_model.comm.exchanger import Exchanger
+from typing import Tuple
 
 
 class FeaturePushToExchange(Function):
@@ -14,7 +15,7 @@ class FeaturePushToExchange(Function):
         ctx,
         features_to_push: torch.Tensor,
         state: DistNNPState,
-        exchanger: FeatureExchanger,
+        exchanger: Exchanger,
     ) -> torch.Tensor:
         """Implements the forward pass for the feature push operation.
 
@@ -39,7 +40,7 @@ class FeaturePushToExchange(Function):
         return received_features
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output) -> Tuple[torch.Tensor, None, None]:
         """Implements the backward pass for the feature push operation.
 
         Args:

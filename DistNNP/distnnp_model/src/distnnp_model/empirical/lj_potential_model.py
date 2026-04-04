@@ -1,9 +1,10 @@
 from distnnp_model.potential import DistNNPModel
 import torch
 import torch.nn.functional as F
-from distnnp_state import DistNNPState, radius_graph_pbc_cuda, SimState
+from distnnp_state import radius_graph_pbc_cuda, SimState
 from distnnp_model.comm.feature_push import FeaturePushToExchange
-from distnnp_model import FeatureExchanger
+from distnnp_model.comm.exchanger import Exchanger, GPUDirectExchanger
+from typing import Optional
 
 
 def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma):
@@ -53,7 +54,12 @@ def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma):
 
 
 class LennardJonesPotentialModel(DistNNPModel):
-    def __init__(self, epsilon: torch.Tensor, sigma: torch.Tensor):
+    def __init__(
+        self,
+        epsilon: torch.Tensor,
+        sigma: torch.Tensor,
+        exchanger: Optional[Exchanger] = None,
+    ):
         """Initializes the Lennard-Jones potential model with given epsilon and sigma parameters.
 
         Args:
@@ -63,6 +69,13 @@ class LennardJonesPotentialModel(DistNNPModel):
         super().__init__()
         self.epsilon = epsilon
         self.sigma = sigma
+        self.position_exchanger = (
+            GPUDirectExchanger() if exchanger is None else exchanger
+        )
+
+        self.atom_type_exchanger = (
+            GPUDirectExchanger() if exchanger is None else exchanger
+        )
 
     def __call__(self, distributed_state: SimState, *args, **kwargs):
         prev_local_positions = (
@@ -71,62 +84,14 @@ class LennardJonesPotentialModel(DistNNPModel):
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
         local_atom_types = distributed_state.local_partition_info.partition_indices
 
-        if not self._feature_exchanger.is_ipc_setup:
-            n_local = local_positions.shape[0]
-            rank = distributed_state.dist_env.global_rank
+        positions: torch.Tensor = FeaturePushToExchange.apply(
+            local_positions, distributed_state, self.position_exchanger
+        )  # type: ignore
 
-            world_size = distributed_state.dist_env.world_size
-            total_recv = (
-                distributed_state.local_partition_info.global_send_recv_matrix.sum(
-                    dim=0
-                )[rank].item()
-            )
-            total_send = (
-                distributed_state.local_partition_info.global_send_recv_matrix.sum(
-                    dim=1
-                )[rank].item()
-            )
-            F = local_positions.shape[1]
-            x_buffer = FeatureExchanger.allocate_ipc_buffer(
-                n_local + total_recv, F, rank
-            )
-            grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(total_send, F, rank)
-
-            x_handle = self._feature_exchanger.export_ipc_handle(x_buffer)
-            grad_handle = self._feature_exchanger.export_ipc_handle(grad_recv_buffer)
-
-            handle_size = len(x_handle)
-            x_handle_tensor = torch.tensor(
-                x_handle, dtype=torch.uint8, device=local_positions.device
-            )
-            grad_handle_tensor = torch.tensor(
-                grad_handle, dtype=torch.uint8, device=local_positions.device
-            )
-            all_x_handles_tensor = [
-                torch.zeros(
-                    handle_size, dtype=torch.uint8, device=local_positions.device
-                )
-                for _ in range(world_size)
-            ]
-            all_grad_handles_tensor = [
-                torch.zeros(
-                    handle_size, dtype=torch.uint8, device=local_positions.device
-                )
-                for _ in range(world_size)
-            ]
-
-            # self._feature_exchanger.setup_ipc()
-
-        boundary_positions = FeaturePushToExchange.apply(
-            local_positions, distributed_state, self._feature_exchanger
-        )
-
-        boundary_atom_types = FeaturePushToExchange.apply(
-            local_atom_types.float(), distributed_state, self._feature_exchanger
-        ).long()  # type: ignore
-
-        positions = torch.cat([local_positions, boundary_positions], dim=0)  # type: ignore
-        atom_types = torch.cat([local_atom_types, boundary_atom_types], dim=0)  # type: ignore
+        with torch.no_grad():
+            atom_types = FeaturePushToExchange.forward(
+                local_atom_types.float(), distributed_state, self.atom_type_exchanger
+            ).long()  # type: ignore
 
         # Construct the radius graph with PBC using the local positions (including boundary atoms)
 
