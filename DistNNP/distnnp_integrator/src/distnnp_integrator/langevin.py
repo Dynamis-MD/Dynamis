@@ -7,6 +7,7 @@ from distnnp_integrator._data_check import (
     check_shapes_match,
 )
 from distnnp_integrator.integrator import DistNNPIntegrator
+from distnnp_state import SimState
 
 
 class Langevin(DistNNPIntegrator):
@@ -72,7 +73,7 @@ class Langevin(DistNNPIntegrator):
         check_shapes_match(vel, frc, noise)
         self.cpp_integrator.halfstep2(vel, frc, mass, noise, self.gamma, self.kT, dt)
 
-    def step(self, state, model, dt=None):
+    def step(self, state: SimState, model, dt=None):
         """
         Update positions and velocities based on the Langevin integration method (BBK scheme).
 
@@ -88,6 +89,9 @@ class Langevin(DistNNPIntegrator):
 
         # Langevin requires normally distributed noise for thermal kicks
         noise1 = torch.randn_like(state.vel)
+
+        energy, new_forces = model(state)
+        state.forces = new_forces
         self.halfstep1_(
             state.pos, state.vel, state.forces, state.mass, noise1, step_size
         )

@@ -63,6 +63,7 @@ torch::Tensor FeatureExchanger::feature_push_forward(
     cudaStream_t stream = c10::cuda::getCurrentCUDAStream(
         local_features.device().index()).stream();
 
+    
     // Copy local features into x_buffer's local region [0:N_local, :]
     x_buffer_.narrow(0, 0, N_local).copy_(local_features);
 
@@ -74,11 +75,9 @@ torch::Tensor FeatureExchanger::feature_push_forward(
     ipc_.wait_for_pushes(stream);
 
     // x_buffer now has [local_features | ghost_from_all_peers].
-    // Returns the IPC buffer directly. The caller must NOT modify it in-place
-    // or hold references across multiple feature_push_forward calls (each call
-    // overwrites the local region). If the caller needs a persistent copy,
-    // they should torch.cuda.synchronize() then .clone() from Python.
-    return x_buffer_;
+
+    auto return_tensor = x_buffer_.clone(); // Clone to ensure the returned tensor is not modified in-place by future pushes.
+    return return_tensor;
 }
 
 torch::Tensor FeatureExchanger::feature_push_backward(

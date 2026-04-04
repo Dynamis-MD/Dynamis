@@ -1,7 +1,8 @@
 import torch
 from distnnp_integrator.distnnp_integrator_impl import EulerIntegrator
-from distnnp_integrator._data_check import check_devices, check_shapes
+from distnnp_integrator._data_check import check_devices, check_shapes_match
 from distnnp_integrator.integrator import DistNNPIntegrator
+from distnnp_state import SimState
 
 
 class Euler(DistNNPIntegrator):
@@ -30,11 +31,11 @@ class Euler(DistNNPIntegrator):
         # Do python-side checks before calling the C++ implementation
 
         check_devices(pos, vel, frc, mass)
-        check_shapes(pos, vel, frc, mass)
+        check_shapes_match(pos, vel, frc, mass)
 
         EulerIntegrator().step(pos, vel, frc, mass, dt)
 
-    def step(self, state, model, dt=None):
+    def step(self, state: SimState, model, dt=None):
         """
         Update positions and velocities based on the Euler integration method.
 

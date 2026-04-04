@@ -1,8 +1,10 @@
 from distnnp_model.potential import DistNNPModel
 import torch
 import torch.nn.functional as F
-from distnnp_state import DistNNPState, radius_graph_pbc_cuda
+from distnnp_state import radius_graph_pbc_cuda, SimState
 from distnnp_model.comm.feature_push import FeaturePushToExchange
+from distnnp_model.comm.exchanger import Exchanger, GPUDirectExchanger
+from typing import Optional
 
 
 def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma):
@@ -29,7 +31,7 @@ def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma):
     idx_j = idx_j[mask]
 
     dr = positions[idx_i] - positions[idx_j]
-    distances = torch.linalg.norm(dr, dim=1)
+    distances = torch.linalg.norm(dr, dim=1).clamp(min=1e-6)  # Avoid division by zero
 
     # 2. Retrieve atom types for each pair
     type_i = atom_types[idx_i]
@@ -52,7 +54,12 @@ def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma):
 
 
 class LennardJonesPotentialModel(DistNNPModel):
-    def __init__(self, epsilon: torch.Tensor, sigma: torch.Tensor):
+    def __init__(
+        self,
+        epsilon: torch.Tensor,
+        sigma: torch.Tensor,
+        exchanger: Optional[Exchanger] = None,
+    ):
         """Initializes the Lennard-Jones potential model with given epsilon and sigma parameters.
 
         Args:
@@ -62,28 +69,33 @@ class LennardJonesPotentialModel(DistNNPModel):
         super().__init__()
         self.epsilon = epsilon
         self.sigma = sigma
+        self.position_exchanger = (
+            GPUDirectExchanger() if exchanger is None else exchanger
+        )
 
-    def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
+        self.atom_type_exchanger = (
+            GPUDirectExchanger() if exchanger is None else exchanger
+        )
+
+    def __call__(self, distributed_state: SimState, *args, **kwargs):
         prev_local_positions = (
             distributed_state.local_partition_info.local_atom_positions
         )
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
         local_atom_types = distributed_state.local_partition_info.partition_indices
 
-        boundary_positions = FeaturePushToExchange.apply(
-            local_positions, distributed_state, self._feature_exchanger
-        )
+        positions: torch.Tensor = FeaturePushToExchange.apply(
+            local_positions, distributed_state, self.position_exchanger
+        )  # type: ignore
 
-        boundary_atom_types = FeaturePushToExchange.apply(
-            local_atom_types.float(), distributed_state, self._feature_exchanger
-        ).long()  # type: ignore
-
-        positions = torch.cat([local_positions, boundary_positions], dim=0)  # type: ignore
-        atom_types = torch.cat([local_atom_types, boundary_atom_types], dim=0)  # type: ignore
+        with torch.no_grad():
+            atom_types = FeaturePushToExchange.forward(
+                local_atom_types.float(), distributed_state, self.atom_type_exchanger
+            ).long()  # type: ignore
 
         # Construct the radius graph with PBC using the local positions (including boundary atoms)
 
-        sim_config = distributed_state.simulation_config
+        sim_config = distributed_state.sim_config
         # Ensure autograd is not tracking the radius graph construction
         n_atoms = positions.shape[0]
         with torch.no_grad():
@@ -93,8 +105,8 @@ class LennardJonesPotentialModel(DistNNPModel):
                     (object,),
                     {
                         "pos": positions,
-                        "cell": sim_config.cell,
-                        "natoms": n_atoms,
+                        "cell": sim_config.cell.unsqueeze(0),  # [1, 3, 3]
+                        "natoms": [n_atoms],
                         "pbc": sim_config.pbc,
                     },
                 )(),
