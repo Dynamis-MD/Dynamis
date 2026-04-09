@@ -46,20 +46,18 @@ class UMAModel(eSCNMDMoeBackbone, DistNNPModel):
         n_local_atoms = local_positions.shape[0]
 
         # 2. Push to get boundary positions and types via Autograd Function
-        boundary_positions = FeaturePushToExchange.apply(
+        #    Note: `apply()` returns both the local and boundary positions/types
+        positions = FeaturePushToExchange.apply(
             local_positions, distributed_state, self._feature_exchanger
         )
         
-        boundary_atom_types = FeaturePushToExchange.apply(
+        atom_types = FeaturePushToExchange.apply(
             local_atom_types.float(), distributed_state, self._feature_exchanger
         ).long()
 
-        # 3. Concatenate local and boundary to form the full graph inputs
-        positions = torch.cat([local_positions, boundary_positions], dim=0)
         n_atoms = positions.shape[0]
-        atom_types = torch.cat([local_atom_types, boundary_atom_types], dim=0)
 
-        # 4. Construct the radius graph
+        # 3. Construct the (radius) graph
         sim_config = distributed_state.simulation_config
         with torch.no_grad():
             edge_index, _, _ = radius_graph_pbc_cuda(
@@ -78,25 +76,19 @@ class UMAModel(eSCNMDMoeBackbone, DistNNPModel):
                 enforce_max_neighbors_strictly=False,
             )
 
-        # 5. Initial Embedding layer
         x = self.embedding(atom_types)
 
-        # 6. Message Passing Layers with Intermediate IPC Exchange
+        # 4. Message Passing Layers
         for i, layer in enumerate(self.interactions):
-            # Compute interactions over the entire graph
             x = layer(x, positions, edge_index)
 
-            # Synchronize intermediate features via Direct-Push IPC
             if i < len(self.interactions) - 1:
-                # Fetch updated boundary features from neighbors
-                boundary_features = FeaturePushToExchange.apply(
-                    x, distributed_state, self._feature_exchanger
+                # Fetch updated features from neighbors (only send local features)
+                x = FeaturePushToExchange.apply(
+                        x[:n_local_atoms], distributed_state, self._feature_exchanger
                 )
-                
-                # Re-concatenate the synchronized features for the next layer
-                x = torch.cat([x, boundary_features], dim=0)
 
-        # Compute total local energy using only the local atoms
+        # 5. Compute total local energy using only the local atoms
         energy = self.output_head(x[:n_local_atoms])
         
         energy.backward()
