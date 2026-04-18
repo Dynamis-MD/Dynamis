@@ -10,6 +10,7 @@ Run via:
 """
 
 import torch
+import torch.distributed as dist
 import time
 import pytest
 
@@ -42,6 +43,9 @@ def test_per_step_time(simulation_factory):
     # ms -> s
     elapsed = start_event.elapsed_time(end_event) / 1000
 
+    if dist.get_rank() == 0:
+        print(f"\n[perf] per_step_time: {elapsed:.3f}s")
+
     # elapsed is a float in seconds
     # assert elapsed < PERF_BOUNDS["per_step_s"]
 
@@ -69,6 +73,9 @@ def test_N_step_time(simulation_factory):
         simulation.step()
     torch.cuda.synchronize()
     elapsed = time.time() - start
+
+    if dist.get_rank() == 0:
+        print(f"\n[perf] N{N}_total_time: {elapsed:.3f}s  ({elapsed/N:.3f}s/step)")
 
     # elapsed is a float in seconds
     # assert elapsed < PERF_BOUNDS["N100_total_s"]

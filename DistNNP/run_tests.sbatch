@@ -11,9 +11,9 @@
 # run_tests.sbatch — SLURM launcher for the DistNNP distributed test suite.
 #
 # Usage:
-#   sbatch run_tests.sbatch                        # full suite (pytest.ini testpaths)
-#   sbatch run_tests.sbatch distnnp/tests/         # distnnp integration tests only
-#   sbatch run_tests.sbatch distnnp/tests/ -m "not perf"  # skip performance tests
+#   sbatch --account=<your_allocation> run_tests.sbatch                        # full suite (pytest.ini testpaths)
+#   sbatch --account=<your_allocation> run_tests.sbatch distnnp/tests/         # distnnp integration tests only
+#   sbatch --account=<your_allocation> run_tests.sbatch distnnp/tests/ -m "not perf"  # skip performance tests
 #
 # Any arguments after the script name are forwarded verbatim to pytest.
 # ---------------------------------------------------------------------------
