@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=2
 #SBATCH --cpus-per-task=4
 #SBATCH --time=00:30:00
-#SBATCH --output=logs/slurm_%j.log
+#SBATCH --output=/dev/null
 
 # ---------------------------------------------------------------------------
 # run_tests.sbatch — SLURM launcher for the DistNNP distributed test suite.
@@ -84,7 +84,7 @@ if ! ls distnnp/tests/fixtures/lj_reference_rank*.pt 1>/dev/null 2>&1; then
             --rdzv_id=${SLURM_JOB_ID} \
             --rdzv_backend=c10d \
             --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
-            -m distnnp.tests.fixtures.generate_reference
+            distnnp/tests/fixtures/generate_reference.py
     "
 fi
 
