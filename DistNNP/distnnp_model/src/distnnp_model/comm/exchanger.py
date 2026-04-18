@@ -337,3 +337,113 @@ class GPUDirectExchanger(Exchanger):
         all_sync_handles = [t.cpu().tolist() for t in all_sync_handles_tensor]
         self.exchanger.setup_sync(all_sync_handles)
         self.is_ipc_setup = True
+
+class NCCLExchanger(Exchanger):
+    def __init__(
+        self,
+    ) -> None:
+        super().__init__()
+
+    def setup_exchanger(
+        self,
+        local_features: torch.Tensor,
+        partition_info: PartitionMessagePassingInfo,
+    ):
+        """torch.distributed handles NCCL setup; no additional state needed."""
+        assert dist.is_initialized(), "Distributed process group is not initialized"
+
+    def reset_buffers(self):
+        """No persistent buffers to reset for NCCL."""
+        pass
+
+    def feature_push_impl(
+        self,
+        features_to_push: torch.Tensor,
+        partition_info: PartitionMessagePassingInfo,
+    ) -> torch.Tensor:
+        """Exchange halo features via NCCL all-to-all.
+
+        Gathers atoms at send_local_indices, performs an all_to_all_single
+        exchange, and returns the full [N_local + N_ghost, F] tensor with
+        the ghost region populated.
+
+        Args:
+            features_to_push: [N_local, F] local atom features.
+            partition_info: CSR send/recv maps for this rank.
+        Returns:
+            [N_local + N_ghost, F] tensor: local features concatenated with
+            received ghost features ordered by source rank.
+        """
+        world_size = dist.get_world_size()
+        F = features_to_push.shape[1]
+        device = features_to_push.device
+
+        send_offsets = partition_info.send_offsets.cpu()
+        recv_offsets = partition_info.recv_offsets.cpu()
+
+        send_counts = [int(send_offsets[r + 1] - send_offsets[r]) for r in range(world_size)]
+        recv_counts = [int(recv_offsets[r + 1] - recv_offsets[r]) for r in range(world_size)]
+        total_recv = int(recv_offsets[-1])
+
+        # Pack atoms to send in CSR rank order.
+        send_buf = features_to_push[partition_info.send_local_indices]  # [total_send, F]
+        recv_buf = torch.empty(total_recv, F, dtype=features_to_push.dtype, device=device)
+
+        dist.all_to_all_single(
+            recv_buf,
+            send_buf,
+            output_split_sizes=recv_counts,
+            input_split_sizes=send_counts,
+        )
+
+        return torch.cat([features_to_push, recv_buf], dim=0)
+
+    def feature_push_backward_impl(
+        self,
+        grad_output: torch.Tensor,
+        input_feature_shape: torch.Size,
+        partition_info: PartitionMessagePassingInfo,
+    ) -> torch.Tensor:
+        """Reverse NCCL all-to-all to propagate ghost gradients back to owners.
+
+        Sends ghost gradients back to the rank that originally provided each
+        atom, then scatter-adds the received gradients into the local gradient
+        tensor at the positions that were pushed in the forward pass.
+
+        Args:
+            grad_output: [N_local + N_ghost, F] gradient at the forward output.
+            input_feature_shape: Shape of the forward input, i.e. [N_local, F].
+            partition_info: CSR send/recv maps for this rank.
+        Returns:
+            [N_local, F] gradient for the forward input features.
+        """
+        world_size = dist.get_world_size()
+        n_local = input_feature_shape[0]
+        F = grad_output.shape[1]
+        device = grad_output.device
+
+        send_offsets = partition_info.send_offsets.cpu()
+        recv_offsets = partition_info.recv_offsets.cpu()
+
+        send_counts = [int(send_offsets[r + 1] - send_offsets[r]) for r in range(world_size)]
+        recv_counts = [int(recv_offsets[r + 1] - recv_offsets[r]) for r in range(world_size)]
+        total_send = int(send_offsets[-1])
+
+        # Ghost grads to return to atom owners (forward recv → backward send).
+        grad_ghost = grad_output[n_local:].contiguous()  # [total_recv, F]
+        grad_owner = torch.empty(total_send, F, dtype=grad_output.dtype, device=device)
+
+        # Roles are reversed vs forward: we send recv_counts[r] to rank r
+        # and receive send_counts[r] from rank r.
+        dist.all_to_all_single(
+            grad_owner,
+            grad_ghost,
+            output_split_sizes=send_counts,
+            input_split_sizes=recv_counts,
+        )
+
+        # Gradient for local atoms: identity path + accumulated peer contributions.
+        grad_input = grad_output[:n_local].clone()
+        grad_input.index_add_(0, partition_info.send_local_indices, grad_owner)
+
+        return grad_input

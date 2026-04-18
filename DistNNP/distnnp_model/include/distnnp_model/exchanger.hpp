@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 #include "distnnp_state/distnnp_state.hpp"
-
+    
 namespace distnnp_model
 {
 

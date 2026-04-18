@@ -46,7 +46,7 @@ class FeaturePushToExchange(Function):
             features_to_push, partition_info
         )
 
-        return received_features
+        return augmented_features
 
     @staticmethod
     def backward(ctx, grad_output) -> Tuple[torch.Tensor, None, None]:
