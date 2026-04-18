@@ -1,0 +1,215 @@
+"""
+conftest.py — shared fixtures for distributed simulation tests.
+
+Run via:
+    torchrun --nproc_per_node=2 -m pytest distnnp/tests/ -v
+"""
+
+import pytest
+import torch
+import torch.distributed as dist
+from distnnp_model.empirical.lj_potential_model import LennardJonesPotentialModel
+from distnnp_model.distnnp_model_impl import FeatureExchanger
+from distnnp.simulation import SimState, Simulation
+from distnnp_integrator.langevin import Langevin
+from distnnp_integrator.verlet import Verlet
+from distnnp_integrator.euler import Euler
+
+from distnnp_state import (
+    MolecularInfo,
+    SimulationConfig,
+    DistEnvironment,
+    SimpleSpatialPartitioner,
+    DistNNPState,
+)
+
+# ---------------------------------------------------------------------------
+# Module-level skip guard
+# Skip every test in this directory when not running under torchrun.
+# ---------------------------------------------------------------------------
+
+pytestmark = pytest.mark.skipif(
+    not dist.is_available()
+    or not dist.is_initialized()
+    or dist.get_world_size() < 2,
+    reason="Requires torch.distributed initialized with world_size >= 2",
+)
+
+# ---------------------------------------------------------------------------
+# Utility Functions
+# ---------------------------------------------------------------------------
+
+def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> MolecularInfo:
+    """
+    Create a MolecularInfo with random positions in a 10x10x10 box.
+    We make this with a fixed seed but set that fixed seed as a parameter.
+    """
+    torch.manual_seed(seed)
+    state = MolecularInfo()
+    state.num_atoms = num_atoms
+    state.atom_indices = torch.arange(num_atoms, dtype=torch.long, device=device)
+    state.atom_positions = torch.rand(num_atoms, 3, device=device) * 10.0
+    state.atom_velocities = torch.randn(num_atoms, 3, device=device) * 0.1
+    return state
+
+def _make_sim_config(cutoff: float, device: torch.device) -> SimulationConfig:
+    cfg = SimulationConfig()
+    cfg.cutoff = cutoff
+    cfg.ghost_cutoff_buffer = 0.5
+    cfg.cell = torch.eye(3, device=device) * 10.0
+    cfg.pbc = torch.tensor([True, True, True], dtype=torch.bool, device=device)
+    return cfg
+
+def _make_env(rank: int, world_size: int) -> DistEnvironment:
+    env = DistEnvironment()
+    env.global_rank = rank
+    env.world_size = world_size
+    env.gpus_per_node = world_size
+    env.num_nodes = 1
+    env.local_rank = rank
+    return env
+
+# ---------------------------------------------------------------------------
+# simulation_factory fixture
+#
+# Parametrize over all available integrators so every test runs once per
+# integrator. Returns a callable make() -> Simulation so each test
+# controls when construction happens.
+#
+# Construction steps inside make():
+#   1. Build MolecularInfo  (small synthetic system, fixed seed)
+#   2. Build SimulationConfig
+#   3. Build DistEnvironment from dist.get_rank() / get_world_size()
+#   4. Partition with SimpleSpatialPartitioner + build_halo_maps
+#   5. Assemble DistNNPState
+#   6. Create LennardJonesPotentialModel (stand-in for UMAModel)
+#   7. Set up FeatureExchanger IPC on model._feature_exchanger
+#      (see distnnp_model/tests/test_ipc_exchange.py for the protocol)
+#   8. Build SimState(dist_state, sim_config, forces, mass)
+#   9. Return Simulation(sim_state, model, integrator)
+# ---------------------------------------------------------------------------
+@pytest.fixture(params=["euler", "verlet", "langevin"])
+def simulation_factory(request):
+    integrator_name = request.param
+    device = torch.device(f"cuda:{dist.get_rank()}")
+ 
+    # For teardown
+    created = []
+
+    def make():
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+
+        # Step 1: Build MolecularInfo (32-atom system, fixed seed, same on all ranks)
+        molecular_info = _make_global_state(32, 100, device)
+
+        # Step 2: Build Simulation Config
+        # Note; I'm not sure if 3.5 is a proper value here
+        sim_config = _make_sim_config(3.5, device)
+
+        # Step 3: Build DistEnviornment
+        env = _make_env(rank, world_size)
+
+        # Step 4: Partition with SimpleSpatialPartitioner + build_halo_maps
+        partitioner = SimpleSpatialPartitioner()
+        partition_info = partitioner.partition(molecular_info, env)
+        partitioner.build_halo_maps(partition_info, molecular_info, env, sim_config)
+
+        # Step 5: Assemble DistNNPState
+        distnnp_state = DistNNPState()
+        distnnp_state.dist_env = env
+        distnnp_state.global_molecular_info = molecular_info
+        distnnp_state.local_partition_info = partition_info
+
+        # Step 6: Create LennardJonesPotentialModel (stand-in for UMAModel)
+        # These 1.0 values are fairly arbitrary, not sure if they should be changed
+        epsilon = torch.tensor([1.0], dtype=torch.float32, device=device)
+        sigma = torch.tensor([1.0], dtype=torch.float32, device=device)
+        lj_model = LennardJonesPotentialModel(epsilon, sigma)
+
+        # Step 7: Set up FeatureExchanger IPC on model._feature_exchanger
+        exchanger = lj_model._feature_exchanger
+
+        # F === number of dimensions (3D Vectors)
+        F = 3
+
+        send_offsets = partition_info.send_offsets
+        send_local_indices = partition_info.send_local_indices
+        recv_offsets = partition_info.recv_offsets
+        n_local = partition_info.local_atom_positions.shape[0]
+        total_send = int(send_offsets[-1].item())
+        total_recv = int(recv_offsets[-1].item())
+        
+        # --- Allocate IPC buffers ---
+        x_buffer = FeatureExchanger.allocate_ipc_buffer(n_local + total_recv, F, rank)
+        grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(total_send, F, rank)
+
+        # --- Exchange IPC handles via NCCL broadcast ---
+        x_handle = exchanger.export_ipc_handle(x_buffer)
+        grad_handle = exchanger.export_ipc_handle(grad_recv_buffer)
+
+        # Gather handles: use all_gather on raw bytes via CPU tensor → NCCL
+        handle_size = len(x_handle)
+        x_handle_tensor = torch.tensor(x_handle, dtype=torch.uint8, device=device)
+        grad_handle_tensor = torch.tensor(grad_handle, dtype=torch.uint8, device=device)
+
+        all_x_handles_tensor = [torch.zeros(handle_size, dtype=torch.uint8, device=device) for _ in range(world_size)]
+        all_grad_handles_tensor = [torch.zeros(handle_size, dtype=torch.uint8, device=device) for _ in range(world_size)]
+
+        dist.all_gather(all_x_handles_tensor, x_handle_tensor)
+        dist.all_gather(all_grad_handles_tensor, grad_handle_tensor)
+
+        all_x_handles = [t.cpu().tolist() for t in all_x_handles_tensor]
+        all_grad_handles = [t.cpu().tolist() for t in all_grad_handles_tensor]
+
+        # Gather recv_offsets and num_local from all ranks
+        all_recv_offsets_list = [torch.zeros(world_size + 1, dtype=torch.int64, device=device) for _ in range(world_size)]
+        dist.all_gather(all_recv_offsets_list, recv_offsets)
+        all_recv_offsets = torch.stack(all_recv_offsets_list)  # [W, W+1]
+
+        all_num_local_list = [torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)]
+        dist.all_gather(all_num_local_list, torch.tensor([n_local], dtype=torch.int64, device=device))
+        all_num_local = torch.cat(all_num_local_list)  # [W]
+
+        # --- Setup IPC ---
+        exchanger.setup_ipc(
+            x_buffer, grad_recv_buffer,
+            all_x_handles, all_grad_handles,
+            send_offsets, send_local_indices, recv_offsets,
+            all_recv_offsets, all_num_local,
+            n_local, F, rank, world_size,
+        )
+
+        # Setup events
+        event_handle = exchanger.create_and_export_event()
+        event_handle_tensor = torch.tensor(event_handle, dtype=torch.uint8, device=device)
+        all_event_handles_tensor = [torch.zeros(len(event_handle), dtype=torch.uint8, device=device) for _ in range(world_size)]
+        dist.all_gather(all_event_handles_tensor, event_handle_tensor)
+        all_event_handles = [t.cpu().tolist() for t in all_event_handles_tensor]
+        exchanger.setup_events(all_event_handles)
+
+        # Step 8: Build SimState
+        # 1.0 represents an arbitrary atomic mass in amu, not sure if it should be changed
+        forces = torch.zeros(n_local, F, dtype=torch.float32, device=device)
+        mass = torch.full((n_local,), 1.0, dtype=torch.float32, device=device)
+        sim_state = SimState(distnnp_state, sim_config, forces, mass)
+
+        # Step 9: Return Simulation
+        # The constants below are arbitrary, not sure if they should be changed
+        if integrator_name == "euler":
+            integrator = Euler(dt=1e-3)
+        elif integrator_name == "verlet":
+            integrator = Verlet(dt=1e-3)
+        else: # integrator_name == "langevin"
+            integrator = Langevin(dt=1e-3, gamma=1.0, kT=0.6)
+
+        # Store exchanger for teardown
+        created.append(exchanger)
+
+        return Simulation(sim_state, lj_model, integrator)
+
+    yield make
+
+    # Teardown everything in created
+    for exchanger in created:
+        exchanger.teardown()
