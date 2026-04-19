@@ -2,16 +2,19 @@
 generate_reference.py — generates reference fixture data for regression tests.
 
 Reference system: 32-atom LJ argon in a 10x10x10 box, fixed seed=100.
-Uses the same setup as conftest.py simulation_factory (Euler, dt=1e-3).
+Uses the same setup as conftest.py simulation_factory (dt=1e-3).
 
 Run via:
     torchrun --nproc_per_node=2 -m distnnp.tests.fixtures.generate_reference
 
-Output: distnnp/tests/fixtures/lj_reference_rank{r}.pt on each rank, containing:
+Output: distnnp/tests/fixtures/lj_reference_{integrator_name}_rank{r}.pt on each
+rank, containing:
     {
         1:  {"positions": Tensor(n_local, 3), "forces": Tensor(n_local, 3)},
         10: {"positions": Tensor(n_local, 3), "forces": Tensor(n_local, 3)},
     }
+
+One file is generated per integrator (euler, verlet, langevin).
 """
 
 import os
@@ -23,6 +26,8 @@ from distnnp_model.empirical.lj_potential_model import LennardJonesPotentialMode
 from distnnp_model.distnnp_model_impl import FeatureExchanger
 from distnnp.simulation import SimState, Simulation
 from distnnp_integrator.euler import Euler
+from distnnp_integrator.verlet import Verlet
+from distnnp_integrator.langevin import Langevin
 from distnnp_state import (
     MolecularInfo,
     SimulationConfig,
@@ -65,14 +70,16 @@ def _make_env(rank: int, world_size: int, local_rank: int) -> DistEnvironment:
     env.local_rank = local_rank
     return env
 
+def generate_reference(integrator_name: str, rank: int, local_rank: int, world_size: int, device: torch.device) -> None:
+    """Generate and save reference fixtures for a given integrator.
 
-def main():
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group("nccl")
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    device = torch.device(f"cuda:{local_rank}")
+    Args:
+        integrator_name: One of "euler", "verlet", or "langevin".
+        rank: Global rank of this process.
+        local_rank: Local rank (GPU index) on this node.
+        world_size: Total number of ranks.
+        device: CUDA device for this rank.
+    """
 
     # Build MolecularInfo (32-atom system, fixed seed, same on all ranks)
     molecular_info = _make_global_state(32, 100, device)
@@ -150,8 +157,21 @@ def main():
     mass = torch.full((n_local,), 1.0, dtype=torch.float32, device=device)
     sim_state = SimState(distnnp_state, sim_config, forces, mass)
 
-    # dt=1e-3 is arbitrary, not sure if it should be changed
-    simulation = Simulation(sim_state, lj_model, Euler(dt=1e-3))
+    # The constants are fairly arbitrary, not sure if they should be changed
+    if integrator_name == "euler":
+        integrator = Euler(dt=1e-3)
+    elif integrator_name == "verlet":
+        integrator = Verlet(dt=1e-3)
+    elif integrator_name == "langevin":
+        integrator = Langevin(dt=1e-3, gamma=1.0, kT=0.6)
+    else:
+        raise ValueError("Invalid integrator_name: must be euler, verlet or langevin")
+
+    # This is required for deterministic results under langevin
+    # It has some random elements
+    torch.cuda.manual_seed(42)
+
+    simulation = Simulation(sim_state, lj_model, integrator)
 
     # Run simulation and snapshot when needed
     snapshots = {}
@@ -163,8 +183,27 @@ def main():
                 "forces" : forces.clone(),
             }
 
-    # Save snapshots to our directory
-    torch.save(snapshots, OUTPUT_DIR / f"lj_reference_rank{rank}.pt")
+    # Save snapshots from each integrator to our directory
+    torch.save(snapshots, OUTPUT_DIR / f"lj_reference_{integrator_name}_rank{rank}.pt")
+
+
+def main():
+    """
+    Generates and saves reference fixtures for all three 
+    integrators separately, since each integrator produces 
+    different trajectories from the same initial conditions.
+    """
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group("nccl")
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    device = torch.device(f"cuda:{local_rank}")
+
+    generate_reference("euler", rank, local_rank, world_size, device)
+    generate_reference("verlet", rank, local_rank, world_size, device)
+    generate_reference("langevin", rank, local_rank, world_size, device)
 
     dist.destroy_process_group()
 
