@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=distnnp-tests
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=2
 #SBATCH --gpus-per-node=2
 #SBATCH --cpus-per-task=4
@@ -11,10 +11,10 @@
 # run_tests.sbatch — SLURM launcher for the DistNNP distributed test suite.
 #
 # Usage:
-#   sbatch --account=<your_allocation> run_tests.sbatch                        # full suite (pytest.ini testpaths)
-#   sbatch --account=<your_allocation> run_tests.sbatch distnnp/tests/         # distnnp integration tests only
-#   sbatch --account=<your_allocation> run_tests.sbatch distnnp/tests/ -m "not perf"  # skip performance tests
+#   sbatch --account=<your_allocation> run_tests.sbatch                        # default: distnnp/tests/
+#   sbatch --account=<your_allocation> run_tests.sbatch -m "not perf"          # skip performance tests
 #
+# Defaults to distnnp/tests/ so that sub-package mp.spawn tests are not collected under torchrun.
 # Any arguments after the script name are forwarded verbatim to pytest.
 # ---------------------------------------------------------------------------
 
@@ -32,6 +32,42 @@ echo "Job     : ${SLURM_JOB_ID}"
 echo "Node    : $(hostname)"
 echo "Date    : $(date -u)"
 echo "==========================="
+
+# ---------------------------------------------------------------------------
+# Python — resolve the interpreter that torchrun uses, then ensure all
+# requirements (pytest, editable packages) are installed under it.
+# This makes the script portable across systems with different envs.
+# ---------------------------------------------------------------------------
+TORCHRUN=$(command -v torchrun)
+if [[ -z "${TORCHRUN}" ]]; then
+    echo "ERROR: torchrun not found in PATH"
+    exit 1
+fi
+
+# Extract the interpreter from torchrun's shebang line.
+PYTHON=$(head -1 "${TORCHRUN}" | sed 's/^#!//' | awk '{print $1}')
+if [[ -z "${PYTHON}" || ! -x "${PYTHON}" ]]; then
+    PYTHON=$(command -v python3 || command -v python)
+fi
+echo "Python  : ${PYTHON} ($(${PYTHON} --version 2>&1))"
+
+# Set CMAKE_PREFIX_PATH so scikit-build-core can find PyTorch's cmake config.
+# PyTorch ships TorchConfig.cmake under torch.utils.cmake_prefix_path.
+TORCH_CMAKE_PREFIX=$("${PYTHON}" -c "import torch; print(torch.utils.cmake_prefix_path)" 2>/dev/null || true)
+if [[ -n "${TORCH_CMAKE_PREFIX}" ]]; then
+    export CMAKE_PREFIX_PATH="${TORCH_CMAKE_PREFIX}${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
+    echo "CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH}"
+else
+    echo "WARNING: could not detect torch cmake prefix; C++ builds may fail"
+fi
+
+# Limit parallel compile jobs to avoid OOM during C++ builds in the job.
+export CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL:-2}
+
+# Install all requirements (pytest + editable packages) under this interpreter.
+# --quiet suppresses noise; --user avoids needing root.
+echo "Installing requirements..."
+"${PYTHON}" -m pip install -r requirements-dev.txt --quiet --user
 
 # ---------------------------------------------------------------------------
 # CUDA_HOME — required for C++ extensions. Try common cluster paths.
@@ -85,11 +121,19 @@ if ! ls distnnp/tests/fixtures/lj_reference_rank*.pt 1>/dev/null 2>&1; then
             --rdzv_backend=c10d \
             --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
             distnnp/tests/fixtures/generate_reference.py
-    "
+    " || true
+    # Verify files were actually created (torchrun may exit non-zero even on success)
+    if ! ls distnnp/tests/fixtures/lj_reference_rank*.pt 1>/dev/null 2>&1; then
+        echo "ERROR: fixture generation failed — no .pt files found"
+        exit 1
+    fi
 fi
 
 # srun runs this block on every node in the allocation in parallel.
 # Each node gets its own NODE_RANK from $SLURM_NODEID.
+# Default to distnnp/tests/ to avoid collecting mp.spawn sub-package tests under torchrun.
+PYTEST_ARGS=("${@:-distnnp/tests/}")
+
 srun bash -c "
     torchrun \
         --nnodes=${SLURM_NNODES} \
@@ -101,7 +145,7 @@ srun bash -c "
         -m pytest \
         -v \
         --tb=short \
-        $(printf '%q ' "$@")
+        $(printf '%q ' "${PYTEST_ARGS[@]}")
 "
 
 EXIT_CODE=$?

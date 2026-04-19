@@ -25,11 +25,11 @@ ATOL = 1e-5
 
 
 @pytest.mark.parametrize("n_steps", [1, 10])
-def test_forces_match_baseline(simulation_factory, n_steps):
+def test_forces_match_baseline(simulation_factory, n_steps, request):
     rank = dist.get_rank()
+    integrator_name = request.node.callspec.params.get("simulation_factory")
 
-    # Load fixture data
-    fixture = torch.load(FIXTURES_DIR / f"lj_reference_rank{rank}.pt")
+    fixture = torch.load(FIXTURES_DIR / f"lj_reference_{integrator_name}_rank{rank}.pt")
     reference = fixture[n_steps]
 
     simulation = simulation_factory()
@@ -39,16 +39,15 @@ def test_forces_match_baseline(simulation_factory, n_steps):
 
     _, forces = simulation.step()
 
-    # The tolerance is kind of arbitrary
     torch.testing.assert_close(reference["forces"], forces, atol=1e-5, rtol=0)
 
 
 @pytest.mark.parametrize("n_steps", [1, 10])
-def test_positions_match_baseline(simulation_factory, n_steps):
+def test_positions_match_baseline(simulation_factory, n_steps, request):
     rank = dist.get_rank()
+    integrator_name = request.node.callspec.params.get("simulation_factory")
 
-    # Load fixture data
-    fixture = torch.load(FIXTURES_DIR / f"lj_reference_rank{rank}.pt")
+    fixture = torch.load(FIXTURES_DIR / f"lj_reference_{integrator_name}_rank{rank}.pt")
     reference = fixture[n_steps]
 
     simulation = simulation_factory()
@@ -56,5 +55,4 @@ def test_positions_match_baseline(simulation_factory, n_steps):
     for _ in range(n_steps):
         simulation.step()
 
-    # The tolerance is kind of arbitrary
     torch.testing.assert_close(reference["positions"], simulation.state.pos, atol=1e-5, rtol=0)

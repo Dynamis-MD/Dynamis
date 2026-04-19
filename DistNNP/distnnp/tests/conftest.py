@@ -5,6 +5,7 @@ Run via:
     torchrun --nproc_per_node=2 -m pytest distnnp/tests/ -v
 """
 
+import os
 import pytest
 import torch
 import torch.distributed as dist
@@ -24,16 +25,31 @@ from distnnp_state import (
 )
 
 # ---------------------------------------------------------------------------
-# Module-level skip guard
-# Skip every test in this directory when not running under torchrun.
+# Session-scoped autouse fixture: initialize torch.distributed.
+#
+# pytestmark with dist.is_initialized() at module import time does not work
+# because init_process_group hasn't been called yet. Instead we use an
+# autouse session fixture that either initializes NCCL (when running under
+# torchrun) or skips the entire session.
 # ---------------------------------------------------------------------------
 
-pytestmark = pytest.mark.skipif(
-    not dist.is_available()
-    or not dist.is_initialized()
-    or dist.get_world_size() < 2,
-    reason="Requires torch.distributed initialized with world_size >= 2",
-)
+@pytest.fixture(scope="session", autouse=True)
+def dist_init():
+    """Initialize NCCL process group from torchrun environment variables."""
+    if os.environ.get("LOCAL_RANK") is None:
+        pytest.skip("Not running under torchrun — distributed tests require torchrun")
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group("nccl")
+
+    if dist.get_world_size() < 2:
+        dist.destroy_process_group()
+        pytest.skip("Requires world_size >= 2")
+
+    yield
+
+    dist.destroy_process_group()
 
 # ---------------------------------------------------------------------------
 # Utility Functions
@@ -60,13 +76,14 @@ def _make_sim_config(cutoff: float, device: torch.device) -> SimulationConfig:
     cfg.pbc = torch.tensor([True, True, True], dtype=torch.bool, device=device)
     return cfg
 
-def _make_env(rank: int, world_size: int) -> DistEnvironment:
+def _make_env(rank: int, world_size: int, local_rank: int) -> DistEnvironment:
+    gpus_per_node = int(os.environ.get("LOCAL_WORLD_SIZE", world_size))
     env = DistEnvironment()
     env.global_rank = rank
     env.world_size = world_size
-    env.gpus_per_node = world_size
-    env.num_nodes = 1
-    env.local_rank = rank
+    env.gpus_per_node = gpus_per_node
+    env.num_nodes = world_size // gpus_per_node
+    env.local_rank = local_rank
     return env
 
 # ---------------------------------------------------------------------------
@@ -91,7 +108,8 @@ def _make_env(rank: int, world_size: int) -> DistEnvironment:
 @pytest.fixture(params=["euler", "verlet", "langevin"])
 def simulation_factory(request):
     integrator_name = request.param
-    device = torch.device(f"cuda:{dist.get_rank()}")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    device = torch.device(f"cuda:{local_rank}")
  
     # For teardown
     created = []
@@ -108,7 +126,7 @@ def simulation_factory(request):
         sim_config = _make_sim_config(3.5, device)
 
         # Step 3: Build DistEnviornment
-        env = _make_env(rank, world_size)
+        env = _make_env(rank, world_size, local_rank)
 
         # Step 4: Partition with SimpleSpatialPartitioner + build_halo_maps
         partitioner = SimpleSpatialPartitioner()
@@ -141,8 +159,8 @@ def simulation_factory(request):
         total_recv = int(recv_offsets[-1].item())
         
         # --- Allocate IPC buffers ---
-        x_buffer = FeatureExchanger.allocate_ipc_buffer(n_local + total_recv, F, rank)
-        grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(total_send, F, rank)
+        x_buffer = FeatureExchanger.allocate_ipc_buffer(n_local + total_recv, F, local_rank)
+        grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(total_send, F, local_rank)
 
         # --- Exchange IPC handles via NCCL broadcast ---
         x_handle = exchanger.export_ipc_handle(x_buffer)

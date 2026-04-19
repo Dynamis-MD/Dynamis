@@ -14,6 +14,7 @@ Output: distnnp/tests/fixtures/lj_reference_rank{r}.pt on each rank, containing:
     }
 """
 
+import os
 import torch
 import torch.distributed as dist
 from pathlib import Path
@@ -54,22 +55,24 @@ def _make_sim_config(cutoff: float, device: torch.device) -> SimulationConfig:
     return cfg
 
 
-def _make_env(rank: int, world_size: int) -> DistEnvironment:
+def _make_env(rank: int, world_size: int, local_rank: int) -> DistEnvironment:
+    gpus_per_node = int(os.environ.get("LOCAL_WORLD_SIZE", world_size))
     env = DistEnvironment()
     env.global_rank = rank
     env.world_size = world_size
-    env.gpus_per_node = world_size
-    env.num_nodes = 1
-    env.local_rank = rank
+    env.gpus_per_node = gpus_per_node
+    env.num_nodes = world_size // gpus_per_node
+    env.local_rank = local_rank
     return env
 
 
 def main():
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
     dist.init_process_group("nccl")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(rank)
+    device = torch.device(f"cuda:{local_rank}")
 
     # Build MolecularInfo (32-atom system, fixed seed, same on all ranks)
     molecular_info = _make_global_state(32, 100, device)
@@ -77,7 +80,7 @@ def main():
     # Note: 3.5 is not sure if it's a proper cutoff value here
     sim_config = _make_sim_config(3.5, device)
 
-    env = _make_env(rank, world_size)
+    env = _make_env(rank, world_size, local_rank)
 
     partitioner = SimpleSpatialPartitioner()
     partition_info = partitioner.partition(molecular_info, env)
@@ -102,8 +105,8 @@ def main():
     total_send = int(send_offsets[-1].item())
     total_recv = int(recv_offsets[-1].item())
 
-    x_buffer = FeatureExchanger.allocate_ipc_buffer(n_local + total_recv, F, rank)
-    grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(total_send, F, rank)
+    x_buffer = FeatureExchanger.allocate_ipc_buffer(n_local + total_recv, F, local_rank)
+    grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(total_send, F, local_rank)
 
     x_handle = exchanger.export_ipc_handle(x_buffer)
     grad_handle = exchanger.export_ipc_handle(grad_recv_buffer)
