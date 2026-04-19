@@ -110,7 +110,14 @@ echo "Master  : ${MASTER_ADDR}:${MASTER_PORT}"
 echo "World   : ${SLURM_NNODES} nodes × ${SLURM_NTASKS_PER_NODE} GPUs = $((SLURM_NNODES * SLURM_NTASKS_PER_NODE)) ranks"
 
 # Generate reference fixtures if they don't already exist.
-if ! ls distnnp/tests/fixtures/lj_reference_rank*.pt 1>/dev/null 2>&1; then
+FIXTURE_MISSING=false
+for integrator in euler verlet langevin; do
+    for r in 0 1; do
+        [[ ! -f "distnnp/tests/fixtures/lj_reference_${integrator}_rank${r}.pt" ]] && FIXTURE_MISSING=true
+    done
+done
+
+if $FIXTURE_MISSING; then
     echo "Reference fixtures not found, generating..."
     srun bash -c "
         torchrun \
@@ -123,10 +130,14 @@ if ! ls distnnp/tests/fixtures/lj_reference_rank*.pt 1>/dev/null 2>&1; then
             distnnp/tests/fixtures/generate_reference.py
     " || true
     # Verify files were actually created (torchrun may exit non-zero even on success)
-    if ! ls distnnp/tests/fixtures/lj_reference_rank*.pt 1>/dev/null 2>&1; then
-        echo "ERROR: fixture generation failed — no .pt files found"
-        exit 1
-    fi
+    for integrator in euler verlet langevin; do
+        for r in 0 1; do
+            if [[ ! -f "distnnp/tests/fixtures/lj_reference_${integrator}_rank${r}.pt" ]]; then
+                echo "ERROR: fixture generation failed — missing lj_reference_${integrator}_rank${r}.pt"
+                exit 1
+            fi
+        done
+    done
 fi
 
 # srun runs this block on every node in the allocation in parallel.
