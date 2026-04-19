@@ -1,46 +1,56 @@
-from dataclasses import dataclass
 from distnnp_state import (
-    DistNNPState,
     DistEnvironment,
-    SimulationConfig,
-    PartitionMessagePassingInfo,
+    SFCPartitioner,
+    SimpleSpatialPartitioner,
+    KDTreePartitioner,
 )
-from distnnp_state.masses import TORCH_ATOMIC_MASSES
 import torch
+import torch.distributed as dist
+from typing import Union
 
 
-class SimState:
-    def __init__(self, dist_nnp_state: DistNNPState):
-        self._state = dist_nnp_state
-        pi = dist_nnp_state.local_partition_info
-        self.atomic_numbers = pi.partition_indices.reshape(-1)
-        self.mass = TORCH_ATOMIC_MASSES[self.atomic_numbers].to(
-            device=pi.local_atom_positions.device
-        )
+ABSTRACT_PARTITIONERS = Union[
+    SFCPartitioner, SimpleSpatialPartitioner, KDTreePartitioner
+]
 
-        # Zero-iniitlaize forces for now
-        self.forces = torch.zeros_like(pi.local_atom_positions)
 
-    @property
-    def pos(self) -> torch.Tensor:
-        return self._state.local_partition_info.local_atom_positions
+class TorchDistEnv:
+    """Helper class to initialize distributed environment and set device.
+    This is used by SimState but can also be used by users directly if they want to create their own DistNNPState outside of SimState.
+    """
 
-    @property
-    def vel(self) -> torch.Tensor:
-        return self._state.local_partition_info.local_atom_velocities
+    def __init__(self, is_distributed: bool = True, **kwargs) -> None:
+        if is_distributed:
+            if not dist.is_initialized():
+                dist.init_process_group(backend="cuda:nccl,cpu:gloo", **kwargs)
+            global_rank = dist.get_rank()
+            world_size = dist.get_world_size()
+        else:
+            global_rank = 0
+            world_size = 1
+        num_gpus = torch.cuda.device_count()
+        gpus_per_node = num_gpus if num_gpus > 0 else 1
+        local_rank = global_rank % gpus_per_node
+        num_nodes = max(1, (world_size + gpus_per_node - 1) // gpus_per_node)
+        if num_gpus > 0:
+            torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}" if num_gpus > 0 else "cpu")
 
-    @property
-    def sim_config(self) -> SimulationConfig:
-        return self._state.sim_config
+        self.device = device
+
+        self.local_rank = local_rank
+        self.global_rank = global_rank
+        self.world_size = world_size
+        self.num_nodes = num_nodes
+        self.gpus_per_node = gpus_per_node
+        self.is_distributed = is_distributed
 
     @property
     def dist_env(self) -> DistEnvironment:
-        return self._state.dist_env
-
-    @property
-    def local_partition_info(self) -> PartitionMessagePassingInfo:
-        return self._state.local_partition_info
-
-    # Pass on all other attribute accesses to the underlying DistNNPState
-    def __getattr__(self, name):
-        return getattr(self._state, name)
+        obj = DistEnvironment()
+        obj.global_rank = self.global_rank
+        obj.world_size = self.world_size
+        obj.gpus_per_node = self.gpus_per_node
+        obj.num_nodes = self.num_nodes
+        obj.local_rank = self.local_rank
+        return obj

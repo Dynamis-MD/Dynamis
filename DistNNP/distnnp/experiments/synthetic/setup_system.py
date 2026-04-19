@@ -68,34 +68,6 @@ def create_dist_nnp_state(num_atoms: int) -> SimState:
     # torchrun sets RANK; SLURM sets SLURM_PROCID. If neither is present we
     # are running standalone and treat this as a world_size=1 job.
     is_distributed_launch = "RANK" in os.environ or "SLURM_PROCID" in os.environ
-    if is_distributed_launch and not dist.is_initialized():
-        # backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend="cuda:nccl,cpu:gloo")
-        # dist.init_process_group(backend=backend)
-
-    if dist.is_initialized():
-        global_rank = dist.get_rank()
-        world_size = dist.get_world_size()
-    else:
-        global_rank = 0
-        world_size = 1
-
-    num_gpus = torch.cuda.device_count()
-    gpus_per_node = num_gpus if num_gpus > 0 else 1
-    local_rank = global_rank % gpus_per_node
-    num_nodes = max(1, (world_size + gpus_per_node - 1) // gpus_per_node)
-
-    if num_gpus > 0:
-        torch.cuda.set_device(local_rank)
-
-    device = torch.device(f"cuda:{local_rank}" if num_gpus > 0 else "cpu")
-
-    dist_env = DistEnvironment()
-    dist_env.global_rank = global_rank
-    dist_env.world_size = world_size
-    dist_env.gpus_per_node = gpus_per_node
-    dist_env.num_nodes = num_nodes
-    dist_env.local_rank = local_rank
 
     # (1) Create the same synthetic MolecularInfo on every rank.
     mol_info = generate_synthetic_dataset(num_atoms)
@@ -104,22 +76,15 @@ def create_dist_nnp_state(num_atoms: int) -> SimState:
     sim_config = SimulationConfig()
     sim_config.cutoff = 6.0
     sim_config.ghost_cutoff_buffer = 0.5
-    sim_config.cell = torch.eye(3, device=device) * BOX_SIZE
-    sim_config.pbc = torch.tensor([True, True, True], dtype=torch.bool, device=device)
+    sim_config.cell = torch.eye(3) * BOX_SIZE
+    sim_config.pbc = torch.tensor([True, True, True], dtype=torch.bool)
 
-    partitioner = SFCPartitioner(SFCCurveType.Morton)
-    partition_info = partitioner.partition(mol_info, dist_env)
-    partitioner.build_halo_maps(partition_info, mol_info, dist_env, sim_config)
-
-    # (3) Assemble DistNNPState.
-    nnp_state = DistNNPState()
-    nnp_state.dist_env = dist_env
-    nnp_state.sim_config = sim_config
-    nnp_state.global_molecular_info = mol_info
-    nnp_state.local_partition_info = partition_info
     nnp_state = SimState(
-        nnp_state
-    )  # Wrap in SimState for use with Simulator and potential models.
+        molecular_system=mol_info,
+        partitioner=SFCPartitioner(SFCCurveType.Morton),
+        simulation_config=sim_config,
+        is_disrtibuted=is_distributed_launch,
+    )
 
     return nnp_state
 

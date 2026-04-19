@@ -2,9 +2,13 @@ from distnnp_state import (
     SimpleSpatialPartitioner,
     KDTreePartitioner,
     SFCPartitioner,
+    SFCCurveType,
+    DistEnvironment,
+    MolecularInfo,
+    SimulationConfig,
 )
 from distnnp_model import DistNNPModel
-from distnnp_state import DistNNPState, DistEnvironment, SimState
+from distnnp.simulatorState import SimState
 from distnnp_integrator import Euler, Verlet, Langevin, AVALIABLE_INTEGRATORS
 from typing import Union, Literal
 from dataclasses import dataclass
@@ -89,50 +93,54 @@ class Simulator:
         self,
         model: DistNNPModel,
         integrator: POSSIBLE_INTEGRATOR_TYPES,
+        dist_environment: DistEnvironment,
         config: SimulatorConfig,
     ):
         self.model = model
         check_integrator(integrator)
         self.integrator = integrator
         self.config = config
+        self.dist_environment = dist_environment
 
-        self.initialize_distributed()
-
-    def initialize_distributed(self):
-        if not dist.is_initialized():
-            dist.init_process_group(backend=self.config.backend)
-
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "NO GPUs detected. CUDA is required for distributed simulation."
+    def _get_partitioner(self) -> POSSIBLE_PARTITIONERS_TYPES:
+        partition_algorithm = self.config.partition_algorithm
+        if partition_algorithm not in VALID_PARTITION_ALGORITHMS:
+            raise ValueError(
+                f"Partition algorithm {partition_algorithm} is not valid. Choose from {VALID_PARTITION_ALGORITHMS}."
+            )
+        if partition_algorithm == "simple":
+            return SimpleSpatialPartitioner()
+        elif partition_algorithm == "kdtree":
+            return KDTreePartitioner()
+        elif partition_algorithm == "sfc_morton":
+            return SFCPartitioner(curve_type=SFCCurveType.Morton)
+        elif partition_algorithm == "sfc_hilbert":
+            return SFCPartitioner(curve_type=SFCCurveType.Hilbert)
+        else:
+            raise ValueError(
+                f"Partition algorithm {partition_algorithm} is not recognized."
             )
 
-        num_gpus_per_node = max(
-            torch.cuda.device_count(), int(os.getenv("PROCS_PER_NODE", 0))
+    def _get_dist_environment(self) -> DistEnvironment:
+        return self.dist_environment
+
+    def _get_simulation_config(self) -> SimulationConfig:
+        sim_config = SimulationConfig()
+
+        sim_config.cutoff = self.config.cutoff_angstrom
+        sim_config.ghost_cutoff_buffer = self.config.ghost_buffer_angstrom
+        sim_config.cell = torch.eye(3)
+        sim_config.pbc = torch.tensor([True, True, True], dtype=torch.bool)
+
+        return sim_config
+
+    def initialize_simulator_state(self, molecular_system: MolecularInfo) -> None:
+        self.state = SimState(
+            molecular_system=molecular_system,
+            partitioner=self._get_partitioner(),
+            simulation_config=self._get_simulation_config(),
+            distributed_environment=self._get_dist_environment(),
         )
-
-        local_rank = dist.get_rank() % num_gpus_per_node if num_gpus_per_node > 0 else 0
-        local_device = torch.device(f"cuda:{local_rank}")
-
-        torch.cuda.set_device(local_device)
-
-        global_rank = dist.get_rank()
-        world_size = dist.get_world_size()
-        num_nodes = (world_size + num_gpus_per_node - 1) // num_gpus_per_node
-
-        self.local_device = local_device
-        self.global_rank = global_rank
-        self.world_size = world_size
-
-        self.dist_env = DistEnvironment()
-        self.dist_env.global_rank = global_rank
-        self.dist_env.world_size = world_size
-        self.dist_env.gpus_per_node = num_gpus_per_node
-        self.dist_env.local_rank = local_rank
-        self.dist_env.num_nodes = num_nodes
-
-    def setup(self, file_path: str) -> None:
-        pass
 
     def _set_state(self, state: SimState):
         self.state = state
