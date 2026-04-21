@@ -4,7 +4,6 @@ import torch
 import pytest
 import struct
 import uuid
-import filecmp
 
 from distnnp_state import (MolecularInfo, TrajectoryWriter)
 
@@ -49,12 +48,11 @@ def test_distnnp_io():
     """Distnnp test"""
 
     # test setup
-    values = torch.arange(0, 9, 1)
+    values = torch.arange(0, 9, 1).to(torch.float32)
     positions = torch.concat((values, values), dim=0)
-    positions = positions.reshape([6, 3])
+    positions = positions.reshape([6, 3]).to(torch.float32)
 
-    # the 1 makes sure it only loads in the file and doesn't do front_matter stuff
-    writer = TrajectoryWriter(1, b"1234", "author", "./")
+    writer = TrajectoryWriter(0, b"1234", "author", "./")
 
     env = writer.initialize("tests/xyz.xyz", 1.0, 1)
 
@@ -62,12 +60,12 @@ def test_distnnp_io():
     writer.write_frame(0, env.atom_vertex_numbers, env.atom_positions, env.atom_velocities)
 
     writer2 = TrajectoryWriter(1, b"1234", "author", "./")
-    env2 = writer.initialize("./trajectory.distnnp", 1.0, 1)
+    env2 = writer2.initialize("./trajectory.distnnp", 1.0, 1)
 
     assert env2.num_atoms == 6
     assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.uint8), env2.atom_types)
     assert torch.equal(positions, env2.atom_positions)
-    assert torch.equal(torch.zeros([6, 3]), env2.atom_velocities)
+    assert torch.equal(torch.zeros([6, 3], dtype=torch.float32), env2.atom_velocities)
     assert torch.equal(torch.arange(0, 6, 1).to(torch.uint64), env2.atom_vertex_numbers)
 
 
@@ -186,4 +184,24 @@ def test_write_xyz():
 
     writer.write_to_xyz(env, "output.xyz");
 
-    assert filecmp("tests/xyz.xyz", "output.xyz", shallow=False)
+    with open("tests/extended_xyz.xyz", 'r') as orig:
+        with open("output.xyz", 'r') as fin:
+            orig_lines = orig.readlines()
+            fin_lines = fin.readlines()
+
+            # num atoms
+            orig_atoms = int(orig_lines[0].strip())
+            fin_atoms = int(fin_lines[0].strip())
+            assert(orig_atoms == fin_atoms)
+
+            orig_data = [line.split() for line in orig_lines[2:2+orig_atoms]]
+            fin_data = [line.split() for line in fin_lines[2:2+fin_atoms]]
+
+            orig_syms = [row[0] for row in orig_data]
+            fin_syms = [row[0] for row in fin_data]
+            assert(orig_syms == fin_syms)
+
+            orig_attribs = torch.tensor([[float(y) for y in x] for x in [row[1:7] for row in orig_data]], dtype=torch.float32)
+            fin_attribs= torch.tensor([[float(y) for y in x] for x in [row[1:7] for row in fin_data]], dtype=torch.float32)
+            assert torch.equal(orig_attribs, fin_attribs)
+
