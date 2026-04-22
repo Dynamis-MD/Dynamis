@@ -45,7 +45,7 @@ def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> Molec
     torch.manual_seed(seed)
     state = MolecularInfo()
     state.num_atoms = num_atoms
-    state.atom_indices = torch.arange(num_atoms, dtype=torch.long, device=device)
+    state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long, device=device)
     state.atom_positions = torch.rand(num_atoms, 3, device=device) * 10.0
     state.atom_velocities = torch.randn(num_atoms, 3, device=device) * 0.1
     return state
