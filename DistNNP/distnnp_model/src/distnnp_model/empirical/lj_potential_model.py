@@ -80,7 +80,7 @@ class LennardJonesPotentialModel(DistNNPModel):
     def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
         prev_local_positions = distributed_state.local_molecular_info.atom_positions
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
-        local_atom_types = distributed_state.local_partition_info.partition_indices
+        local_atom_types = distributed_state.local_molecular_info.atom_types
 
         positions: torch.Tensor = FeaturePushToExchange.apply(
             local_positions, distributed_state, self.position_exchanger
