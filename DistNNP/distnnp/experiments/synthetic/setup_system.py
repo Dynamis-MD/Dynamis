@@ -14,6 +14,9 @@ from distnnp_state import (
 from distnnp_state.masses import TORCH_ATOMIC_MASSES
 from distnnp import SimState
 
+import json
+
+
 # Side length (Å) of the synthetic simulation box.
 # Positions in generate_synthetic_dataset are drawn from [0, BOX_SIZE).
 BOX_SIZE = 20.0
@@ -54,7 +57,7 @@ def generate_synthetic_dataset(num_atoms: int, device) -> MolecularInfo:
     return mol_info
 
 
-def create_dist_nnp_state(num_atoms: int) -> SimState:
+def create_dist_sim_state(num_atoms: int) -> SimState:
     """
     This helper function creates a starting DistNNPState to use with the Simulator.
     Given the number of atoms, it:
@@ -67,7 +70,7 @@ def create_dist_nnp_state(num_atoms: int) -> SimState:
     Args:
         num_atoms (int): number of atoms in the system
     Returns:
-        (DistNNPState)
+        (SimState)
 
     """
 
@@ -97,3 +100,84 @@ def create_dist_nnp_state(num_atoms: int) -> SimState:
     )
 
     return nnp_state
+
+
+class Timer:
+    # Class-level dictionary to aggregate timings globally
+    timing_keys = {}
+
+    def __init__(self, key):
+        self.key = key
+        self.start_event = None
+        self.end_event = None
+
+        # Initialize the global registry for this key if it's the first time
+        if self.key not in Timer.timing_keys:
+            Timer.timing_keys[self.key] = {
+                "total_time_ms": 0.0,
+                "count": 0,
+                "elapsed_times_ms": [],
+            }
+
+    def start(self):
+        """Manually starts the CUDA timer."""
+        self.start_event = torch.cuda.Event(enable_timing=True)
+        self.end_event = torch.cuda.Event(enable_timing=True)
+        self.start_event.record()
+
+    def stop(self):
+        """Manually stops the CUDA timer, syncs, and records the time."""
+        if self.start_event is None:
+            raise RuntimeError(
+                "Timer was stopped before being started. Call start() first."
+            )
+
+        self.end_event.record()
+        torch.cuda.synchronize()
+
+        # Calculate time in milliseconds
+        elapsed = self.start_event.elapsed_time(self.end_event)
+
+        # Update the global registry
+        Timer.timing_keys[self.key]["elapsed_times_ms"].append(elapsed)
+        Timer.timing_keys[self.key]["total_time_ms"] += elapsed
+        Timer.timing_keys[self.key]["count"] += 1
+
+        # Clear events to prevent accidental reuse without starting again
+        self.start_event = None
+        self.end_event = None
+
+        return elapsed
+
+    def __enter__(self):
+        """Hook for the 'with' statement. Automatically calls start()."""
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        """Hook for the 'with' statement. Automatically calls stop()."""
+        self.stop()
+
+    # --- Local Object Helpers ---
+
+    @property
+    def local_total_time(self):
+        """Allows you to check the total time for this specific key from the local object."""
+        return Timer.timing_keys[self.key]["total_time_ms"]
+
+    @property
+    def local_count(self):
+        """Allows you to check the run count for this specific key from the local object."""
+        return Timer.timing_keys[self.key]["count"]
+
+    # --- Global Class Methods ---
+
+    @classmethod
+    def json(cls):
+        """Returns the dictionary as a JSON string."""
+        return json.dumps(cls.timing_keys, indent=4)
+
+    @classmethod
+    def clear(cls):
+        """Resets all recorded timings globally."""
+        cls.timing_keys.clear()

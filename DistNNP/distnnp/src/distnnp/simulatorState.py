@@ -109,7 +109,7 @@ class SimState:
 
     @property
     def vel(self) -> torch.Tensor:
-        return self._state.local_partition_info.local_atom_velocities
+        return self._state.local_molecular_info.atom_velocities
 
     @property
     def sim_config(self) -> SimulationConfig:
@@ -138,8 +138,12 @@ class SimState:
         local_indices = (
             partition_info.partition_indices
         )  # [num_local] — global atom IDs
-        local_positions = partition_info.local_atom_positions  # [num_local, 3]
-        local_velocities = partition_info.local_atom_velocities  # [num_local, 3]
+        local_positions = (
+            self._state.local_molecular_info.atom_positions
+        )  # [num_local, 3]
+        local_velocities = (
+            self._state.local_molecular_info.atom_velocities
+        )  # [num_local, 3]
 
         global_mol_info = self._state.global_molecular_info
 

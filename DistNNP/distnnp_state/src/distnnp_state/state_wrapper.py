@@ -60,3 +60,7 @@ class TorchDistEnv:
             dist.barrier()
         else:
             pass
+
+    def __del__(self):
+        if self.is_distributed and dist.is_initialized():
+            dist.destroy_process_group()

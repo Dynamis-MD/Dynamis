@@ -22,8 +22,21 @@ def log_state(state: SimState, step_num: int):
 def create_and_run_experiment(num_atoms: int):
 
     torch_distributed_env = TorchDistEnv()
-
+    local_rank = torch_distributed_env.local_rank
+    global_rank = torch_distributed_env.global_rank
+    world_size = torch_distributed_env.world_size
     device = torch_distributed_env.device
+
+    for i in range(world_size):
+        if i == global_rank:
+            print(
+                f"Hello from global rank {global_rank}, local rank {local_rank}, world size {world_size}, device {device}!"
+            )
+        torch_distributed_env.barrier()
+
+    def local_print(*args, **kwargs):
+        if global_rank == 0:
+            print(*args, **kwargs)
 
     sim_config = SimulatorConfig(
         timestep_fs=0.5,
@@ -43,6 +56,10 @@ def create_and_run_experiment(num_atoms: int):
     )
 
     global_molecular_system = generate_synthetic_dataset(num_atoms=1000, device=device)
+
+    local_print(
+        f"Global molecular system created with {global_molecular_system.num_atoms} atoms."
+    )
     epsilons = torch.rand(100, requires_grad=True).to(device=device)
     sigmas = torch.rand(100, requires_grad=True).to(device=device)
     potential = LennardJonesPotentialModel(epsilon=epsilons, sigma=sigmas)
@@ -54,18 +71,21 @@ def create_and_run_experiment(num_atoms: int):
         config=sim_config,
     )
 
-    simulator.initialize_simulator_state(global_molecular_system)
+    simulator.initialize_simulator_state(global_molecular_system, device=device)
+    local_print(
+        f"Simulator state initialized on rank {global_rank} with {simulator.state._local_molecular_info.num_atoms} local atoms."
+    )
 
-    for step_num in range(sim_config.total_steps):
-        step_size = sim_config.timestep_fs
-        simulator.step(step_size)
+    # for step_num in range(sim_config.total_steps):
+    #     step_size = sim_config.timestep_fs
+    #     simulator.step(step_size)
 
-        if step_num % sim_config.rebalance_interval == 0:
-            simulator.sync_and_repartition()
+    #     if step_num % sim_config.rebalance_interval == 0:
+    #         simulator.sync_and_repartition()
 
-        if step_num % sim_config.log_interval == 0:
-            simulator_state = simulator.state
-            log_state(simulator_state, step_num)
+    #     if step_num % sim_config.log_interval == 0:
+    #         simulator_state = simulator.state
+    #         log_state(simulator_state, step_num)
 
 
 def main():

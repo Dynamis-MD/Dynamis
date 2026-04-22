@@ -10,7 +10,7 @@ from distnnp_state import (
 from distnnp_model import DistNNPModel
 from distnnp.simulatorState import SimState
 from distnnp_integrator import Euler, Verlet, Langevin, AVALIABLE_INTEGRATORS
-from typing import Union, Literal
+from typing import Union, Literal, Optional
 from dataclasses import dataclass
 import torch
 from torch import distributed as dist
@@ -27,7 +27,7 @@ VALID_PARTITION_ALGORITHMS = ["simple", "kdtree", "sfc_morton", "sfc_hilbert"]
 
 # Typing check if integrator is one of the available integrators
 def check_integrator(integrator):
-    if integrator not in AVALIABLE_INTEGRATORS:
+    if type(integrator) not in [Euler, Verlet, Langevin]:
         raise ValueError(
             f"Integrator {integrator} is not available. Choose from {AVALIABLE_INTEGRATORS}."
         )
@@ -134,12 +134,15 @@ class Simulator:
 
         return sim_config
 
-    def initialize_simulator_state(self, molecular_system: MolecularInfo) -> None:
+    def initialize_simulator_state(
+        self, molecular_system: MolecularInfo, device: Optional[torch.device] = None
+    ) -> None:
         self.state = SimState(
             molecular_system=molecular_system,
             partitioner=self._get_partitioner(),
             simulation_config=self._get_simulation_config(),
             distributed_environment=self._get_dist_environment(),
+            device=device,
         )
 
     def sync_and_repartition(self) -> None:
