@@ -64,10 +64,16 @@ fi
 # Limit parallel compile jobs to avoid OOM during C++ builds in the job.
 export CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL:-2}
 
-# Install all requirements (pytest + editable packages) under this interpreter.
-# --quiet suppresses noise; --user avoids needing root.
-echo "Installing requirements..."
-"${PYTHON}" -m pip install -r requirements-dev.txt --quiet --user
+# Verify that requirements are pre-installed.
+echo "Verifying environment..."
+PACKAGES=("torch" "pytest" "distnnp_state" "distnnp_model" "distnnp_integrator" "distnnp")
+for pkg in "${PACKAGES[@]}"; do
+    if ! "${PYTHON}" -c "import ${pkg}" &>/dev/null; then
+        echo "ERROR: Package '${pkg}' not found. Please run 'pip install -r requirements-dev.txt' manually."
+        exit 1
+    fi
+done
+echo "Environment OK."
 
 # ---------------------------------------------------------------------------
 # CUDA_HOME — required for C++ extensions. Try common cluster paths.
