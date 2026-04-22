@@ -28,8 +28,6 @@ PartitionMessagePassingInfo SimpleSpatialPartitioner::partition(
     long end = (R == W - 1) ? N : start + atoms_per_rank;
 
     info.partition_indices     = state.atom_vertex_numbers.slice(0, start, end).contiguous();
-    info.local_atom_positions  = state.atom_positions.slice(0, start, end).contiguous();
-    info.local_atom_velocities = state.atom_velocities.slice(0, start, end).contiguous();
 
     // Send/recv matrix: diagonal only (each rank keeps its own atoms, no exchange)
     info.global_send_recv_matrix = torch::zeros({W, W}, long_opts);

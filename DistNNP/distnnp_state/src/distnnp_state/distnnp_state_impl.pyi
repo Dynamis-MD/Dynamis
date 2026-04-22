@@ -39,6 +39,7 @@ class DistEnvironment:
 class DistNNPState:
     dist_env: DistEnvironment
     global_molecular_info: MolecularInfo
+    local_molecular_info: MolecularInfo
     local_partition_info: PartitionMessagePassingInfo
     sim_config: SimulationConfig
     def __init__(self) -> None:
@@ -79,8 +80,6 @@ class PartitionMessagePassingInfo:
     edge_index_halo: torch.Tensor
     global_send_recv_matrix: torch.Tensor
     interior_mask: torch.Tensor
-    local_atom_positions: torch.Tensor
-    local_atom_velocities: torch.Tensor
     partition_id: torch.Tensor
     partition_indices: torch.Tensor
     recv_ghost_indices: torch.Tensor
