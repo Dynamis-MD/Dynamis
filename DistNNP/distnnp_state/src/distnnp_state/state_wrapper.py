@@ -54,3 +54,9 @@ class TorchDistEnv:
         obj.num_nodes = self.num_nodes
         obj.local_rank = self.local_rank
         return obj
+
+    def barrier(self):
+        if self.is_distributed:
+            dist.barrier()
+        else:
+            pass

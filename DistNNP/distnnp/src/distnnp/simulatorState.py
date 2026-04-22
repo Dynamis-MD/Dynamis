@@ -26,23 +26,31 @@ class SimState:
         partitioner: ABSTRACT_PARTITIONERS,
         simulation_config: SimulationConfig,
         distributed_environment: DistEnvironment,
+        device: Optional[torch.device] = None,
     ):
+
+        self.device = device
 
         # Initialize distributed environment and set device
         self.dist_env_obj = distributed_environment
         self.initialize_distributed_and_device()
 
-        # Place the simconfig and other tensors on the correct device
         simulation_config.cell = simulation_config.cell.to(self.device)
         simulation_config.pbc = simulation_config.pbc.to(self.device)
 
         self.partitioner = partitioner
+
         partition_info = partitioner.partition(molecular_system, self.dist_env_obj)
         partitioner.build_halo_maps(
             partition_info, molecular_system, self.dist_env_obj, simulation_config
         )
+        self.parition_info = partition_info
 
-        # First set up the distributed environment and partition the system
+        self.global_molecular_info = molecular_system
+        self._local_molecular_info = self.setup_mass_and_forces(
+            partition_info=partition_info,
+            molecular_system=molecular_system,
+        )
 
         self._state = DistNNPState()
         self._state.dist_env = self.dist_env_obj
@@ -50,17 +58,27 @@ class SimState:
         self._state.global_molecular_info = molecular_system
         self._state.local_partition_info = partition_info
 
-    def setup_mass_and_forces(self):
-        self.atomic_numbers = self.local_partition_info.partition_indices.reshape(-1)
-        self.mass = TORCH_ATOMIC_MASSES[self.atomic_numbers].to(device=self.device)
-        self.forces = torch.zeros_like(self.local_partition_info.local_atom_positions)
+    def setup_mass_and_forces(self, partition_info, molecular_system):
+        local_molecular_info = MolecularInfo()
+        local_molecular_info.atom_positions = molecular_system.atom_positions[
+            partition_info.partition_indices
+        ]
+        local_molecular_info.atom_velocities = molecular_system.atom_velocities[
+            partition_info.partition_indices
+        ]
+        local_molecular_info.atom_masses = molecular_system.atom_masses[
+            partition_info.partition_indices
+        ]
+        local_molecular_info.atom_types = molecular_system.atom_types[
+            partition_info.partition_indices
+        ]
+        num_local_atoms = local_molecular_info.atom_positions.shape[0]
+        local_molecular_info.atom_forces = torch.zeros(
+            num_local_atoms, 3, device=self.device
+        )
+        local_molecular_info.num_atoms = num_local_atoms
 
-        self.dist_env_obj = DistEnvironment()
-        self.dist_env_obj.global_rank = self.global_rank
-        self.dist_env_obj.world_size = self.world_size
-        self.dist_env_obj.gpus_per_node = self.gpus_per_node
-        self.dist_env_obj.num_nodes = self.num_nodes
-        self.dist_env_obj.local_rank = self.local_rank
+        return local_molecular_info
 
     def initialize_distributed_and_device(self):
         local_rank = self.dist_env_obj.local_rank
@@ -70,7 +88,11 @@ class SimState:
         gpus_per_node = self.dist_env_obj.gpus_per_node
         num_gpus = torch.cuda.device_count()
 
-        device = torch.device(f"cuda:{local_rank}" if num_gpus > 0 else "cpu")
+        device = (
+            torch.device(f"cuda:{local_rank}" if num_gpus > 0 else "cpu")
+            if self.device is None
+            else self.device
+        )
 
         self.device = device
 
@@ -79,10 +101,11 @@ class SimState:
         self.world_size = world_size
         self.num_nodes = num_nodes
         self.gpus_per_node = gpus_per_node
+        self.is_distributed = world_size > 1
 
     @property
     def pos(self) -> torch.Tensor:
-        return self._state.local_partition_info.local_atom_positions
+        return self._local_molecular_info.atom_positions
 
     @property
     def vel(self) -> torch.Tensor:
@@ -97,12 +120,12 @@ class SimState:
         return self._state.dist_env
 
     @property
+    def local_state(self) -> MolecularInfo:
+        return self._local_molecular_info
+
+    @property
     def local_partition_info(self) -> PartitionMessagePassingInfo:
         return self._state.local_partition_info
-
-    # Pass on all other attribute accesses to the underlying DistNNPState
-    def __getattr__(self, name):
-        return getattr(self._state, name)
 
     def sync_and_repartition(
         self,
@@ -159,4 +182,6 @@ class SimState:
         self._state.local_partition_info = new_partition_info
         self._state.global_molecular_info = global_mol_info
 
-        self.setup_mass_and_forces()
+        self.setup_mass_and_forces(
+            partition_info=new_partition_info, molecular_system=global_mol_info
+        )

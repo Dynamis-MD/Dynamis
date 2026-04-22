@@ -7,7 +7,7 @@ from distnnp_integrator._data_check import (
     check_shapes_match,
 )
 from distnnp_integrator.integrator import DistNNPIntegrator
-from distnnp_state import SimState
+from distnnp_state import MolecularInfo
 
 
 class Verlet(DistNNPIntegrator):
@@ -65,7 +65,7 @@ class Verlet(DistNNPIntegrator):
 
         self.cpp_integrator.halfstep2(vel, frc, mass, dt)
 
-    def step(self, state: SimState, model, dt=None):
+    def step(self, state: MolecularInfo, model, dt=None):
         """
         Update positions and velocities based on the Velocity Verlet integration method.
 
@@ -80,13 +80,21 @@ class Verlet(DistNNPIntegrator):
             step_size = self.dt
 
         energy, new_forces = model(state)
-        state.forces = new_forces
+        state.atom_forces = new_forces
         # 1. Update v to half-step, and pos to full-step
-        self.halfstep1_(state.pos, state.vel, state.forces, state.mass, step_size)
+        self.halfstep1_(
+            state.atom_positions,
+            state.atom_velocities,
+            state.atom_forces,
+            state.atom_masses,
+            step_size,
+        )
 
         # 2. Recompute forces at new positions
         energy, new_forces = model(state)
-        state.forces = new_forces
+        state.atom_forces = new_forces
 
         # 3. Complete the velocity full-step update
-        self.halfstep2_(state.vel, state.forces, state.mass, step_size)
+        self.halfstep2_(
+            state.atom_velocities, state.atom_forces, state.atom_masses, step_size
+        )

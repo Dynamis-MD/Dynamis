@@ -142,8 +142,12 @@ class Simulator:
             distributed_environment=self._get_dist_environment(),
         )
 
+    def sync_and_repartition(self) -> None:
+        self.state.sync_and_repartition()
+        # TODO: ADD appropriate barriers/synchronization if needed here
+
     def _set_state(self, state: SimState):
         self.state = state
 
     def step(self, step_size: float):
-        self.integrator.step(self.state, self.model, step_size)
+        self.integrator.step(self.state.local_state, self.model, step_size)

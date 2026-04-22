@@ -2,7 +2,7 @@ import torch
 from distnnp_integrator.distnnp_integrator_impl import EulerIntegrator
 from distnnp_integrator._data_check import check_devices, check_shapes_match
 from distnnp_integrator.integrator import DistNNPIntegrator
-from distnnp_state import SimState
+from distnnp_state import MolecularInfo
 
 
 class Euler(DistNNPIntegrator):
@@ -35,7 +35,7 @@ class Euler(DistNNPIntegrator):
 
         EulerIntegrator().step(pos, vel, frc, mass, dt)
 
-    def step(self, state: SimState, model, dt=None):
+    def step(self, state: MolecularInfo, model, dt=None):
         """
         Update positions and velocities based on the Euler integration method.
 
@@ -51,4 +51,10 @@ class Euler(DistNNPIntegrator):
             step_size = self.dt
 
         # Update positions and velocities using the Euler method
-        self.step_(state.pos, state.vel, forces, state.mass, step_size)
+        self.step_(
+            state.atom_positions,
+            state.atom_velocities,
+            forces,
+            state.atom_masses,
+            step_size,
+        )

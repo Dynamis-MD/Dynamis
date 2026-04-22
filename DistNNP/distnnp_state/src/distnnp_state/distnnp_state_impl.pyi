@@ -1,7 +1,8 @@
 from __future__ import annotations
+import collections.abc
 import torch
 import typing
-__all__: list[str] = ['DistEnvironment', 'DistNNPState', 'KDTreePartitioner', 'MolecularInfo', 'PartitionMessagePassingInfo', 'SFCCurveType', 'SFCPartitioner', 'SimpleSpatialPartitioner', 'SimulationConfig', 'radius_graph_pbc']
+__all__: list[str] = ['DistEnvironment', 'DistNNPState', 'KDTreePartitioner', 'MolecularInfo', 'PartitionMessagePassingInfo', 'SFCCurveType', 'SFCPartitioner', 'SimpleSpatialPartitioner', 'SimulationConfig', 'TrajectoryWriter', 'radius_graph_pbc']
 class DistEnvironment:
     def __init__(self) -> None:
         ...
@@ -58,9 +59,12 @@ class KDTreePartitioner:
         Partition: auto-compute edge weights via radius_graph_pbc (CUDA)
         """
 class MolecularInfo:
-    atom_vertex_numbers: torch.Tensor
+    atom_forces: torch.Tensor
+    atom_masses: torch.Tensor
     atom_positions: torch.Tensor
+    atom_types: torch.Tensor
     atom_velocities: torch.Tensor
+    atom_vertex_numbers: torch.Tensor
     edge_counts: torch.Tensor
     def __init__(self) -> None:
         ...
@@ -161,6 +165,21 @@ class SimulationConfig:
     @ghost_cutoff_buffer.setter
     def ghost_cutoff_buffer(self, arg0: typing.SupportsFloat) -> None:
         ...
+class TrajectoryWriter:
+    def __init__(self, global_rank: typing.SupportsInt, run_id: bytes, author: str, output_dir: str = './trajectory') -> None:
+        ...
+    def initialize(self, xyz_file_name: str, time_per_step: typing.SupportsFloat, steps_per_write: typing.SupportsInt) -> MolecularInfo:
+        """
+        Writes front matter and initializes environment from an xyz file
+        """
+    def update_atom_counts(self, counts: collections.abc.Sequence[typing.SupportsInt]) -> None:
+        """
+        Update the rank offsets. Should be called after every repartition
+        """
+    def write_frame(self, frame_idx: typing.SupportsInt, indices: torch.Tensor, positions: torch.Tensor, velocities: torch.Tensor) -> None:
+        """
+        Writes the frame to the binary file
+        """
 def radius_graph_pbc(pos: torch.Tensor, cell: torch.Tensor, pbc: torch.Tensor, radius: typing.SupportsFloat, max_num_neighbors: typing.SupportsInt, enforce_max_strictly: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     CUDA cell-list radius graph with selective PBC tiling
