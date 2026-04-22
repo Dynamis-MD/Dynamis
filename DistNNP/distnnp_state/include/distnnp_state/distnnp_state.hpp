@@ -70,7 +70,7 @@ namespace distnnp_state
         MolecularInfo local_molecular_info; // Contains local atom information for this partition
 
         // Partitioned data information
-        PartitionMessagePassingInfo local_partition_info; // Contains local atom information for this partition
+        PartitionMessagePassingInfo local_partition_info; // Contains local atom communication information for this partition
 
     };
 

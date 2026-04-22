@@ -12,9 +12,9 @@ def log_state(state: SimState, step_num: int):
     rank = state.dist_env.global_rank
 
     local_torch_state = {}
-    local_torch_state["pos"] = state.local_partition_info.local_atom_positions
-    local_torch_state["vel"] = state.local_partition_info.local_atom_velocities
-    local_torch_state["atom"] = state.local_partition_info.partition_indices
+    local_torch_state["pos"] = state._local_molecular_info.atom_positions
+    local_torch_state["vel"] = state._local_molecular_info.atom_velocities
+    local_torch_state["atom"] = state._local_molecular_info.atom_types
 
     torch.save(local_torch_state, f"rank_{rank}_step_{step_num}.pt")
 
@@ -61,11 +61,11 @@ def create_and_run_experiment(num_atoms: int):
         simulator.step(step_size)
 
         if step_num % sim_config.rebalance_interval == 0:
-            dist_nnp_state = simulator.state
             simulator.sync_and_repartition()
 
         if step_num % sim_config.log_interval == 0:
-            log_state(dist_nnp_state, step_num)
+            simulator_state = simulator.state
+            log_state(simulator_state, step_num)
 
 
 def main():

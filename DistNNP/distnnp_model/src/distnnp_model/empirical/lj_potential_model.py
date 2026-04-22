@@ -1,7 +1,7 @@
 from distnnp_model.potential import DistNNPModel
 import torch
 import torch.nn.functional as F
-from distnnp_state import radius_graph_pbc_cuda, SimState
+from distnnp_state import radius_graph_pbc_cuda, DistNNPState
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 from distnnp_model.comm.exchanger import Exchanger, GPUDirectExchanger
 from typing import Optional
@@ -77,10 +77,8 @@ class LennardJonesPotentialModel(DistNNPModel):
             GPUDirectExchanger() if exchanger is None else exchanger
         )
 
-    def __call__(self, distributed_state: SimState, *args, **kwargs):
-        prev_local_positions = (
-            distributed_state.local_partition_info.local_atom_positions
-        )
+    def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
+        prev_local_positions = distributed_state.local_molecular_info.atom_positions
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
         local_atom_types = distributed_state.local_partition_info.partition_indices
 

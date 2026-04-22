@@ -52,6 +52,7 @@ PYBIND11_MODULE(distnnp_state_impl, m)
         .def_readwrite("dist_env", &distnnp_state::DistNNPState::dist_env)
         .def_readwrite("sim_config", &distnnp_state::DistNNPState::sim_config)
         .def_readwrite("global_molecular_info", &distnnp_state::DistNNPState::global_molecular_info)
+        .def_readwrite("local_molecular_info", &distnnp_state::DistNNPState::local_molecular_info)
         .def_readwrite("local_partition_info", &distnnp_state::DistNNPState::local_partition_info);
 
     py::class_<distnnp_state::KDTreePartitioner>(m, "KDTreePartitioner")
