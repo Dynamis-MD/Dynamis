@@ -160,6 +160,12 @@ class Timer:
 
     # --- Local Object Helpers ---
 
+    def __getitem__(self, key):
+        """Allows you to access the list of elapsed times for this specific key from the local object."""
+        if key != Timer.timing_keys:
+            raise KeyError(f"Key '{key}' not found in Timer registry.")
+        return Timer.timing_keys[self.key]["elapsed_times_ms"]
+
     @property
     def local_total_time(self):
         """Allows you to check the total time for this specific key from the local object."""

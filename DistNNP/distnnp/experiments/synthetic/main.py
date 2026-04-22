@@ -1,4 +1,4 @@
-from setup_system import generate_synthetic_dataset
+from setup_system import generate_synthetic_dataset, Timer
 from distnnp_model.empirical import LennardJonesPotentialModel
 from distnnp.simulator import Simulator, SimulatorConfig
 from distnnp_integrator import Verlet
@@ -55,26 +55,52 @@ def create_and_run_experiment(num_atoms: int):
         backend="nccl",
     )
 
-    global_molecular_system = generate_synthetic_dataset(num_atoms=1000, device=device)
+    system_sizes = [1000, 5000, 10000, 50000, 100000]
+    for system_size in system_sizes:
 
-    local_print(
-        f"Global molecular system created with {global_molecular_system.num_atoms} atoms."
-    )
-    epsilons = torch.rand(100, requires_grad=True).to(device=device)
-    sigmas = torch.rand(100, requires_grad=True).to(device=device)
-    potential = LennardJonesPotentialModel(epsilon=epsilons, sigma=sigmas)
-    integrator = Verlet(sim_config.timestep_fs)
-    simulator = Simulator(
-        model=potential,
-        integrator=integrator,
-        dist_environment=torch_distributed_env.dist_env,
-        config=sim_config,
-    )
+        global_molecular_system = generate_synthetic_dataset(
+            num_atoms=system_size, device=device
+        )
 
-    simulator.initialize_simulator_state(global_molecular_system, device=device)
-    local_print(
-        f"Simulator state initialized on rank {global_rank} with {simulator.state._local_molecular_info.num_atoms} local atoms."
-    )
+        local_print(
+            f"Global molecular system created with {global_molecular_system.num_atoms} atoms."
+        )
+        epsilons = torch.rand(100, requires_grad=True).to(device=device)
+        sigmas = torch.rand(100, requires_grad=True).to(device=device)
+        potential = LennardJonesPotentialModel(epsilon=epsilons, sigma=sigmas)
+        integrator = Verlet(sim_config.timestep_fs)
+        simulator = Simulator(
+            model=potential,
+            integrator=integrator,
+            dist_environment=torch_distributed_env.dist_env,
+            config=sim_config,
+        )
+
+        for num_iterations in range(10):
+            local_print(
+                f"Rank {global_rank} starting initialization iteration {num_iterations}..."
+            )
+            with Timer(f"Initialization iteration"):
+                simulator.initialize_simulator_state(
+                    global_molecular_system, device=device
+                )
+        local_print(
+            f"Simulator state initialized on rank {global_rank} with {simulator.state._local_molecular_info.num_atoms} local atoms."
+        )
+
+        iteration_times_ms = Timer.timing_keys["Initialization iteration"][
+            "elapsed_times_ms"
+        ]
+        local_print(
+            f"Initialization iteration times (ms) on rank {global_rank}: {iteration_times_ms}"
+        )
+
+    timing_data_json = Timer.json()
+    local_print(f"Aggregated timing data across all iterations: {timing_data_json}")
+
+    if global_rank == 0:
+        with open("timing_data.json", "w") as f:
+            f.write(timing_data_json)
 
     # for step_num in range(sim_config.total_steps):
     #     step_size = sim_config.timestep_fs
