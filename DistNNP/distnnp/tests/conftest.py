@@ -207,9 +207,9 @@ def simulation_factory(request):
         exchanger.setup_events(all_event_handles)
 
         # Step 8: Build SimState
-        # 1.0 represents an arbitrary atomic mass in amu, not sure if it should be changed
+        # Broadcast mass to (n_local, 3) to support vectorized integration
         forces = torch.zeros(n_local, F, dtype=torch.float32, device=device)
-        mass = torch.full((n_local,), 1.0, dtype=torch.float32, device=device)
+        mass = torch.full((n_local, 3), 1.0, dtype=torch.float32, device=device)
         sim_state = SimState(distnnp_state, sim_config, forces, mass)
 
         # Step 9: Return Simulation

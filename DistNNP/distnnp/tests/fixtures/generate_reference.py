@@ -103,7 +103,9 @@ def generate_reference(integrator_name: str, rank: int, local_rank: int, world_s
     sigma = torch.tensor([1.0], dtype=torch.float32, device=device)
     lj_model = LennardJonesPotentialModel(epsilon, sigma)
 
-    exchanger = lj_model._feature_exchanger
+    # LennardJonesPotentialModel stores the exchangers as position_exchanger and atom_type_exchanger (GPUDirectExchanger)
+    # We use the position_exchanger's underlying FeatureExchanger for the manual setup in this script.
+    exchanger = lj_model.position_exchanger.exchanger
     F = 3
     send_offsets = partition_info.send_offsets
     send_local_indices = partition_info.send_local_indices
@@ -153,8 +155,8 @@ def generate_reference(integrator_name: str, rank: int, local_rank: int, world_s
     exchanger.setup_events(all_event_handles)
 
     forces = torch.zeros(n_local, F, dtype=torch.float32, device=device)
-    # 1.0 represents an arbitrary atomic mass in amu, not sure if it should be changed
-    mass = torch.full((n_local,), 1.0, dtype=torch.float32, device=device)
+    # Broadcast mass to (n_local, 3) to support vectorized integration
+    mass = torch.full((n_local, 3), 1.0, dtype=torch.float32, device=device)
     sim_state = SimState(distnnp_state, sim_config, forces, mass)
 
     # The constants are fairly arbitrary, not sure if they should be changed
