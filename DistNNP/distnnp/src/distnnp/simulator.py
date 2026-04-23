@@ -40,6 +40,9 @@ class SimulatorConfig:
     total_steps: int = 1000  # Total number of MD steps to run
 
     # Spatial decomposition
+    side_length_angstrom: float = (
+        10.0  # Initial side length of spatial partitioning cells (Å)
+    )
     cutoff_angstrom: float = 6.0  # NNP neighbour cutoff radius (Å)
     ghost_buffer_angstrom: float = 0.5  # Extra radius for ghost atom selection (Å)
     # Valid values: "sfc_morton" | "sfc_hilbert" | "kdtree" | "simple"
@@ -129,7 +132,7 @@ class Simulator:
 
         sim_config.cutoff = self.config.cutoff_angstrom
         sim_config.ghost_cutoff_buffer = self.config.ghost_buffer_angstrom
-        sim_config.cell = torch.eye(3)
+        sim_config.cell = torch.eye(3) * self.config.side_length_angstrom
         sim_config.pbc = torch.tensor([True, True, True], dtype=torch.bool)
 
         return sim_config
