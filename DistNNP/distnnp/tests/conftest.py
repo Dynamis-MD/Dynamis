@@ -6,6 +6,7 @@ Run via:
 """
 
 import os
+import gc
 import pytest
 import torch
 import torch.distributed as dist
@@ -49,6 +50,7 @@ def dist_init():
 
     yield
 
+    dist.barrier()
     dist.destroy_process_group()
 
 # ---------------------------------------------------------------------------
@@ -63,9 +65,16 @@ def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> Molec
     torch.manual_seed(seed)
     state = MolecularInfo()
     state.num_atoms = num_atoms
-    state.atom_indices = torch.arange(num_atoms, dtype=torch.long, device=device)
-    state.atom_positions = torch.rand(num_atoms, 3, device=device) * 10.0
-    state.atom_velocities = torch.randn(num_atoms, 3, device=device) * 0.1
+    
+    # Generate on CPU to ensure all ranks start with the SAME universe
+    state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long)
+    state.atom_positions = torch.rand(num_atoms, 3) * 10.0
+    state.atom_velocities = torch.randn(num_atoms, 3) * 0.1
+    
+    # Now move the consistent data to the GPU
+    state.atom_vertex_numbers = state.atom_vertex_numbers.to(device)
+    state.atom_positions = state.atom_positions.to(device)
+    state.atom_velocities = state.atom_velocities.to(device)
     return state
 
 def _make_sim_config(cutoff: float, device: torch.device) -> SimulationConfig:
@@ -145,71 +154,13 @@ def simulation_factory(request):
         sigma = torch.tensor([1.0], dtype=torch.float32, device=device)
         lj_model = LennardJonesPotentialModel(epsilon, sigma)
 
-        # Step 7: Set up FeatureExchanger IPC on model._feature_exchanger
-        exchanger = lj_model._feature_exchanger
-
-        # F === number of dimensions (3D Vectors)
-        F = 3
-
-        send_offsets = partition_info.send_offsets
-        send_local_indices = partition_info.send_local_indices
-        recv_offsets = partition_info.recv_offsets
-        n_local = partition_info.local_atom_positions.shape[0]
-        total_send = int(send_offsets[-1].item())
-        total_recv = int(recv_offsets[-1].item())
-        
-        # --- Allocate IPC buffers ---
-        x_buffer = FeatureExchanger.allocate_ipc_buffer(n_local + total_recv, F, local_rank)
-        grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(total_send, F, local_rank)
-
-        # --- Exchange IPC handles via NCCL broadcast ---
-        x_handle = exchanger.export_ipc_handle(x_buffer)
-        grad_handle = exchanger.export_ipc_handle(grad_recv_buffer)
-
-        # Gather handles: use all_gather on raw bytes via CPU tensor → NCCL
-        handle_size = len(x_handle)
-        x_handle_tensor = torch.tensor(x_handle, dtype=torch.uint8, device=device)
-        grad_handle_tensor = torch.tensor(grad_handle, dtype=torch.uint8, device=device)
-
-        all_x_handles_tensor = [torch.zeros(handle_size, dtype=torch.uint8, device=device) for _ in range(world_size)]
-        all_grad_handles_tensor = [torch.zeros(handle_size, dtype=torch.uint8, device=device) for _ in range(world_size)]
-
-        dist.all_gather(all_x_handles_tensor, x_handle_tensor)
-        dist.all_gather(all_grad_handles_tensor, grad_handle_tensor)
-
-        all_x_handles = [t.cpu().tolist() for t in all_x_handles_tensor]
-        all_grad_handles = [t.cpu().tolist() for t in all_grad_handles_tensor]
-
-        # Gather recv_offsets and num_local from all ranks
-        all_recv_offsets_list = [torch.zeros(world_size + 1, dtype=torch.int64, device=device) for _ in range(world_size)]
-        dist.all_gather(all_recv_offsets_list, recv_offsets)
-        all_recv_offsets = torch.stack(all_recv_offsets_list)  # [W, W+1]
-
-        all_num_local_list = [torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)]
-        dist.all_gather(all_num_local_list, torch.tensor([n_local], dtype=torch.int64, device=device))
-        all_num_local = torch.cat(all_num_local_list)  # [W]
-
-        # --- Setup IPC ---
-        exchanger.setup_ipc(
-            x_buffer, grad_recv_buffer,
-            all_x_handles, all_grad_handles,
-            send_offsets, send_local_indices, recv_offsets,
-            all_recv_offsets, all_num_local,
-            n_local, F, rank, world_size,
-        )
-
-        # Setup events
-        event_handle = exchanger.create_and_export_event()
-        event_handle_tensor = torch.tensor(event_handle, dtype=torch.uint8, device=device)
-        all_event_handles_tensor = [torch.zeros(len(event_handle), dtype=torch.uint8, device=device) for _ in range(world_size)]
-        dist.all_gather(all_event_handles_tensor, event_handle_tensor)
-        all_event_handles = [t.cpu().tolist() for t in all_event_handles_tensor]
-        exchanger.setup_events(all_event_handles)
+        # Step 7: (Removed) Manual IPC setup logic is now handled by lazy initialization inside the model
 
         # Step 8: Build SimState
-        # Broadcast mass to (n_local, 3) to support vectorized integration
+        F = 3
+        n_local = partition_info.local_atom_positions.shape[0]
         forces = torch.zeros(n_local, F, dtype=torch.float32, device=device)
-        mass = torch.full((n_local, 3), 1.0, dtype=torch.float32, device=device)
+        mass = torch.full((n_local,), 1.0, dtype=torch.float32, device=device)
         sim_state = SimState(distnnp_state, sim_config, forces, mass)
 
         # Step 9: Return Simulation
@@ -221,8 +172,9 @@ def simulation_factory(request):
         else: # integrator_name == "langevin"
             integrator = Langevin(dt=1e-3, gamma=1.0, kT=0.6)
 
-        # Store exchanger for teardown
-        created.append(exchanger)
+        # Store both exchangers for teardown
+        created.append(lj_model.position_exchanger.exchanger)
+        created.append(lj_model.atom_type_exchanger.exchanger)
 
         return Simulation(sim_state, lj_model, integrator)
 
@@ -231,3 +183,8 @@ def simulation_factory(request):
     # Teardown everything in created
     for exchanger in created:
         exchanger.teardown()
+        
+    # Memory cleanup
+    created.clear()
+    gc.collect()
+    torch.cuda.empty_cache()

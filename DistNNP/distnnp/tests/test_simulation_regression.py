@@ -33,12 +33,16 @@ def test_forces_match_baseline(simulation_factory, n_steps, request):
     reference = fixture[n_steps]
 
     simulation = simulation_factory()
+    
+    # Ensure Langevin thermal noise exactly matches the reference generation
+    torch.cuda.manual_seed(42)
 
     for _ in range(n_steps - 1):
         simulation.step()
 
     _, forces = simulation.step()
 
+    # I'm not 100% sure this tolerance is even good to be honest
     torch.testing.assert_close(reference["forces"], forces, atol=1e-5, rtol=0)
 
 
@@ -51,8 +55,12 @@ def test_positions_match_baseline(simulation_factory, n_steps, request):
     reference = fixture[n_steps]
 
     simulation = simulation_factory()
+    
+    # Ensure Langevin thermal noise exactly matches the reference generation
+    torch.cuda.manual_seed(42)
 
     for _ in range(n_steps):
         simulation.step()
-
+        
+    # I'm not 100% sure this tolerance is even good to be honest
     torch.testing.assert_close(reference["positions"], simulation.state.pos, atol=1e-5, rtol=0)

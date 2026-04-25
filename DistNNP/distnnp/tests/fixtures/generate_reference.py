@@ -18,6 +18,7 @@ One file is generated per integrator (euler, verlet, langevin).
 """
 
 import os
+import gc
 import torch
 import torch.distributed as dist
 from pathlib import Path
@@ -42,12 +43,23 @@ OUTPUT_DIR = Path(__file__).parent
 
 
 def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> MolecularInfo:
+    """
+    Create a MolecularInfo with random positions in a 10x10x10 box.
+    We make this with a fixed seed but set that fixed seed as a parameter.
+    """
     torch.manual_seed(seed)
     state = MolecularInfo()
     state.num_atoms = num_atoms
-    state.atom_indices = torch.arange(num_atoms, dtype=torch.long, device=device)
-    state.atom_positions = torch.rand(num_atoms, 3, device=device) * 10.0
-    state.atom_velocities = torch.randn(num_atoms, 3, device=device) * 0.1
+    
+    # Generate on CPU to ensure all ranks start with the SAME universe
+    state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long)
+    state.atom_positions = torch.rand(num_atoms, 3) * 10.0
+    state.atom_velocities = torch.randn(num_atoms, 3) * 0.1
+    
+    # Now move the consistent data to the GPU
+    state.atom_vertex_numbers = state.atom_vertex_numbers.to(device)
+    state.atom_positions = state.atom_positions.to(device)
+    state.atom_velocities = state.atom_velocities.to(device)
     return state
 
 
@@ -101,62 +113,15 @@ def generate_reference(integrator_name: str, rank: int, local_rank: int, world_s
     # These 1.0 values are fairly arbitrary, not sure if they should be changed
     epsilon = torch.tensor([1.0], dtype=torch.float32, device=device)
     sigma = torch.tensor([1.0], dtype=torch.float32, device=device)
+
+    # Initialize without a shared exchanger to allow independent lazy initialization
     lj_model = LennardJonesPotentialModel(epsilon, sigma)
 
-    # LennardJonesPotentialModel stores the exchangers as position_exchanger and atom_type_exchanger (GPUDirectExchanger)
-    # We use the position_exchanger's underlying FeatureExchanger for the manual setup in this script.
-    exchanger = lj_model.position_exchanger.exchanger
     F = 3
-    send_offsets = partition_info.send_offsets
-    send_local_indices = partition_info.send_local_indices
-    recv_offsets = partition_info.recv_offsets
     n_local = partition_info.local_atom_positions.shape[0]
-    total_send = int(send_offsets[-1].item())
-    total_recv = int(recv_offsets[-1].item())
-
-    x_buffer = FeatureExchanger.allocate_ipc_buffer(n_local + total_recv, F, local_rank)
-    grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(total_send, F, local_rank)
-
-    x_handle = exchanger.export_ipc_handle(x_buffer)
-    grad_handle = exchanger.export_ipc_handle(grad_recv_buffer)
-
-    handle_size = len(x_handle)
-    x_handle_tensor = torch.tensor(x_handle, dtype=torch.uint8, device=device)
-    grad_handle_tensor = torch.tensor(grad_handle, dtype=torch.uint8, device=device)
-
-    all_x_handles_tensor = [torch.zeros(handle_size, dtype=torch.uint8, device=device) for _ in range(world_size)]
-    all_grad_handles_tensor = [torch.zeros(handle_size, dtype=torch.uint8, device=device) for _ in range(world_size)]
-    dist.all_gather(all_x_handles_tensor, x_handle_tensor)
-    dist.all_gather(all_grad_handles_tensor, grad_handle_tensor)
-    all_x_handles = [t.cpu().tolist() for t in all_x_handles_tensor]
-    all_grad_handles = [t.cpu().tolist() for t in all_grad_handles_tensor]
-
-    all_recv_offsets_list = [torch.zeros(world_size + 1, dtype=torch.int64, device=device) for _ in range(world_size)]
-    dist.all_gather(all_recv_offsets_list, recv_offsets)
-    all_recv_offsets = torch.stack(all_recv_offsets_list)
-
-    all_num_local_list = [torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)]
-    dist.all_gather(all_num_local_list, torch.tensor([n_local], dtype=torch.int64, device=device))
-    all_num_local = torch.cat(all_num_local_list)
-
-    exchanger.setup_ipc(
-        x_buffer, grad_recv_buffer,
-        all_x_handles, all_grad_handles,
-        send_offsets, send_local_indices, recv_offsets,
-        all_recv_offsets, all_num_local,
-        n_local, F, rank, world_size,
-    )
-
-    event_handle = exchanger.create_and_export_event()
-    event_handle_tensor = torch.tensor(event_handle, dtype=torch.uint8, device=device)
-    all_event_handles_tensor = [torch.zeros(len(event_handle), dtype=torch.uint8, device=device) for _ in range(world_size)]
-    dist.all_gather(all_event_handles_tensor, event_handle_tensor)
-    all_event_handles = [t.cpu().tolist() for t in all_event_handles_tensor]
-    exchanger.setup_events(all_event_handles)
 
     forces = torch.zeros(n_local, F, dtype=torch.float32, device=device)
-    # Broadcast mass to (n_local, 3) to support vectorized integration
-    mass = torch.full((n_local, 3), 1.0, dtype=torch.float32, device=device)
+    mass = torch.full((n_local,), 1.0, dtype=torch.float32, device=device)
     sim_state = SimState(distnnp_state, sim_config, forces, mass)
 
     # The constants are fairly arbitrary, not sure if they should be changed
@@ -187,6 +152,23 @@ def generate_reference(integrator_name: str, rank: int, local_rank: int, world_s
 
     # Save snapshots from each integrator to our directory
     torch.save(snapshots, OUTPUT_DIR / f"lj_reference_{integrator_name}_rank{rank}.pt")
+    
+    # Wait for all GPUs to finish before destroying shared memory!
+    dist.barrier()
+
+    # Clean up IPC handles so the next integrator can run without crashing the driver
+    if lj_model.position_exchanger.is_ipc_setup:
+        lj_model.position_exchanger.exchanger.teardown()
+    if lj_model.atom_type_exchanger.is_ipc_setup:
+        lj_model.atom_type_exchanger.exchanger.teardown()
+    
+    # Memory cleanup for next integrator
+    del simulation
+    del lj_model
+    del sim_state
+    gc.collect()
+    torch.cuda.empty_cache()
+    dist.barrier()
 
 
 def main():
@@ -207,6 +189,7 @@ def main():
     generate_reference("verlet", rank, local_rank, world_size, device)
     generate_reference("langevin", rank, local_rank, world_size, device)
 
+    dist.barrier()
     dist.destroy_process_group()
 
 if __name__ == "__main__":

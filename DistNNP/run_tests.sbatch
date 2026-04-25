@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=distnnp-tests
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=2
+#SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=2
 #SBATCH --cpus-per-task=4
 #SBATCH --time=00:30:00
@@ -113,7 +113,7 @@ export MASTER_ADDR=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1
 export MASTER_PORT=29500
 
 echo "Master  : ${MASTER_ADDR}:${MASTER_PORT}"
-echo "World   : ${SLURM_NNODES} nodes × ${SLURM_NTASKS_PER_NODE} GPUs = $((SLURM_NNODES * SLURM_NTASKS_PER_NODE)) ranks"
+echo "World   : ${SLURM_NNODES} nodes × ${SLURM_GPUS_PER_NODE} GPUs = $((SLURM_NNODES * SLURM_GPUS_PER_NODE)) ranks"
 
 # Generate reference fixtures if they don't already exist.
 FIXTURE_MISSING=false
@@ -125,16 +125,14 @@ done
 
 if $FIXTURE_MISSING; then
     echo "Reference fixtures not found, generating..."
-    srun bash -c "
-        torchrun \
-            --nnodes=${SLURM_NNODES} \
-            --nproc_per_node=${SLURM_NTASKS_PER_NODE} \
-            --node_rank=\${SLURM_NODEID} \
-            --rdzv_id=${SLURM_JOB_ID} \
-            --rdzv_backend=c10d \
-            --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
-            distnnp/tests/fixtures/generate_reference.py
-    " || true
+    torchrun \
+        --nnodes=${SLURM_NNODES} \
+        --nproc_per_node=${SLURM_GPUS_PER_NODE} \
+        --node_rank=${SLURM_NODEID} \
+        --rdzv_id=${SLURM_JOB_ID} \
+        --rdzv_backend=c10d \
+        --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
+        distnnp/tests/fixtures/generate_reference.py
     # Verify files were actually created (torchrun may exit non-zero even on success)
     for integrator in euler verlet langevin; do
         for r in 0 1; do
@@ -151,19 +149,17 @@ fi
 # Default to distnnp/tests/ to avoid collecting mp.spawn sub-package tests under torchrun.
 PYTEST_ARGS=("${@:-distnnp/tests/}")
 
-srun bash -c "
-    torchrun \
-        --nnodes=${SLURM_NNODES} \
-        --nproc_per_node=${SLURM_NTASKS_PER_NODE} \
-        --node_rank=\${SLURM_NODEID} \
-        --rdzv_id=${SLURM_JOB_ID} \
-        --rdzv_backend=c10d \
-        --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
-        -m pytest \
-        -v \
-        --tb=short \
-        $(printf '%q ' "${PYTEST_ARGS[@]}")
-"
+torchrun \
+    --nnodes=${SLURM_NNODES} \
+    --nproc_per_node=${SLURM_GPUS_PER_NODE} \
+    --node_rank=${SLURM_NODEID} \
+    --rdzv_id=${SLURM_JOB_ID} \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
+    -m pytest \
+    -v \
+    --tb=short \
+    $(printf '%q ' "${PYTEST_ARGS[@]}")
 
 EXIT_CODE=$?
 echo ""

@@ -134,7 +134,7 @@ class LennardJonesPotentialModel(DistNNPModel):
 
         # Construct the radius graph with PBC using the local positions (including boundary atoms)
 
-        sim_config = distributed_state.sim_config
+        sim_config = distributed_state.simulation_config
         # Ensure autograd is not tracking the radius graph construction
         n_atoms = positions.shape[0]
         with torch.no_grad():
