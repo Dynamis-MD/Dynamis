@@ -84,7 +84,12 @@ def visualize_partition_timings(timing_data_json_path):
         )
         plt.tight_layout()
 
-        plt.savefig(f"cuda_timings_{op}.png")
+        figure_dir = os.path.dirname(timing_data_json_path)
+        figure_dir = os.path.join(figure_dir, "figures")
+        if not os.path.exists(figure_dir):
+            os.makedirs(figure_dir)
+
+        plt.savefig(os.path.join(figure_dir, f"cuda_timings_{op}.png"))
         plt.close()
 
 

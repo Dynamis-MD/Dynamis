@@ -147,6 +147,9 @@ class Simulator:
             distributed_environment=self._get_dist_environment(),
             device=device,
         )
+        # Once the state is initialized, we can initialize the model buffers based on the local partition info
+
+        self.model.initialize_buffers(self.state.parition_info)
 
     def sync_and_repartition(self) -> None:
         self.state.sync_and_repartition()
