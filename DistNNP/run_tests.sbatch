@@ -118,29 +118,17 @@ echo "World   : ${SLURM_NNODES} nodes × ${SLURM_GPUS_PER_NODE} GPUs = $((SLURM_
 # Generate reference fixtures if they don't already exist.
 FIXTURE_MISSING=false
 for integrator in euler verlet langevin; do
-    for r in 0 1; do
-        [[ ! -f "distnnp/tests/fixtures/lj_reference_${integrator}_rank${r}.pt" ]] && FIXTURE_MISSING=true
-    done
+    [[ ! -f "distnnp/tests/fixtures/lj_reference_${integrator}.pt" ]] && FIXTURE_MISSING=true
 done
 
 if $FIXTURE_MISSING; then
     echo "Reference fixtures not found, generating..."
-    torchrun \
-        --nnodes=${SLURM_NNODES} \
-        --nproc_per_node=${SLURM_GPUS_PER_NODE} \
-        --node_rank=${SLURM_NODEID} \
-        --rdzv_id=${SLURM_JOB_ID} \
-        --rdzv_backend=c10d \
-        --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
-        distnnp/tests/fixtures/generate_reference.py
-    # Verify files were actually created (torchrun may exit non-zero even on success)
+    torchrun --nproc_per_node=1 distnnp/tests/fixtures/generate_reference.py
     for integrator in euler verlet langevin; do
-        for r in 0 1; do
-            if [[ ! -f "distnnp/tests/fixtures/lj_reference_${integrator}_rank${r}.pt" ]]; then
-                echo "ERROR: fixture generation failed — missing lj_reference_${integrator}_rank${r}.pt"
-                exit 1
-            fi
-        done
+        if [[ ! -f "distnnp/tests/fixtures/lj_reference_${integrator}.pt" ]]; then
+            echo "ERROR: fixture generation failed — missing lj_reference_${integrator}.pt"
+            exit 1
+        fi
     done
 fi
 
