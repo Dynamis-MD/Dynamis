@@ -42,7 +42,7 @@ def dist_init():
 
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
-    dist.init_process_group("nccl")
+    dist.init_process_group("nccl", device_id=torch.device(f"cuda:{local_rank}"))
 
     if dist.get_world_size() < 2:
         dist.destroy_process_group()
@@ -127,8 +127,8 @@ def simulation_factory(request):
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 
-        # Step 1: Build MolecularInfo (32-atom system, fixed seed, same on all ranks)
-        molecular_info = _make_global_state(32, 100, device)
+        # Step 1: Build MolecularInfo (3-atom system, fixed seed, same on all ranks)
+        molecular_info = _make_global_state(3, 100, device)
 
         # Step 2: Build Simulation Config
         # Note; I'm not sure if 3.5 is a proper value here
@@ -172,7 +172,7 @@ def simulation_factory(request):
         else: # integrator_name == "langevin"
             integrator = Langevin(dt=1e-3, gamma=1.0, kT=0.6)
 
-        # Store both exchangers for teardown
+        # Store exchangers for teardown
         created.append(lj_model.position_exchanger.exchanger)
         created.append(lj_model.atom_type_exchanger.exchanger)
 

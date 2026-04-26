@@ -1,30 +1,27 @@
 """
 generate_reference.py — generates reference fixture data for regression tests.
 
-Reference system: 32-atom LJ argon in a 10x10x10 box, fixed seed=100.
+Reference system: 3-atom LJ argon in a 10x10x10 box, fixed seed=100.
 Uses the same setup as conftest.py simulation_factory (dt=1e-3).
 
 Run via:
-    torchrun --nproc_per_node=2 -m distnnp.tests.fixtures.generate_reference
+    torchrun --nproc_per_node=1 distnnp/tests/fixtures/generate_reference.py
 
-Output: distnnp/tests/fixtures/lj_reference_{integrator_name}_rank{r}.pt on each
-rank, containing:
+Output: distnnp/tests/fixtures/lj_reference_{integrator_name}.pt containing:
     {
-        1:  {"positions": Tensor(n_local, 3), "forces": Tensor(n_local, 3)},
-        10: {"positions": Tensor(n_local, 3), "forces": Tensor(n_local, 3)},
+        1:  {"positions": Tensor(n_atoms, 3), "forces": Tensor(n_atoms, 3)},
+        ...
     }
 
 One file is generated per integrator (euler, verlet, langevin).
 """
 
-import os
-import gc
 import torch
 import torch.distributed as dist
 from pathlib import Path
 
-from distnnp_model.empirical.lj_potential_model import LennardJonesPotentialModel
-from distnnp_model.distnnp_model_impl import FeatureExchanger
+from distnnp_model.empirical.lj_potential_model import lennard_jones_potential
+from distnnp_state import radius_graph_pbc_cuda
 from distnnp.simulation import SimState, Simulation
 from distnnp_integrator.euler import Euler
 from distnnp_integrator.verlet import Verlet
@@ -36,6 +33,29 @@ from distnnp_state import (
     SimpleSpatialPartitioner,
     DistNNPState,
 )
+
+# LJ wrapper for single GPU
+class SimpleLJModel:
+    def __init__(self, epsilon, sigma):
+        self.epsilon = epsilon
+        self.sigma = sigma
+
+    def __call__(self, state):
+        pos = state.local_partition_info.local_atom_positions.clone().detach().requires_grad_(True)
+        atom_types = torch.zeros(pos.shape[0], dtype=torch.long, device=pos.device)
+        sim_config = state.simulation_config
+        edge_index, _, _ = radius_graph_pbc_cuda(
+            data=type("Data", (object,), {
+                "pos": pos, "cell": sim_config.cell.unsqueeze(0),
+                "natoms": [pos.shape[0]], "pbc": sim_config.pbc,
+            })(),
+            radius=sim_config.cutoff,
+            max_num_neighbors_threshold=0,
+            enforce_max_neighbors_strictly=False,
+        )
+        energy = lennard_jones_potential(atom_types, pos, edge_index, self.epsilon, self.sigma)
+        energy.backward()
+        return energy.detach(), -pos.grad.detach()
 
 # The steps at which to save snapshots
 SNAPSHOT_STEPS = [1, 5, 10, 15, 20]
@@ -73,7 +93,7 @@ def _make_sim_config(cutoff: float, device: torch.device) -> SimulationConfig:
 
 
 def _make_env(rank: int, world_size: int, local_rank: int) -> DistEnvironment:
-    gpus_per_node = int(os.environ.get("LOCAL_WORLD_SIZE", world_size))
+    gpus_per_node = 1
     env = DistEnvironment()
     env.global_rank = rank
     env.world_size = world_size
@@ -82,25 +102,24 @@ def _make_env(rank: int, world_size: int, local_rank: int) -> DistEnvironment:
     env.local_rank = local_rank
     return env
 
-def generate_reference(integrator_name: str, rank: int, local_rank: int, world_size: int, device: torch.device) -> None:
+def generate_reference(integrator_name: str, device: torch.device) -> None:
     """Generate and save reference fixtures for a given integrator.
 
     Args:
         integrator_name: One of "euler", "verlet", or "langevin".
-        rank: Global rank of this process.
-        local_rank: Local rank (GPU index) on this node.
-        world_size: Total number of ranks.
-        device: CUDA device for this rank.
+        device: CUDA device to run on.
     """
 
-    # Build MolecularInfo (32-atom system, fixed seed, same on all ranks)
-    molecular_info = _make_global_state(32, 100, device)
+    # Build MolecularInfo (3-atom system, fixed seed)
+    molecular_info = _make_global_state(3, 100, device)
 
     # Note: 3.5 is not sure if it's a proper cutoff value here
     sim_config = _make_sim_config(3.5, device)
 
-    env = _make_env(rank, world_size, local_rank)
+    # Hardcoded values for 1 GPU
+    env = _make_env(0, 1, 0)
 
+    # We still need the partitioner but it won't do anything
     partitioner = SimpleSpatialPartitioner()
     partition_info = partitioner.partition(molecular_info, env)
     partitioner.build_halo_maps(partition_info, molecular_info, env, sim_config)
@@ -115,7 +134,7 @@ def generate_reference(integrator_name: str, rank: int, local_rank: int, world_s
     sigma = torch.tensor([1.0], dtype=torch.float32, device=device)
 
     # Initialize without a shared exchanger to allow independent lazy initialization
-    lj_model = LennardJonesPotentialModel(epsilon, sigma)
+    lj_model = SimpleLJModel(epsilon, sigma)
 
     F = 3
     n_local = partition_info.local_atom_positions.shape[0]
@@ -150,25 +169,7 @@ def generate_reference(integrator_name: str, rank: int, local_rank: int, world_s
                 "forces" : forces.clone(),
             }
 
-    # Save snapshots from each integrator to our directory
-    torch.save(snapshots, OUTPUT_DIR / f"lj_reference_{integrator_name}_rank{rank}.pt")
-    
-    # Wait for all GPUs to finish before destroying shared memory!
-    dist.barrier()
-
-    # Clean up IPC handles so the next integrator can run without crashing the driver
-    if lj_model.position_exchanger.is_ipc_setup:
-        lj_model.position_exchanger.exchanger.teardown()
-    if lj_model.atom_type_exchanger.is_ipc_setup:
-        lj_model.atom_type_exchanger.exchanger.teardown()
-    
-    # Memory cleanup for next integrator
-    del simulation
-    del lj_model
-    del sim_state
-    gc.collect()
-    torch.cuda.empty_cache()
-    dist.barrier()
+    torch.save(snapshots, OUTPUT_DIR / f"lj_reference_{integrator_name}.pt")
 
 
 def main():
@@ -177,19 +178,15 @@ def main():
     integrators separately, since each integrator produces 
     different trajectories from the same initial conditions.
     """
-
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
+    
+    device = torch.device(f"cuda:0")
+    
     dist.init_process_group("nccl")
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    device = torch.device(f"cuda:{local_rank}")
 
-    generate_reference("euler", rank, local_rank, world_size, device)
-    generate_reference("verlet", rank, local_rank, world_size, device)
-    generate_reference("langevin", rank, local_rank, world_size, device)
-
-    dist.barrier()
+    generate_reference("euler", device)
+    generate_reference("verlet", device)
+    generate_reference("langevin", device)
+    
     dist.destroy_process_group()
 
 if __name__ == "__main__":
