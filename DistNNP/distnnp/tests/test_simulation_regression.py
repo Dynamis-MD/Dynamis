@@ -24,7 +24,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 ATOL = 1e-5
 
 
-@pytest.mark.parametrize("n_steps", [1, 10])
+@pytest.mark.parametrize("n_steps", [1, 5, 10, 15, 20])
 def test_forces_match_baseline(simulation_factory, n_steps, request):
     integrator_name = request.node.callspec.params.get("simulation_factory")
 
@@ -48,7 +48,7 @@ def test_forces_match_baseline(simulation_factory, n_steps, request):
     torch.testing.assert_close(reference["forces"][local_indices], forces, atol=atol, rtol=0)
 
 
-@pytest.mark.parametrize("n_steps", [1, 10])
+@pytest.mark.parametrize("n_steps", [1, 5, 10, 15, 20])
 def test_positions_match_baseline(simulation_factory, n_steps, request):
     integrator_name = request.node.callspec.params.get("simulation_factory")
 
@@ -69,7 +69,7 @@ def test_positions_match_baseline(simulation_factory, n_steps, request):
     atol = 2e-3 if integrator_name == "langevin" else 2e-5
     torch.testing.assert_close(reference["positions"][local_indices], simulation.state.pos, atol=atol, rtol=0)
     
-@pytest.mark.parametrize("n_steps", [1, 10])
+@pytest.mark.parametrize("n_steps", [1, 5, 10, 15, 20])
 def test_enerergy_matches_baseline(simulation_factory, n_steps, request):
     integrator_name = request.node.callspec.params.get("simulation_factory")
 
