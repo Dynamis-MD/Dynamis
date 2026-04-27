@@ -68,6 +68,27 @@ def test_positions_match_baseline(simulation_factory, n_steps, request):
     # Langevin noise is drawn per-rank, so positions diverge slightly from the single-GPU reference.
     atol = 2e-3 if integrator_name == "langevin" else 2e-5
     torch.testing.assert_close(reference["positions"][local_indices], simulation.state.pos, atol=atol, rtol=0)
+    
+@pytest.mark.parametrize("n_steps", [1, 10])
+def test_enerergy_matches_baseline(simulation_factory, n_steps, request):
+    integrator_name = request.node.callspec.params.get("simulation_factory")
+
+    simulation = simulation_factory()
+    device = simulation.state.pos.device
+    local_indices = simulation.state.local_partition_info.partition_indices
+
+    fixture = torch.load(FIXTURES_DIR / f"lj_reference_{integrator_name}.pt", map_location=device)
+    reference = fixture[n_steps]
+
+    # Ensure Langevin thermal noise exactly matches the reference generation
+    torch.cuda.manual_seed(42)
+
+    for _ in range(n_steps):
+        simulation.step()
+
+    # Langevin noise is drawn per-rank, so positions diverge slightly from the single-GPU reference.
+    atol = 5e-4 if integrator_name == "langevin" else 2e-5
+    torch.testing.assert_close(reference["energy"][local_indices], simulation.state.pos, atol=atol, rtol=0)
 
 # TO-DO:
 # Make sure at least one atom partitioned on each rank

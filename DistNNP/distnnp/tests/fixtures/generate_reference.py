@@ -162,11 +162,12 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
     # Run simulation and snapshot when needed
     snapshots = {}
     for step in range(1, max(SNAPSHOT_STEPS) + 1):
-        _, forces = simulation.step()
+        energy, forces = simulation.step()
         if step in SNAPSHOT_STEPS:
             snapshots[step] = {
                 "positions" : simulation.state.pos.clone(),
                 "forces" : forces.clone(),
+                "energy" : energy.clone(),
             }
 
     torch.save(snapshots, OUTPUT_DIR / f"lj_reference_{integrator_name}.pt")
