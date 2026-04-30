@@ -123,6 +123,5 @@ PYBIND11_MODULE(distnnp_state_impl, m)
     m.def("edge_distances", &edge_distances,
           "CUDA edge distance vector/magnitude computation",
           py::arg("pos"),
-          py::arg("edge_index"),
-          py::arg("edge_cell_shift") = std::nullopt);
+          py::arg("edge_index"));
 }

@@ -11,7 +11,7 @@ from fairchem.core.models.uma.outputs import (
     compute_forces,
     compute_hessian,
 )
-from fairchem.core.pretrained_mlip import get_predict_unit
+from fairchem.core import pretrained_mlip
 from fairchem.core.units.mlip_unit import InferenceSettings
 
 class UMAModel(DistNNPModel):
@@ -23,7 +23,7 @@ class UMAModel(DistNNPModel):
         device: Literal["cuda", "cpu"] | None = None,
     ):
         DistNNPModel.__init__(self)
-        self.predict_unit = get_predict_unit(model_name, inference_settings, overrides, device)
+        self.predict_unit = pretrained_mlip.get_predict_unit(model_name, inference_settings, overrides, device)
 
     def __call__(
         self,
@@ -43,7 +43,7 @@ class UMAModel(DistNNPModel):
 
         prev_local_positions = part_info.local_atom_positions
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
-        local_atom_types = mol_info.atom_types[part_info.partition_indices]
+        local_atom_types = part_info.partition_indices
         n_local_atoms = local_positions.shape[0]
 
         positions = FeaturePushToExchange.apply(
