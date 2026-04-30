@@ -33,4 +33,6 @@ __all__ = [
     "TrajectoryWriter",
     "radius_graph_pbc_cuda",
     "TorchDistEnv",
+    "edge_distances",
+    "SimState",
 ]

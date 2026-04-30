@@ -13,9 +13,9 @@ from distnnp_state import (
     radius_graph_pbc_cuda
 )
 
-# We load standard backbone locally
 try:
-    from fairchem.core.models.uma.escn_moe import eSCNMDMoeBackbone
+    from fairchem.core import pretrained_mlip, FAIRChemCalculator
+    from ase import Atoms
     HAS_FAIRCHEM = True
 except ImportError:
     HAS_FAIRCHEM = False
@@ -40,60 +40,25 @@ def test_uma_distributed_parity():
     
     device = f"cuda:{rank}"
     
-    # ==========================================
-    # 1. Initialize Models & Sync Weights
-    # ==========================================
-    # To load a pretrained model or checkpoint, you can define an environment variable
-    # UMA_CHECKPOINT="path/to/checkpoint.pt". Otherwise, it falls back to random weights.
-    checkpoint_path = os.environ.get("UMA_CHECKPOINT", None)
-    
-    if checkpoint_path is not None:
-        # Load from OCP / Fairchem local checkpoint file
-        print(f"Rank {rank}: Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        
-        # Fairchem checkpoints typically store model weights under the "state_dict" key,
-        # but sometimes keys have a 'module.' or 'normalizer.' prefix we might need to handle.
-        state_dict = checkpoint.get("state_dict", checkpoint)
-        
-        # Often fairchem includes normalizers or other wrappers not in the backbone; strict=False is usually safe.
-        standard_model = eSCNMDMoeBackbone(num_experts=8).to(device)
-        missing, unexpected = standard_model.load_state_dict(state_dict, strict=False)
-        if rank == 0:
-            print(f"Loaded checkpoint with missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
-        
-        dist_model = UMAModel(num_experts=8).to(device)
-    else:
-        # Initialize both models with random weights (ensure same hyperparameters)
-        dist_model = UMAModel(num_experts=8).to(device)
-        standard_model = eSCNMDMoeBackbone(num_experts=8).to(device)
-        state_dict = standard_model.state_dict()
-
-    # Force identical weights by broadcasting Rank 0's state_dict to all ranks
-    # so both the standard model and distributed model have EXACT parity
-    if world_size > 1:
-        for param in state_dict.values():
-            if isinstance(param, torch.Tensor):
-                dist.broadcast(param, src=0)
-    
-    dist_model.load_state_dict(state_dict, strict=False)
-    
-    dist_model.eval()
-    standard_model.eval()
+    predictor = pretrained_mlip.get_predict_unit("uma-s-1p2", device=device)
+    standard_calc = FAIRChemCalculator(predictor, task_name="omol")
+    dist_model = UMAModel("uma-s-1p2", device=device).to(device)
 
     # ==========================================
     # 2. Setup Global Data (Ground Truth)
     # ==========================================
     total_atoms = 16
-    
+
     # Use a fixed seed on all ranks so they generate the same global structure
     torch.manual_seed(42)
     # Give enough spatial spread to ensure cutoffs divide the space reasonably
     global_positions = torch.rand((total_atoms, 3), device=device) * 10.0
     global_atomic_numbers = torch.randint(1, 10, (total_atoms,), device=device, dtype=torch.long)
-    global_cell = torch.eye(3, device=device) * 20.0
+    global_cell = torch.eye(3, device=device) * 10.0
     global_pbc = torch.tensor([True, True, True], device=device)
     cutoff = 5.0
+
+    ase_system = Atoms(numbers=global_atomic_numbers, positions=global_positions, cell=global_cell, pbc=global_pbc)
 
     # ==========================================
     # 3. Setup Distributed State (Partitioning)
@@ -156,16 +121,11 @@ def test_uma_distributed_parity():
             "tags": torch.zeros(total_atoms, dtype=torch.long, device=device),
             "edge_index": global_edge_index,
         })()
-        
+
         # Fairchem Backbone Output
-        out = standard_model(data)
-        global_energy = out["energy"] if isinstance(out, dict) else out
-        if len(global_energy.shape) > 0 and global_energy.numel() > 1:
-            global_energy = global_energy.sum()
-        
-        global_energy.backward()
-        global_forces = -global_pos_std.grad.detach()
-        
+        global_energy = standard_calc.get_potential_energy(ase_system)
+        global_forces = standard_calc.get_forces(ase_system)
+
     # ==========================================
     # 5. Forward & Backward Pass: DISTRIBUTED MODEL
     # ==========================================

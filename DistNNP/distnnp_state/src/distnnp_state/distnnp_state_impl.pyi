@@ -184,7 +184,7 @@ def radius_graph_pbc(pos: torch.Tensor, cell: torch.Tensor, pbc: torch.Tensor, r
     CUDA cell-list radius graph with selective PBC tiling
     """
 
-def edge_distances(pos: torch.Tensor, edge_index: torch.Tensor, edge_distances: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+def edge_distances(pos: torch.Tensor, edge_index: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     CUDA pairwise atom distance calculation
     """
