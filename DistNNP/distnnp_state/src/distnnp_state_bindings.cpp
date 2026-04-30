@@ -1,6 +1,7 @@
 #include "distnnp_state/distnnp_state.hpp"
 #include "distnnp_state/partitioner.hpp"
 #include "distnnp_state/radius_pbc.hpp"
+#include "distnnp_state/edge_distances.hpp"
 #include "distnnp_state/trajectory_writer.hpp"
 #include <torch/extension.h>
 
@@ -130,4 +131,10 @@ PYBIND11_MODULE(distnnp_state_impl, m)
           py::arg("radius"),
           py::arg("max_num_neighbors"),
           py::arg("enforce_max_strictly"));
+
+    m.def("edge_distances", &edge_distances,
+          "CUDA edge distance vector/magnitude computation",
+          py::arg("pos"),
+          py::arg("edge_index"),
+          py::arg("edge_cell_shift") = std::nullopt);
 }
