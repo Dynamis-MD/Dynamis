@@ -62,6 +62,8 @@ python_add_library(distnnp_state_impl
     src/partition/build_halo_maps.cpp
     src/radius_pbc/radius_pbc_.cpp
     src/radius_pbc/radius_pbc.cu
+    src/radius_pbc/edge_distances_.cpp
+    src/radius_pbc/edge_distances.cu
     src/trajectory_writer.cpp
 )
 
