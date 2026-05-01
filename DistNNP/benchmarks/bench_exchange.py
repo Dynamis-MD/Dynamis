@@ -252,15 +252,15 @@ def main():
     )
 
     # -----------------------------------------------------------------------
-    # Setup IPC events for stream-level sync
+    # Setup IPC push-sync counter for stream-level sync
     # -----------------------------------------------------------------------
-    event_handle = exchanger.create_and_export_event()
-    event_handle_tensor = torch.tensor(event_handle, dtype=torch.uint8, device=device)
-    all_event_tensors = torch.empty(world_size, len(event_handle),
-                                    dtype=torch.uint8, device=device)
-    dist.all_gather_into_tensor(all_event_tensors, event_handle_tensor)
-    all_event_handles = [all_event_tensors[r].cpu().tolist() for r in range(world_size)]
-    exchanger.setup_events(all_event_handles)
+    sync_handle = exchanger.create_and_export_sync_handle()
+    sync_handle_tensor = torch.tensor(sync_handle, dtype=torch.uint8, device=device)
+    all_sync_tensors = torch.empty(world_size, len(sync_handle),
+                                   dtype=torch.uint8, device=device)
+    dist.all_gather_into_tensor(all_sync_tensors, sync_handle_tensor)
+    all_sync_handles = [all_sync_tensors[r].cpu().tolist() for r in range(world_size)]
+    exchanger.setup_sync(all_sync_handles)
 
     dist.barrier()
     torch.cuda.synchronize()

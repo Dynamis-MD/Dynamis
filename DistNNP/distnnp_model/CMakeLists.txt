@@ -92,6 +92,7 @@ target_link_libraries(distnnp_model_impl
     ${TORCH_LIBRARIES}
     torch
     ${TORCH_PYTHON_LIBRARY}
+    CUDA::cuda_driver
 )
 
 set_target_properties(distnnp_model_impl

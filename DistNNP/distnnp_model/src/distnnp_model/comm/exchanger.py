@@ -79,6 +79,10 @@ class Exchanger(ABC):
         """
         ...
 
+    @staticmethod
+    def _is_single_rank() -> bool:
+        return dist.is_initialized() and dist.get_world_size() == 1
+
     def feature_push_forward(
         self,
         features_to_push: torch.Tensor,
@@ -93,6 +97,12 @@ class Exchanger(ABC):
         Returns:
             torch.Tensor: The features received from neighboring partitions after the push to exchange operation.
         """
+        # With a single rank there are no peers, no halo, and a 0-byte
+        # grad_recv_buffer that cudaIpcGetMemHandle would reject. Skip IPC
+        # entirely and act as identity.
+        if self._is_single_rank():
+            return features_to_push
+
         if not self.is_ipc_setup:
             feature_dim = features_to_push.shape[-1]
             device = features_to_push.device
@@ -119,6 +129,9 @@ class Exchanger(ABC):
         Returns:
             torch.Tensor: The gradients for the input features that were pushed in the forward pass.
         """
+        if self._is_single_rank():
+            return grad_output
+
         if not self.is_ipc_setup:
             raise RuntimeError(
                 "Exchanger is not setup for backward pass. Call feature_push_forward first."
@@ -209,11 +222,11 @@ class GPUDirectExchanger(Exchanger):
         world_size = dist.get_world_size()
         n_local = len(partition_info.partition_indices)
 
-        total_recv = int(partition_info.global_send_recv_matrix.sum(dim=0)[rank].item())
-        total_send = int(partition_info.global_send_recv_matrix.sum(dim=1)[rank].item())
-
         send_offsets = partition_info.send_offsets
         recv_offsets = partition_info.recv_offsets
+        
+        total_send = int(send_offsets[-1].item())
+        total_recv = int(recv_offsets[-1].item())
 
         # --- Allocate IPC buffers ---
         x_buffer = FeatureExchanger.allocate_ipc_buffer(
@@ -255,7 +268,8 @@ class GPUDirectExchanger(Exchanger):
             for _ in range(world_size)
         ]
         dist.all_gather(all_recv_offsets_list, recv_offsets)
-        all_recv_offsets = torch.stack(all_recv_offsets_list)  # [W, W+
+        all_recv_offsets = torch.stack(all_recv_offsets_list)  # [W, W+1]
+
         all_num_local_list = [
             torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)
         ]
@@ -282,14 +296,17 @@ class GPUDirectExchanger(Exchanger):
             world_size,
         )
 
-        event_handle = self.exchanger.create_and_export_event()
-        event_handle_tensor = torch.tensor(
-            event_handle, dtype=torch.uint8, device=device
+        # --- Setup push-sync counter ---
+        sync_handle = self.exchanger.create_and_export_sync_handle()
+        sync_handle_tensor = torch.tensor(
+            sync_handle, dtype=torch.uint8, device=local_features.device
         )
-        all_event_handles_tensor = [
-            torch.zeros(len(event_handle), dtype=torch.uint8, device=device)
+        all_sync_handles_tensor = [
+            torch.zeros(
+                len(sync_handle), dtype=torch.uint8, device=local_features.device
+            )
             for _ in range(world_size)
         ]
-        dist.all_gather(all_event_handles_tensor, event_handle_tensor)
-        all_event_handles = [t.cpu().tolist() for t in all_event_handles_tensor]
-        self.exchanger.setup_events(all_event_handles)
+        dist.all_gather(all_sync_handles_tensor, sync_handle_tensor)
+        all_sync_handles = [t.cpu().tolist() for t in all_sync_handles_tensor]
+        self.exchanger.setup_sync(all_sync_handles)
