@@ -20,8 +20,7 @@ import torch
 import torch.distributed as dist
 from pathlib import Path
 
-from distnnp_model.empirical.lj_potential_model import lennard_jones_potential
-from distnnp_state import radius_graph_pbc_cuda
+from distnnp_model.empirical.lj_potential_model import LennardJonesPotentialModel
 from distnnp.simulation import SimState, Simulation
 from distnnp_integrator.euler import Euler
 from distnnp_integrator.verlet import Verlet
@@ -33,29 +32,6 @@ from distnnp_state import (
     SimpleSpatialPartitioner,
     DistNNPState,
 )
-
-# LJ wrapper for single GPU
-class SimpleLJModel:
-    def __init__(self, epsilon, sigma):
-        self.epsilon = epsilon
-        self.sigma = sigma
-
-    def __call__(self, state):
-        pos = state.local_partition_info.local_atom_positions.clone().detach().requires_grad_(True)
-        atom_types = torch.zeros(pos.shape[0], dtype=torch.long, device=pos.device)
-        sim_config = state.simulation_config
-        edge_index, _, _ = radius_graph_pbc_cuda(
-            data=type("Data", (object,), {
-                "pos": pos, "cell": sim_config.cell.unsqueeze(0),
-                "natoms": [pos.shape[0]], "pbc": sim_config.pbc,
-            })(),
-            radius=sim_config.cutoff,
-            max_num_neighbors_threshold=0,
-            enforce_max_neighbors_strictly=False,
-        )
-        energy = lennard_jones_potential(atom_types, pos, edge_index, self.epsilon, self.sigma)
-        energy.backward()
-        return energy.detach(), -pos.grad.detach()
 
 # The steps at which to save snapshots
 SNAPSHOT_STEPS = [1, 5, 10, 15, 20]
@@ -73,7 +49,7 @@ def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> Molec
     
     # Generate on CPU to ensure all ranks start with the SAME universe
     state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long)
-    state.atom_positions = torch.rand(num_atoms, 3) * 10.0
+    state.atom_positions = torch.rand(num_atoms, 3) * 4.0
     state.atom_velocities = torch.randn(num_atoms, 3) * 0.1
     
     # Now move the consistent data to the GPU
@@ -87,7 +63,7 @@ def _make_sim_config(cutoff: float, device: torch.device) -> SimulationConfig:
     cfg = SimulationConfig()
     cfg.cutoff = cutoff
     cfg.ghost_cutoff_buffer = 0.5
-    cfg.cell = torch.eye(3, device=device) * 10.0
+    cfg.cell = torch.eye(3, device=device) * 4.0
     cfg.pbc = torch.tensor([True, True, True], dtype=torch.bool, device=device)
     return cfg
 
@@ -110,7 +86,6 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
         device: CUDA device to run on.
     """
 
-    # Build MolecularInfo (3-atom system, fixed seed)
     molecular_info = _make_global_state(3, 100, device)
 
     # Note: 3.5 is not sure if it's a proper cutoff value here
@@ -133,8 +108,9 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
     epsilon = torch.tensor([1.0], dtype=torch.float32, device=device)
     sigma = torch.tensor([1.0], dtype=torch.float32, device=device)
 
-    # Initialize without a shared exchanger to allow independent lazy initialization
-    lj_model = SimpleLJModel(epsilon, sigma)
+    # Use the same model class the regression tests run against so the fixture
+    # exercises the real FeaturePushToExchange / exchanger code path.
+    lj_model = LennardJonesPotentialModel(epsilon, sigma)
 
     F = 3
     n_local = partition_info.local_atom_positions.shape[0]
@@ -171,6 +147,17 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
             }
 
     torch.save(snapshots, OUTPUT_DIR / f"lj_reference_{integrator_name}.pt")
+
+    # Tear down exchangers before the next integrator builds its own model,
+    # mirroring the conftest fixture teardown. With world_size=1 IPC was
+    # never set up, so skip teardown in that case.
+    for wrapper in (
+        lj_model.position_exchanger,
+        lj_model.atom_type_exchanger,
+        lj_model.global_index_exchanger,
+    ):
+        if wrapper.is_ipc_setup:
+            wrapper.exchanger.teardown()
 
 
 def main():

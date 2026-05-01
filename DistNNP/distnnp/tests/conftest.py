@@ -6,7 +6,6 @@ Run via:
 """
 
 import os
-import gc
 import pytest
 import torch
 import torch.distributed as dist
@@ -68,7 +67,7 @@ def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> Molec
     
     # Generate on CPU to ensure all ranks start with the SAME universe
     state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long)
-    state.atom_positions = torch.rand(num_atoms, 3) * 10.0
+    state.atom_positions = torch.rand(num_atoms, 3) * 4.0
     state.atom_velocities = torch.randn(num_atoms, 3) * 0.1
     
     # Now move the consistent data to the GPU
@@ -81,7 +80,7 @@ def _make_sim_config(cutoff: float, device: torch.device) -> SimulationConfig:
     cfg = SimulationConfig()
     cfg.cutoff = cutoff
     cfg.ghost_cutoff_buffer = 0.5
-    cfg.cell = torch.eye(3, device=device) * 10.0
+    cfg.cell = torch.eye(3, device=device) * 4.0
     cfg.pbc = torch.tensor([True, True, True], dtype=torch.bool, device=device)
     return cfg
 
@@ -154,16 +153,14 @@ def simulation_factory(request):
         sigma = torch.tensor([1.0], dtype=torch.float32, device=device)
         lj_model = LennardJonesPotentialModel(epsilon, sigma)
 
-        # Step 7: (Removed) Manual IPC setup logic is now handled by lazy initialization inside the model
-
-        # Step 8: Build SimState
+        # Step 7: Build SimState
         F = 3
         n_local = partition_info.local_atom_positions.shape[0]
         forces = torch.zeros(n_local, F, dtype=torch.float32, device=device)
         mass = torch.full((n_local,), 1.0, dtype=torch.float32, device=device)
         sim_state = SimState(distnnp_state, sim_config, forces, mass)
 
-        # Step 9: Return Simulation
+        # Step 8: Return Simulation
         # The constants below are arbitrary, not sure if they should be changed
         if integrator_name == "euler":
             integrator = Euler(dt=1e-3)
@@ -175,6 +172,7 @@ def simulation_factory(request):
         # Store exchangers for teardown
         created.append(lj_model.position_exchanger.exchanger)
         created.append(lj_model.atom_type_exchanger.exchanger)
+        created.append(lj_model.global_index_exchanger.exchanger)
 
         return Simulation(sim_state, lj_model, integrator)
 
@@ -184,7 +182,4 @@ def simulation_factory(request):
     for exchanger in created:
         exchanger.teardown()
         
-    # Memory cleanup
     created.clear()
-    gc.collect()
-    torch.cuda.empty_cache()
