@@ -22,7 +22,7 @@ import json
 BOX_SIZE = 20.0
 
 
-def generate_synthetic_dataset(num_atoms: int, device) -> MolecularInfo:
+def generate_synthetic_dataset(num_atoms: int, device, box_size: float = BOX_SIZE) -> MolecularInfo:
     """
     Generates a random system of num_atoms size on all ranks. The system is the same on all ranks.
 
@@ -41,7 +41,7 @@ def generate_synthetic_dataset(num_atoms: int, device) -> MolecularInfo:
     mol_info.atom_vertex_numbers = torch.arange(
         num_atoms, dtype=torch.long, device=device
     )
-    mol_info.atom_positions = (torch.rand(num_atoms, 3, generator=gen) * BOX_SIZE).to(
+    mol_info.atom_positions = (torch.rand(num_atoms, 3, generator=gen) * box_size).to(
         device
     )
     mol_info.atom_velocities = (torch.randn(num_atoms, 3, generator=gen) * 0.1).to(

@@ -81,7 +81,7 @@ def create_and_run_experiment(num_atoms: int):
         )
 
         global_molecular_system = generate_synthetic_dataset(
-            num_atoms=system_size, device=device
+            num_atoms=system_size, device=device, box_size=side_length
         )
 
         local_print(
