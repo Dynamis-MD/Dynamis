@@ -1,7 +1,11 @@
 from distnnp_model.potential import DistNNPModel
 import torch
 import torch.nn.functional as F
-from distnnp_state import radius_graph_pbc_cuda, DistNNPState
+from distnnp_state import (
+    radius_graph_pbc_cuda,
+    DistNNPState,
+    PartitionMessagePassingInfo,
+)
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 from distnnp_model.comm.exchanger import Exchanger, GPUDirectExchanger
 from typing import Optional
@@ -76,6 +80,12 @@ class LennardJonesPotentialModel(DistNNPModel):
         self.atom_type_exchanger = (
             GPUDirectExchanger() if exchanger is None else exchanger
         )
+
+    def initialize_buffers(self, partition_info: PartitionMessagePassingInfo) -> None:
+        # For this simple LJ model, we don't have any learnable parameters or buffers that depend on the partitioning
+        # However, if we wanted to, we could initialize any necessary buffers here based on the partition_info
+        self.position_exchanger.setup_exchanger(partition_info)
+        self.atom_type_exchanger.initialize(partition_info)
 
     def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
         prev_local_positions = distributed_state.local_molecular_info.atom_positions

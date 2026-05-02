@@ -32,7 +32,7 @@ def get_peak_mb():
     return torch.cuda.max_memory_allocated() / (1024 * 1024)
 
 
-def create_and_run_experiment(num_atoms: int):
+def create_and_run_experiment():
 
     torch_distributed_env = TorchDistEnv()
     local_rank = torch_distributed_env.local_rank
@@ -51,7 +51,18 @@ def create_and_run_experiment(num_atoms: int):
         if global_rank == 0:
             print(*args, **kwargs)
 
-    system_sizes = [100, 1000, 5000, 10000, 50000]
+    system_sizes = [
+        100,
+        1000,
+        5000,
+        10000,
+        50000,
+        100000,
+        500000,
+        1000000,
+        5000000,
+        10000000,
+    ]  # Number of atoms in the system
     for system_size in system_sizes:
 
         side_length = (system_size / 0.005) ** (
@@ -81,7 +92,7 @@ def create_and_run_experiment(num_atoms: int):
         )
 
         global_molecular_system = generate_synthetic_dataset(
-            num_atoms=system_size, device=device
+            num_atoms=system_size, box_size=side_length, device=device
         )
 
         local_print(
@@ -132,14 +143,17 @@ def create_and_run_experiment(num_atoms: int):
         # )
 
     timing_data_json = Timer.json()
-    local_print(f"Aggregated timing data across all iterations: {timing_data_json}")
+    # local_print(f"Aggregated timing data across all iterations: {timing_data_json}")
 
     cur_dir = os.path.dirname(os.path.abspath(__file__))
     results_dir = os.path.join(cur_dir, "results")
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     if global_rank == 0:
-        with open(os.path.join(results_dir, "single_layer_timing_data.json"), "w") as f:
+        with open(
+            os.path.join(results_dir, f"single_layer_timing_data_{world_size}.json"),
+            "w",
+        ) as f:
             f.write(timing_data_json)
 
     # for step_num in range(sim_config.total_steps):
@@ -155,7 +169,7 @@ def create_and_run_experiment(num_atoms: int):
 
 
 def main():
-    create_and_run_experiment(100)
+    create_and_run_experiment()
 
 
 if __name__ == "__main__":

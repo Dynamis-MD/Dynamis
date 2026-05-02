@@ -154,6 +154,7 @@ class Simulator:
     def sync_and_repartition(self) -> None:
         self.state.sync_and_repartition()
         # TODO: ADD appropriate barriers/synchronization if needed here
+        self.model.initialize_buffers(self.state.parition_info)
 
     def _set_state(self, state: SimState):
         self.state = state
