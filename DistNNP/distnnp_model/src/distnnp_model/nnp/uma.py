@@ -1,9 +1,8 @@
-import torch
 from distnnp_model.potential import DistNNPModel
+from distnnp_model.comm.exchanger import Exchanger, GPUDirectExchanger
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 from distnnp_state import DistNNPState, radius_graph_pbc_cuda, edge_distances
 
-from typing import Literal
 from fairchem.core.common import gp_utils
 from fairchem.core.models.uma.outputs import (
     compute_energy,
@@ -13,6 +12,9 @@ from fairchem.core.models.uma.outputs import (
 )
 from fairchem.core import pretrained_mlip
 from fairchem.core.units.mlip_unit import InferenceSettings
+import torch
+import torch.distributed as dist
+from typing import Literal, Optional
 
 class UMAModel(DistNNPModel):
     def __init__(
@@ -21,8 +23,16 @@ class UMAModel(DistNNPModel):
         inference_settings: InferenceSettings | str = "turbo",
         overrides: dict | None = None,
         device: Literal["cuda", "cpu"] | None = None,
+        exchanger: Optional[Exchanger] = None,
     ):
         DistNNPModel.__init__(self)
+        self.position_exchanger = (
+            GPUDirectExchanger() if exchanger is None else exchanger
+        )
+
+        self.atom_type_exchanger = (
+            GPUDirectExchanger() if exchanger is None else exchanger
+        )
         self.predict_unit = pretrained_mlip.get_predict_unit(model_name, inference_settings, overrides, device)
 
     def __call__(
@@ -35,10 +45,10 @@ class UMAModel(DistNNPModel):
         spin: torch.Tensor | None = None,
     ):
         #ESCN FORWARD
-        backbone = self.predictor.model.module.backbone
+        backbone = self.predict_unit.model.module.backbone
 
         mol_info = distributed_state.global_molecular_info
-        sim_config = distributed_state.simulation_config
+        sim_config = distributed_state.sim_config
         part_info = distributed_state.local_partition_info
 
         prev_local_positions = part_info.local_atom_positions
@@ -47,11 +57,11 @@ class UMAModel(DistNNPModel):
         n_local_atoms = local_positions.shape[0]
 
         positions = FeaturePushToExchange.apply(
-            local_positions, distributed_state, self._feature_exchanger
+            local_positions, distributed_state, self.position_exchanger
         )
 
         atom_types = FeaturePushToExchange.apply(
-            local_atom_types.float(), distributed_state, self._feature_exchanger
+            local_atom_types.float(), distributed_state, self.atom_type_exchanger
         ).long()
 
         n_atoms = positions.shape[0]
@@ -219,7 +229,7 @@ class UMAModel(DistNNPModel):
         # forces = -local_positions.grad
 
         #MLP_EFS_Head FORWARD
-        output_head = self.output_heads["energyandforcehead"]
+        output_head = self.predict_unit.model.module.output_heads["energyandforcehead"]
 
         energy_key = f"{output_head.prefix}_energy" if output_head.prefix else "energy"
         forces_key = f"{output_head.prefix}_forces" if output_head.prefix else "forces"
@@ -285,4 +295,6 @@ class UMAModel(DistNNPModel):
                 {"hessian": hessian} if self.wrap_property else hessian
             )
 
-        return energy.detach(), forces.detach()
+        total_energy = dist.reduce(energy.detach(), op=dist.ReduceOp.SUM)
+        local_forces = forces[:n_local_atoms]
+        return total_energy, local_forces

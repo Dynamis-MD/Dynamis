@@ -59,6 +59,7 @@ class KDTreePartitioner:
         """
 class MolecularInfo:
     atom_vertex_numbers: torch.Tensor
+    atom_types: torch.Tensor
     atom_positions: torch.Tensor
     atom_velocities: torch.Tensor
     edge_counts: torch.Tensor

@@ -22,27 +22,29 @@ except ImportError:
 
 def setup_distributed():
     rank = int(os.environ.get("RANK", 0))
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     
-    if world_size > 1 and not dist.is_initialized():
-        dist.init_process_group("nccl")
-        
     if torch.cuda.is_available():
-        torch.cuda.set_device(rank)
+        torch.cuda.set_device(local_rank)
         
-    return rank, world_size
+    if world_size > 1 and not dist.is_initialized():
+        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+        
+    return rank, local_rank, world_size
 
 @pytest.mark.skipif(not HAS_FAIRCHEM, reason="fairchem-core is not installed")
 def test_uma_distributed_parity():
-    rank, world_size = setup_distributed()
+    rank, local_rank, world_size = setup_distributed()
     if world_size < 2:
         pytest.skip("Parity test requires at least 2 GPUs. Run with torchrun or mpirun.")
     
-    device = f"cuda:{rank}"
+    # device = f"cuda:{local_rank}"
+    device = "cuda"
     
     predictor = pretrained_mlip.get_predict_unit("uma-s-1p2", device=device)
     standard_calc = FAIRChemCalculator(predictor, task_name="omol")
-    dist_model = UMAModel("uma-s-1p2", device=device).to(device)
+    dist_model = UMAModel("uma-s-1p2", device=device)
 
     # ==========================================
     # 2. Setup Global Data (Ground Truth)
@@ -58,7 +60,12 @@ def test_uma_distributed_parity():
     global_pbc = torch.tensor([True, True, True], device=device)
     cutoff = 5.0
 
-    ase_system = Atoms(numbers=global_atomic_numbers, positions=global_positions, cell=global_cell, pbc=global_pbc)
+    ase_system = Atoms(
+        numbers=global_atomic_numbers.cpu(),
+        positions=global_positions.cpu(),
+        cell=global_cell.cpu(),
+        pbc=global_pbc.cpu()
+    )
 
     # ==========================================
     # 3. Setup Distributed State (Partitioning)
@@ -66,14 +73,16 @@ def test_uma_distributed_parity():
     env = DistEnvironment()
     env.global_rank = rank
     env.world_size = world_size
-    env.local_rank = rank
+    env.local_rank = local_rank
     env.num_nodes = 1
     env.gpus_per_node = world_size
     
     mol = MolecularInfo()
     mol.num_atoms = total_atoms
+    mol.atom_vertex_numbers = torch.arange(total_atoms, device=device, dtype=torch.long)
+    mol.atom_types = global_atomic_numbers.clone().detach()
     mol.atom_positions = global_positions.clone().detach() # No requires_grad here, partitioner doesn't need it
-    mol.atom_vertex_numbers = global_atomic_numbers.to(torch.int32)
+    mol.atom_velocities = torch.zeros((total_atoms, 3), device=device)
     
     sim_config = SimulationConfig()
     sim_config.cell = global_cell
@@ -102,9 +111,9 @@ def test_uma_distributed_parity():
             global_edge_index, _, _ = radius_graph_pbc_cuda(
                 data=type("Data", (object,), {
                     "pos": global_pos_std,
-                    "cell": sim_config.cell,
-                    "natoms": total_atoms,
-                    "pbc": sim_config.pbc,
+                    "cell": sim_config.cell.unsqueeze(0),
+                    "natoms": torch.tensor([total_atoms]),
+                    "pbc": sim_config.pbc.unsqueeze(0),
                 })(),
                 radius=sim_config.cutoff,
                 max_num_neighbors_threshold=0,
@@ -129,8 +138,16 @@ def test_uma_distributed_parity():
     # ==========================================
     # 5. Forward & Backward Pass: DISTRIBUTED MODEL
     # ==========================================
-    # Re-assign positions into partition_info to have requires_grad inside apply
-    local_energy, local_forces = dist_model(state)
+    n_local = state.local_partition_info.local_atom_positions.shape[0]
+    batch = torch.zeros(n_local, dtype=torch.long, device=device)
+
+    n_total_with_ghosts = (
+        state.local_partition_info.local_atom_positions.shape[0] + 
+        state.local_partition_info.recv_ghost_indices.shape[0]
+    )
+    batch_full = torch.zeros(n_total_with_ghosts, dtype=torch.long, device=device)
+
+    local_energy, local_forces = dist_model(state, batch, batch_full)
     
     # ==========================================
     # 6. Parity Assertions

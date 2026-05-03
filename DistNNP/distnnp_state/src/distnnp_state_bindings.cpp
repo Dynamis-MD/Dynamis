@@ -11,6 +11,9 @@ PYBIND11_MODULE(distnnp_state_impl, m)
         .def(py::init<>())
         .def_readwrite("num_atoms", &distnnp_state::MolecularInfo::num_atoms)
         .def_readwrite("atom_vertex_numbers", &distnnp_state::MolecularInfo::atom_vertex_numbers)
+        .def_readwrite("atom_types", &distnnp_state::MolecularInfo::atom_types)
+        .def_readwrite("atom_positions", &distnnp_state::MolecularInfo::atom_positions)
+        .def_readwrite("atom_velocities", &distnnp_state::MolecularInfo::atom_velocities)
         .def_readwrite("edge_counts", &distnnp_state::MolecularInfo::edge_counts);
 
     py::class_<distnnp_state::DistEnvironment>(m, "DistEnvironment")
