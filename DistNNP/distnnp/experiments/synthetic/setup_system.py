@@ -16,13 +16,14 @@ from distnnp import SimState
 
 import json
 
-
 # Side length (Å) of the synthetic simulation box.
 # Positions in generate_synthetic_dataset are drawn from [0, BOX_SIZE).
 BOX_SIZE = 20.0
 
 
-def generate_synthetic_dataset(num_atoms: int, device, box_size: float = BOX_SIZE) -> MolecularInfo:
+def generate_synthetic_dataset(
+    num_atoms: int, device, box_size: float = BOX_SIZE
+) -> MolecularInfo:
     """
     Generates a random system of num_atoms size on all ranks. The system is the same on all ranks.
 
@@ -106,7 +107,7 @@ class Timer:
     # Class-level dictionary to aggregate timings globally
     timing_keys = {}
 
-    def __init__(self, key):
+    def __init__(self, key, metadata=None):
         self.key = key
         self.start_event = None
         self.end_event = None
@@ -118,6 +119,8 @@ class Timer:
                 "count": 0,
                 "elapsed_times_ms": [],
             }
+        if metadata is not None:
+            Timer.timing_keys[self.key] = Timer.timing_keys[self.key] | metadata
 
     def start(self):
         """Manually starts the CUDA timer."""
@@ -187,3 +190,8 @@ class Timer:
     def clear(cls):
         """Resets all recorded timings globally."""
         cls.timing_keys.clear()
+
+    @classmethod
+    def add_meta_data(cls, meta_dict):
+        """Allows adding arbitrary metadata to the timing dictionary."""
+        cls.timing_keys["meta_data"] = meta_dict

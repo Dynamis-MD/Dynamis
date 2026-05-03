@@ -39,6 +39,8 @@ def create_and_run_experiment():
     global_rank = torch_distributed_env.global_rank
     world_size = torch_distributed_env.world_size
     device = torch_distributed_env.device
+    side_lengths = []
+    density = 0.005
 
     for i in range(world_size):
         if i == global_rank:
@@ -65,9 +67,10 @@ def create_and_run_experiment():
     ]  # Number of atoms in the system
     for system_size in system_sizes:
 
-        side_length = (system_size / 0.005) ** (
+        side_length = (system_size / density) ** (
             1 / 3
         )  # atoms per cubic angstrom, assuming a density of 0.05 atoms/Å^3
+        side_lengths.append(side_length)
 
         local_print(
             f"Running experiment for system size {system_size} atoms with side length {side_length:.2f} Å..."
@@ -116,7 +119,14 @@ def create_and_run_experiment():
             # local_print(
             #     f"Rank {global_rank} starting initialization iteration {num_iterations}..."
             # )
-            with Timer(f"Partition(SFC Morton) - system size {system_size}"):
+            with Timer(
+                f"Partition(SFC Morton) - system size {system_size}",
+                metadata={
+                    "system_size": system_size,
+                    "world_size": world_size,
+                    "operation": "partition",
+                },
+            ):
                 partition_info = partitioner.partition(
                     global_molecular_system, torch_distributed_env.dist_env
                 )
@@ -124,7 +134,14 @@ def create_and_run_experiment():
             torch.distributed.barrier()
             torch.cuda.synchronize()
 
-            with Timer(f"Build Halo Maps - system size {system_size}"):
+            with Timer(
+                f"Build Halo Maps - system size {system_size}",
+                metadata={
+                    "system_size": system_size,
+                    "world_size": world_size,
+                    "operation": "build_halo_maps",
+                },
+            ):
                 partitioner.build_halo_maps(
                     partition_info,
                     global_molecular_system,
@@ -135,14 +152,21 @@ def create_and_run_experiment():
             torch.distributed.barrier()
             torch.cuda.synchronize()
 
-            #     simulator.initialize_simulator_state(
-            #         global_molecular_system, device=device
-            #     )
+        simulator.initialize_simulator_state(global_molecular_system, device=device)
         # local_print(
         #     f"Simulator state initialized on rank {global_rank} with {simulator.state._local_molecular_info.num_atoms} local atoms."
         # )
 
+    metadata_dict = {
+        "world_size": world_size,
+        "systen_sizes": system_sizes,
+        "side_lengths": side_lengths,
+        "density": density,
+        "num_iterations": 100,
+    }
+    Timer.add_meta_data(metadata_dict)
     timing_data_json = Timer.json()
+
     # local_print(f"Aggregated timing data across all iterations: {timing_data_json}")
 
     cur_dir = os.path.dirname(os.path.abspath(__file__))
@@ -164,7 +188,6 @@ def create_and_run_experiment():
     #         simulator.sync_and_repartition()
 
     #     if step_num % sim_config.log_interval == 0:
-    #         simulator_state = simulator.state
     #         log_state(simulator_state, step_num)
 
 

@@ -3,97 +3,121 @@ import matplotlib.pyplot as plt
 import json
 import os
 import pandas as pd
-import numpy as np
+import json
+import glob
 
 
-def visualize_partition_timings(timing_data_json_path):
-    with open(timing_data_json_path, "r") as f:
-        data = json.load(f)
+def visualize_partition_timings():
 
-    keys = data.keys()
+    # ---------------------------------------------------------
+    # 1. Load and Parse the JSON Data
+    # ---------------------------------------------------------
+    # Find all JSON files matching your naming convention
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
 
-    ops = set([x.split(" - ")[0] for x in list(keys)])
+    results_dir = os.path.join(cur_dir, "results")
+    file_pattern = "single_layer_timing_data_*.json"
+    file_pattern = os.path.join(results_dir, file_pattern)
+    files = glob.glob(file_pattern)
 
-    for op in ops:
-        system_sizes = []
-        parsed_data = []
-        for key, metrics in data.items():
-            # Extract system size from the string key (e.g. "Partition - system size 1000" -> 1000)
-            sys_size = int(key.split("size ")[-1])
-            system_sizes.append(sys_size)
-            op_name = key.split(" - ")[0]
+    print(f"Found {len(files)} timing data files: {files}")
 
-            if op_name != op:
-                continue
+    data_records = []
 
-            # Exclude the first run because it's a CUDA warmup iteration
-            times = metrics["elapsed_times_ms"][5:]
-            avg_time = np.mean(times)
-            std_time = np.std(times)
-            print(
-                f"Processing key: {key}, extracted op: {op_name}, system size: {sys_size} atoms, ",
-                f"average time (excluding warmup): {avg_time:.2f} ms ± {std_time:.2f} ms (n={len(times)})",
-            )
+    for filepath in files:
+        with open(filepath, "r") as file:
+            data = json.load(file)
 
-            for t in times:
-                parsed_data.append(
-                    {
-                        "System Size": sys_size,
-                        "Execution Times (ms)": t,
-                    }
-                )
+            # Iterate through the dictionary keys
+            for key, val in data.items():
+                # Skip the meta_data block
+                if key == "meta_data":
+                    continue
 
-        # Convert to DataFrame and sort by system size so the bars are in order
-        df = pd.DataFrame(parsed_data)
-        df = df.sort_values(by="System Size")
+                # Extract the relevant fields
+                operation = val.get("operation")
+                system_size = val.get("system_size")
+                world_size = val.get("world_size")
 
-        # 2. Setup the plot
-        plt.figure(figsize=(9, 6))
-        sns.set_theme(style="whitegrid")  # Nice clean background
+                # We append EVERY elapsed time as its own row.
+                # This allows Seaborn to calculate variance/error bands automatically.
+                times = val.get("elapsed_times_ms", [])
+                if len(val.get("elapsed_times_ms", [])) > 20:
+                    times = times[10:]  # Skip the first 10 iterations as warmup
 
-        # 3. Create the bar plot
-        sns.lineplot(
-            data=df,
+                for time_ms in times:
+                    data_records.append(
+                        {
+                            "Operation": operation,
+                            "System Size": system_size,
+                            "World Size": world_size,
+                            "Time (ms)": time_ms,
+                        }
+                    )
+
+    # Convert to a pandas DataFrame for easy plotting
+    df = pd.DataFrame(data_records)
+    print(df)
+
+    # ---------------------------------------------------------
+    # 2. Generate Plots (One per Operation)
+    # ---------------------------------------------------------
+    # Set a clean visual theme
+    sns.set_theme(style="whitegrid")
+
+    # Get a list of all unique operations found in the data
+    operations = df["Operation"].dropna().unique()
+
+    for op in operations:
+        # Filter the dataframe for the current operation
+        op_df = df[df["Operation"] == op]
+
+        # Create a new figure for each operation
+        plt.figure(figsize=(10, 6))
+
+        # Plot the timing curves
+        # Seaborn automatically aggregates the multiple iterations into a mean line
+        # and adds a shaded confidence interval around it.
+        ax = sns.lineplot(
+            data=op_df,
             x="System Size",
-            y="Execution Times (ms)",
-            marker="o",  # Add a dot at each data point
-            markersize=12,
-            errorbar="sd",  # Automatically calculate and shade standard deviation
-            color="blue",
+            y="Time (ms)",
+            hue="World Size",
+            palette="tab10",  # Color palette for different world sizes
+            marker="o",  # Puts a dot at each data point
+            err_style="band",  # Shows the shaded variance (default is 95% CI)
         )
 
-        # 4. Enforce continuous proportional scaling
-        plt.xlim(
-            -1000, max(system_sizes) * 1.1
-        )  # Force the graph to show the scale from zero
-        plt.xticks(
-            system_sizes, rotation=90, fontsize=10
-        )  # Set x-ticks to be the system sizes
+        # ---------------------------------------------------------
+        # 3. Formatting the Axes (Crucial for System Sizes)
+        # ---------------------------------------------------------
+        # Because your system sizes jump from 100 to 10,000,000,
+        # a log-log scale is required to actually see the trends.
+        plt.xscale("log")
+        plt.yscale("log")
 
-        # 5. Formatting
-        if op == "Build Halo Maps":
-            plt.yscale(
-                "log"
-            )  # Use logarithmic scale for better visibility of differences
+        # Titles and Labels
+        plt.title(
+            f"Timing Trends: {op.replace('_', ' ').title()}", weight="bold", fontsize=14
+        )
+        plt.xlabel("System Size (Log Scale)", fontsize=12)
+        plt.ylabel("Execution Time in ms (Log Scale)", fontsize=12)
 
-        plt.title(f"{op} Time by System Size", fontsize=14, pad=15)
-        plt.ylabel("Average Time (ms)", fontsize=12)
-        plt.xlabel(
-            "System Size (# of atoms)",
-            fontsize=12,
+        # Clean up the legend
+        plt.legend(
+            title="World Size (GPUs)", bbox_to_anchor=(1.05, 1), loc="upper left"
         )
         plt.tight_layout()
 
-        figure_dir = os.path.dirname(timing_data_json_path)
-        figure_dir = os.path.join(figure_dir, "figures")
-        if not os.path.exists(figure_dir):
-            os.makedirs(figure_dir)
-
-        plt.savefig(os.path.join(figure_dir, f"cuda_timings_{op}.png"))
-        plt.close()
+        # Display the plot (or you can use plt.savefig(f"{op}_timing.png") to save them)
+        # plt.show()
+        figures_dir = os.path.join(cur_dir, "results", "figures")
+        if not os.path.exists(figures_dir):
+            os.makedirs(figures_dir)
+        plt.savefig(f"results/figures/{op}_timing.png")
+        print(f"Plot saved for operation: {op}")
 
 
 if __name__ == "__main__":
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    timing_data_json_path = os.path.join(cur_dir, "results", "timing_data.json")
-    visualize_partition_timings(timing_data_json_path)
+
+    visualize_partition_timings()
