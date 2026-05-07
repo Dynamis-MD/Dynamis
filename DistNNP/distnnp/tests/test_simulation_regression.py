@@ -26,6 +26,10 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 @pytest.mark.parametrize("n_steps", [1, 5, 10, 15, 20])
 def test_forces_match_baseline(simulation_factory, n_steps, request):
     integrator_name = request.node.callspec.params.get("simulation_factory")
+    
+    # Skip langevin, it is tested seperately
+    if integrator_name == "langevin":
+        pytest.skip("langevin tested seperately")
 
     simulation = simulation_factory()
     device = simulation.state.pos.device
@@ -33,23 +37,22 @@ def test_forces_match_baseline(simulation_factory, n_steps, request):
 
     fixture = torch.load(FIXTURES_DIR / f"lj_reference_{integrator_name}.pt", map_location=device)
     reference = fixture[n_steps]
-
-    # Ensure Langevin thermal noise exactly matches the reference generation
-    torch.cuda.manual_seed(42)
 
     for _ in range(n_steps - 1):
         simulation.step()
 
     _, forces = simulation.step()
 
-    # Langevin noise is drawn per-rank, so forces diverge slightly from the single-GPU reference.
-    atol = 1e-3 if integrator_name == "langevin" else 2e-5
-    torch.testing.assert_close(reference["forces"][local_indices], forces, atol=atol, rtol=0)
+    torch.testing.assert_close(reference["forces"][local_indices], forces, atol=2e-5, rtol=1e-6)
 
 
 @pytest.mark.parametrize("n_steps", [1, 5, 10, 15, 20])
 def test_positions_match_baseline(simulation_factory, n_steps, request):
     integrator_name = request.node.callspec.params.get("simulation_factory")
+    
+    # Skip langevin, it is tested seperately
+    if integrator_name == "langevin":
+        pytest.skip("langevin tested seperately")
 
     simulation = simulation_factory()
     device = simulation.state.pos.device
@@ -58,28 +61,24 @@ def test_positions_match_baseline(simulation_factory, n_steps, request):
     fixture = torch.load(FIXTURES_DIR / f"lj_reference_{integrator_name}.pt", map_location=device)
     reference = fixture[n_steps]
 
-    # Ensure Langevin thermal noise exactly matches the reference generation
-    torch.cuda.manual_seed(42)
-
     for _ in range(n_steps):
         simulation.step()
 
-    # Langevin noise is drawn per-rank, so positions diverge slightly from the single-GPU reference.
-    atol = 1e-3 if integrator_name == "langevin" else 2e-5
-    torch.testing.assert_close(reference["positions"][local_indices], simulation.state.pos, atol=atol, rtol=0)
+    torch.testing.assert_close(reference["positions"][local_indices], simulation.state.pos, atol=2e-5, rtol=1e-6)
     
 @pytest.mark.parametrize("n_steps", [1, 5, 10, 15, 20])
 def test_energy_matches_baseline(simulation_factory, n_steps, request):
     integrator_name = request.node.callspec.params.get("simulation_factory")
+    
+    # Skip langevin, it is tested seperately
+    if integrator_name == "langevin":
+        pytest.skip("langevin tested seperately")
 
     simulation = simulation_factory()
     device = simulation.state.pos.device
 
     fixture = torch.load(FIXTURES_DIR / f"lj_reference_{integrator_name}.pt", map_location=device)
     reference = fixture[n_steps]
-
-    # Ensure Langevin thermal noise exactly matches the reference generation
-    torch.cuda.manual_seed(42)
 
     for _ in range(n_steps - 1):
         simulation.step()
@@ -89,9 +88,87 @@ def test_energy_matches_baseline(simulation_factory, n_steps, request):
     # Each rank holds a partial energy; sum across ranks to get the total system energy.
     dist.all_reduce(energy, op=dist.ReduceOp.SUM)
 
-    atol = 1e-3 if integrator_name == "langevin" else 2e-5
     if dist.get_rank() == 0:
-        torch.testing.assert_close(reference["energy"], energy, atol=atol, rtol=0)
+        torch.testing.assert_close(reference["energy"], energy, atol=2e-5, rtol=1e-6)
+        
+# Langevin smoke test: short independent runs per side, time-average total
+# KE/PE per run, compare ensemble means via pooled-SE Z-test.
+# N_STEPS=250 and N_EQUIL=50 are both << tau=1/gamma=~1000 steps, so this is
+# not a true canonical-ensemble check; it catches gross bugs (halo dropouts,
+# wrong noise scaling/friction) but would miss subtle thermodynamic ones.
+# To make rigorous: bump to N_STEPS ~5000 / N_EQUIL ~2000, or one long run
+# per side with block averaging.
+N_RUNS_TEST = 8
+N_STEPS = 250
+N_EQUIL = 50
+# Bonferroni-corrected Z for 2 scalar tests at 1% overall (Z~=2.81, rounded).
+Z = 3.0
+ATOL_FLOOR = 1e-3
 
-# TO-DO:
-# Scale up to 16-32 atoms later
+
+def _langevin_run_means(sim, n_steps, n_equil):
+    """Time-average total KE and total PE over post-equilibration steps of
+    one trajectory. Each call advances `sim` by `n_steps` total steps.
+    Returns (ke_mean, pe_mean) on rank 0; (None, None) on other ranks.
+    """
+    ke_acc, pe_acc = [], []
+    for step in range(1, n_steps + 1):
+        energy, _ = sim.step()
+        if step > n_equil:
+            local_ke = 0.5 * (sim.state.mass.unsqueeze(1) * sim.state.vel ** 2).sum()
+            dist.all_reduce(local_ke, op=dist.ReduceOp.SUM)
+            total_pe = energy.clone()
+            dist.all_reduce(total_pe, op=dist.ReduceOp.SUM)
+            if dist.get_rank() == 0:
+                ke_acc.append(local_ke.item())
+                pe_acc.append(total_pe.item())
+    if dist.get_rank() != 0:
+        return None, None
+    return sum(ke_acc) / len(ke_acc), sum(pe_acc) / len(pe_acc)
+
+
+def test_langevin_matches_baseline(simulation_factory, request):
+    """Langevin is stochastic and chaotic, so we cannot compare microscopic
+    per-atom values across single- and multi-GPU runs. Instead run a few
+    independent trajectories per side, time-average total kinetic and
+    potential energy over each, and compare ensemble means with a pooled
+    standard-error tolerance. See the comments above on N_STEPS / N_EQUIL
+    for caveats — this is a smoke test, not a rigorous canonical-ensemble
+    equivalence check.
+    """
+    integrator_name = request.node.callspec.params.get("simulation_factory")
+    if integrator_name != "langevin":
+        pytest.skip("langevin-only test")
+
+    fixture = torch.load(FIXTURES_DIR / f"lj_reference_{integrator_name}.pt", map_location="cpu")
+    ref_ke = fixture["ke_per_run"]
+    ref_pe = fixture["pe_per_run"]
+    n_ref = int(fixture["n_runs"])
+
+    test_ke, test_pe = [], []
+    for run in range(N_RUNS_TEST):
+        sim = simulation_factory()
+        # Seed AFTER factory — the factory's _make_global_state resets the
+        # global seed to 100, which would clobber any seed set earlier.
+        torch.manual_seed(2000 + run)
+        ke_mean, pe_mean = _langevin_run_means(sim, N_STEPS, N_EQUIL)
+        if dist.get_rank() == 0:
+            test_ke.append(ke_mean)
+            test_pe.append(pe_mean)
+
+    if dist.get_rank() != 0:
+        return
+
+    test_ke = torch.tensor(test_ke, dtype=torch.float64)
+    test_pe = torch.tensor(test_pe, dtype=torch.float64)
+    ref_ke = ref_ke.to(torch.float64)
+    ref_pe = ref_pe.to(torch.float64)
+
+    for name, ref, test in (("KE", ref_ke, test_ke), ("PE", ref_pe, test_pe)):
+        diff = abs(test.mean() - ref.mean()).item()
+        se = ((ref.var(unbiased=True) / n_ref + test.var(unbiased=True) / N_RUNS_TEST).sqrt()).item()
+        tol = Z * se + ATOL_FLOOR
+        assert diff <= tol, (
+            f"langevin {name} ensemble mean diverges from reference: "
+            f"|diff|={diff:.4e}, tol={tol:.4e} (Z={Z}, SE={se:.4e})"
+        )

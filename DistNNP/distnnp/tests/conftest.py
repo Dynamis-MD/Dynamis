@@ -67,7 +67,7 @@ def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> Molec
     
     # Generate on CPU to ensure all ranks start with the SAME universe
     state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long)
-    state.atom_positions = torch.rand(num_atoms, 3) * 4.0
+    state.atom_positions = torch.rand(num_atoms, 3) * 8.0
     state.atom_velocities = torch.randn(num_atoms, 3) * 0.1
     
     # Now move the consistent data to the GPU
@@ -80,7 +80,7 @@ def _make_sim_config(cutoff: float, device: torch.device) -> SimulationConfig:
     cfg = SimulationConfig()
     cfg.cutoff = cutoff
     cfg.ghost_cutoff_buffer = 0.5
-    cfg.cell = torch.eye(3, device=device) * 4.0
+    cfg.cell = torch.eye(3, device=device) * 8.0
     cfg.pbc = torch.tensor([True, True, True], dtype=torch.bool, device=device)
     return cfg
 
@@ -126,8 +126,8 @@ def simulation_factory(request):
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 
-        # Step 1: Build MolecularInfo (3-atom system, fixed seed, same on all ranks)
-        molecular_info = _make_global_state(3, 100, device)
+        # Step 1: Build MolecularInfo (16-atom system, fixed seed, same on all ranks)
+        molecular_info = _make_global_state(16, 100, device)
 
         # Step 2: Build Simulation Config
         # Note; I'm not sure if 3.5 is a proper value here
