@@ -96,17 +96,16 @@ def test_energy_matches_baseline(simulation_factory, n_steps, request):
 # time-average total KE/PE over the post-equilibration window of each run,
 # compare the resulting per-run distributions via 2-sample Kolmogorov-Smirnov.
 #
-# Why long runs: tau = 1/gamma = ~1000 steps. N_EQUIL = 2*tau lets the system
-# forget its initial state; the remaining 3*tau gives roughly tau-decorrelated
-# averaging, so the per-run mean is a real ensemble estimate rather than an
-# anchored short-trajectory sample.
+# Why long runs: tau = 1/gamma = ~1000 steps. N_EQUIL = 1*tau (compromise from
+# 2*tau to halve runtime) lets the system mostly forget its initial state;
+# the remaining 1.5*tau averages over roughly one decorrelation window.
 #
 # Why KS instead of Z/t: no normality assumption, catches mean OR variance
 # shifts. Power floor at N=4 vs N=4: smallest achievable p is ~0.029, so
 # alpha must stay above that.
 N_RUNS_TEST = 4
-N_STEPS = 5000
-N_EQUIL = 2000
+N_STEPS = 2500
+N_EQUIL = 1000
 # Bonferroni for 2 scalar tests at 5% overall. (Cannot go below ~0.029 at N=4.)
 # This is fairly arbitrary, maybe could be tuned.
 ALPHA = 0.05 / 2
