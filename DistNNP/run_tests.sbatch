@@ -66,7 +66,7 @@ export CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL:-2}
 
 # Verify that requirements are pre-installed.
 echo "Verifying environment..."
-PACKAGES=("torch" "pytest" "distnnp_state" "distnnp_model" "distnnp_integrator" "distnnp")
+PACKAGES=("torch" "pytest" "scipy" "distnnp_state" "distnnp_model" "distnnp_integrator" "distnnp")
 for pkg in "${PACKAGES[@]}"; do
     if ! "${PYTHON}" -c "import ${pkg}" &>/dev/null; then
         echo "ERROR: Package '${pkg}' not found. Please run 'pip install -r requirements-dev.txt' manually."

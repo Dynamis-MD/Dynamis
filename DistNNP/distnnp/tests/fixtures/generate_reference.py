@@ -121,13 +121,14 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
     n_local = partition_info.local_atom_positions.shape[0]
 
     if integrator_name == "langevin":
-        # Reference for the langevin smoke test in test_simulation_regression.py:
-        # N_RUNS independent trajectories, time-average total KE/PE per run.
-        # See test file for caveats (N_STEPS << velocity correlation time).
+        # Reference for the langevin canonical-ensemble check in
+        # test_simulation_regression.py: N_RUNS long trajectories,
+        # time-average total KE/PE over the post-equilibration window.
+        # tau = 1/gamma = ~1000 steps; N_EQUIL=2*tau, averaging over 3*tau.
         # Knobs must match the test side.
-        N_RUNS = 8
-        N_STEPS = 250
-        N_EQUIL = 50
+        N_RUNS = 4
+        N_STEPS = 5000
+        N_EQUIL = 2000
 
         initial_pos = partition_info.local_atom_positions.clone()
         initial_vel = molecular_info.atom_velocities.clone()
