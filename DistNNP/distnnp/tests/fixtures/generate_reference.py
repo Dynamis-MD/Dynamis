@@ -1,7 +1,7 @@
 """
 generate_reference.py — generates reference fixture data for regression tests.
 
-Reference system: 3-atom LJ argon in a 4x4x4 box, fixed seed=100.
+Reference system: 16-atom LJ argon in an 8x8x8 box, fixed seed=100.
 Uses the same setup as conftest.py simulation_factory (dt=1e-3).
 
 Run via:
@@ -14,13 +14,14 @@ For deterministic integrators (euler, verlet) each snapshot is:
      "forces":    Tensor(n_atoms, 3),
      "energy":    Tensor()}
 
-For langevin (stochastic) the fixture is built from N_RUNS independent
-trajectories and each snapshot stores per-element mean and std so the
-regression test can apply a std-dev-based tolerance:
-    {"positions_mean", "positions_std",
-     "forces_mean",    "forces_std",
-     "energy_mean",    "energy_std",
-     "n_runs"}
+For langevin (stochastic) the fixture stores per-run time-averaged total
+KE and PE from N_RUNS independent trajectories, used by the KS-based
+regression test:
+    {"ke_per_run": Tensor(N_RUNS,),
+     "pe_per_run": Tensor(N_RUNS,),
+     "n_runs":     int,
+     "n_steps":    int,
+     "n_equil":    int}
 
 One file is generated per integrator (euler, verlet, langevin).
 """
@@ -49,7 +50,7 @@ OUTPUT_DIR = Path(__file__).parent
 
 def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> MolecularInfo:
     """
-    Build a MolecularInfo with random positions/velocities in a 4x4x4 box,
+    Build a MolecularInfo with random positions/velocities in an 8x8x8 box,
     using a fixed seed so every rank gets the same initial universe.
     """
     torch.manual_seed(seed)
@@ -124,7 +125,7 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
         # Reference for the langevin canonical-ensemble check in
         # test_simulation_regression.py: N_RUNS long trajectories,
         # time-average total KE/PE over the post-equilibration window.
-        # tau = 1/gamma = ~1000 steps; N_EQUIL=2*tau, averaging over 3*tau.
+        # tau = 1/gamma = ~1000 steps; N_EQUIL=1*tau, averaging over 1.5*tau.
         # Knobs must match the test side.
         N_RUNS = 4
         N_STEPS = 2500

@@ -58,7 +58,7 @@ def dist_init():
 
 def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> MolecularInfo:
     """
-    Create a MolecularInfo with random positions in a 10x10x10 box.
+    Create a MolecularInfo with random positions in an 8x8x8 box.
     We make this with a fixed seed but set that fixed seed as a parameter.
     """
     torch.manual_seed(seed)
