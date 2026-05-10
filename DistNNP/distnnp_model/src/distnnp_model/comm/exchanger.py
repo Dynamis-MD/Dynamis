@@ -15,8 +15,10 @@ class Exchanger(ABC):
     @abstractmethod
     def setup_exchanger(
         self,
-        local_features: torch.Tensor,
+        n_local: int,
+        feature_dim:int,
         partition_info: PartitionMessagePassingInfo,
+        device: torch.device
     ):
         """Helper function to setup the feature exchanger for testing.
 
@@ -185,8 +187,10 @@ class GPUDirectExchanger(Exchanger):
 
     def setup_exchanger(
         self,
-        local_features: torch.Tensor,
+        n_local: int,
+        feature_dim:int,
         partition_info: PartitionMessagePassingInfo,
+        device: torch.device
     ):
         """Helper function to setup the feature exchanger for testing.
 
@@ -203,9 +207,6 @@ class GPUDirectExchanger(Exchanger):
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 
-        n_local = local_features.shape[0]
-        F = local_features.shape[1]
-
         total_recv = int(partition_info.global_send_recv_matrix.sum(dim=0)[rank].item())
         total_send = int(partition_info.global_send_recv_matrix.sum(dim=1)[rank].item())
 
@@ -213,8 +214,8 @@ class GPUDirectExchanger(Exchanger):
         recv_offsets = partition_info.recv_offsets
 
         # --- Allocate IPC buffers ---
-        x_buffer = FeatureExchanger.allocate_ipc_buffer(n_local + total_recv, F, rank)
-        grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(total_send, F, rank)
+        x_buffer = FeatureExchanger.allocate_ipc_buffer(n_local + total_recv, feature_dim, rank)
+        grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(total_send, feature_dim, rank)
 
         # --- Exchange IPC handles via NCCL broadcast ---
         x_handle = self.exchanger.export_ipc_handle(x_buffer)
@@ -222,18 +223,18 @@ class GPUDirectExchanger(Exchanger):
 
         handle_size = len(x_handle)
         x_handle_tensor = torch.tensor(
-            x_handle, dtype=torch.uint8, device=local_features.device
+            x_handle, dtype=torch.uint8, device=device
         )
         grad_handle_tensor = torch.tensor(
-            grad_handle, dtype=torch.uint8, device=local_features.device
+            grad_handle, dtype=torch.uint8, device=device
         )
 
         all_x_handles_tensor = [
-            torch.zeros(handle_size, dtype=torch.uint8, device=local_features.device)
+            torch.zeros(handle_size, dtype=torch.uint8, device=device)
             for _ in range(world_size)
         ]
         all_grad_handles_tensor = [
-            torch.zeros(handle_size, dtype=torch.uint8, device=local_features.device)
+            torch.zeros(handle_size, dtype=torch.uint8, device=device)
             for _ in range(world_size)
         ]
 
@@ -246,22 +247,22 @@ class GPUDirectExchanger(Exchanger):
         # Gather recv_offsets and num_local from all ranks
 
         send_local_indices = torch.zeros(
-            total_send, dtype=torch.int64, device=local_features.device
+            total_send, dtype=torch.int64, device=device
         )
 
         all_recv_offsets_list = [
-            torch.zeros(world_size + 1, dtype=torch.int64, device=local_features.device)
+            torch.zeros(world_size + 1, dtype=torch.int64, device=device)
             for _ in range(world_size)
         ]
         dist.all_gather(all_recv_offsets_list, recv_offsets)
         all_recv_offsets = torch.stack(all_recv_offsets_list)  # [W, W+
         all_num_local_list = [
-            torch.zeros(1, dtype=torch.int64, device=local_features.device)
+            torch.zeros(1, dtype=torch.int64, device=device)
             for _ in range(world_size)
         ]
         dist.all_gather(
             all_num_local_list,
-            torch.tensor([n_local], dtype=torch.int64, device=local_features.device),
+            torch.tensor([n_local], dtype=torch.int64, device=device),
         )
         all_num_local = torch.cat(all_num_local_list)  # [W]
 
@@ -277,7 +278,7 @@ class GPUDirectExchanger(Exchanger):
             all_recv_offsets,
             all_num_local,
             n_local,
-            F,
+            feature_dim,
             rank,
             world_size,
         )
