@@ -13,7 +13,6 @@ import torch
 import torch.distributed as dist
 from typing import Union, Literal, Optional
 
-
 ABSTRACT_PARTITIONERS = Union[
     SFCPartitioner, SimpleSpatialPartitioner, KDTreePartitioner
 ]
@@ -57,6 +56,7 @@ class SimState:
         self._state.sim_config = simulation_config
         self._state.global_molecular_info = molecular_system
         self._state.local_partition_info = partition_info
+        self._state.local_molecular_info = self._local_molecular_info
 
     def setup_mass_and_forces(self, partition_info, molecular_system):
         local_molecular_info = MolecularInfo()
