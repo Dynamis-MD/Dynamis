@@ -299,11 +299,11 @@ class GPUDirectExchanger(Exchanger):
         # --- Setup push-sync counter ---
         sync_handle = self.exchanger.create_and_export_sync_handle()
         sync_handle_tensor = torch.tensor(
-            sync_handle, dtype=torch.uint8, device=local_features.device
+            sync_handle, dtype=torch.uint8, device=device
         )
         all_sync_handles_tensor = [
             torch.zeros(
-                len(sync_handle), dtype=torch.uint8, device=local_features.device
+                len(sync_handle), dtype=torch.uint8, device=device
             )
             for _ in range(world_size)
         ]
