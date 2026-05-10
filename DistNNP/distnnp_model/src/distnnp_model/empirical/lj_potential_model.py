@@ -96,12 +96,13 @@ class LennardJonesPotentialModel(DistNNPModel):
         self.atom_type_exchanger.setup_exchanger(
             feature_dim=1, partition_info=partition_info, device=device
         )
+        self.global_index_exchanger.setup_exchanger(
+            feature_dim=1, partition_info=partition_info, device=device
+        )
 
     def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
         prev_local_positions = distributed_state.local_molecular_info.atom_positions
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
-        local_atom_types = distributed_state.local_molecular_info.atom_types
-        local_atom_types = local_atom_types.reshape(-1, 1)
         positions: torch.Tensor = FeaturePushToExchange.apply(
             local_positions, distributed_state, self.position_exchanger
         )  # type: ignore
@@ -128,7 +129,7 @@ class LennardJonesPotentialModel(DistNNPModel):
 
         # Construct the radius graph with PBC using the local positions (including boundary atoms)
 
-        sim_config = distributed_state.simulation_config
+        sim_config = distributed_state.sim_config
         # Ensure autograd is not tracking the radius graph construction
         n_atoms = positions.shape[0]
         with torch.no_grad():
