@@ -98,12 +98,14 @@ class Simulator:
         integrator: POSSIBLE_INTEGRATOR_TYPES,
         dist_environment: DistEnvironment,
         config: SimulatorConfig,
+        device,
     ):
         self.model = model
         check_integrator(integrator)
         self.integrator = integrator
         self.config = config
         self.dist_environment = dist_environment
+        self.device = device
 
     def _get_partitioner(self) -> POSSIBLE_PARTITIONERS_TYPES:
         partition_algorithm = self.config.partition_algorithm
@@ -145,11 +147,11 @@ class Simulator:
             partitioner=self._get_partitioner(),
             simulation_config=self._get_simulation_config(),
             distributed_environment=self._get_dist_environment(),
-            device=device,
+            device=device if device else self.device,
         )
         # Once the state is initialized, we can initialize the model buffers based on the local partition info
 
-        self.model.initialize_buffers(self.state.parition_info)
+        self.model.initialize_buffers(self.state.parition_info, device=device if device else self.device)
 
     def sync_and_repartition(self) -> None:
         self.state.sync_and_repartition()
