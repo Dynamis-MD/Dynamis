@@ -52,12 +52,11 @@ def test_distnnp_io():
     positions = torch.concat((values, values), dim=0)
     positions = positions.reshape([6, 3]).to(torch.float32)
 
-    writer = TrajectoryWriter(0, b"1234", "author", "./")
+    with TrajectoryWriter(0, b"1234", "author", "./") as writer:
+        env = writer.initialize("tests/xyz.xyz", 1.0, 1)
 
-    env = writer.initialize("tests/xyz.xyz", 1.0, 1)
-
-    writer.update_atom_counts([6])
-    writer.write_frame(0, env.atom_vertex_numbers, env.atom_positions, env.atom_velocities)
+        writer.update_atom_counts([6])
+        writer.write_frame(0, env.atom_vertex_numbers, env.atom_positions, env.atom_velocities)
 
     writer2 = TrajectoryWriter(1, b"1234", "author", "./")
     env2 = writer2.initialize("./trajectory.distnnp", 1.0, 1)

@@ -116,7 +116,11 @@ PYBIND11_MODULE(distnnp_state_impl, m)
              py::arg("frame_idx"),
              py::arg("indices"),
              py::arg("positions"),
-             py::arg("velocities"));
+             py::arg("velocities"))
+        .def("__enter__", [](distnnp_state::TrajectoryWriter &self) {
+             return &self;
+        })
+        .def("__exit__", [](distnnp_state::TrajectoryWriter &self, py::args args) {});
 
     m.def("radius_graph_pbc", &radius_graph_pbc,
           "CUDA cell-list radius graph with selective PBC tiling",

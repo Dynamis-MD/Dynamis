@@ -99,7 +99,8 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
 
     // run_id
     std::string r = run_id;
-    memcpy(buf.data() + offset, r.data(), 16);
+    memcpy(buf.data() + offset, r.data(), r.size());
+    memset(buf.data() + offset + r.size(), 0, 16 - r.size());
     offset += 16;
 
     // author
@@ -302,29 +303,31 @@ MolecularInfo TrajectoryWriter::load_distnnp_file(std::string distnnp_file_name)
 
     // ids
     
+    uint32_t block_size = atoms.num_atoms * sizeof(uint64_t);
     // offset is the start of the frame
     std::vector<uint64_t> ids(atoms.num_atoms);
-    n = pread(dist_fd, ids.data(), ids.size(), loc);
+    n = pread(dist_fd, ids.data(), block_size, loc);
     if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-    if (n != ids.size()) throw std::runtime_error("unexpected end of file");
+    if (n != block_size) throw std::runtime_error("unexpected end of file");
     atoms.atom_vertex_numbers = torch::from_blob(ids.data(), {atoms.num_atoms}, torch::kUInt64).clone();
 
-    loc += ids.size(); // new loc is at the end of this chunk of data
+    loc += block_size; // new loc is at the end of this chunk of data
 
     // positions
     // resize to 3 floats per atom
+    block_size = atoms.num_atoms * 3 * sizeof(float);
     std::vector<float> attribs(atoms.num_atoms * 3);
-    n = pread(dist_fd, attribs.data(), attribs.size(), loc);
+    n = pread(dist_fd, attribs.data(), block_size, loc);
     if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-    if (n != attribs.size()) throw std::runtime_error("unexpected end of file");
+    if (n != block_size) throw std::runtime_error("unexpected end of file");
     atoms.atom_positions = torch::from_blob(attribs.data(), {atoms.num_atoms, 3}).clone();
 
-    loc += attribs.size(); // new loc is at the end of this chunk of data
+    loc += block_size; // new loc is at the end of this chunk of data
 
     // velocities
-    n = pread(dist_fd, attribs.data(), attribs.size(), loc);
+    n = pread(dist_fd, attribs.data(), block_size, loc);
     if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-    if (n != attribs.size()) throw std::runtime_error("unexpected end of file");
+    if (n != block_size) throw std::runtime_error("unexpected end of file");
     atoms.atom_velocities = torch::from_blob(attribs.data(), {atoms.num_atoms, 3}).clone();
 
     return atoms;
