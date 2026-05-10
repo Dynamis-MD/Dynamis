@@ -7,7 +7,8 @@ from distnnp_integrator._data_check import (
     check_shapes_match,
 )
 from distnnp_integrator.integrator import DistNNPIntegrator
-from distnnp_state import SimState
+from distnnp_state import DistNNPState
+from distnnp_model import DistNNPModel
 
 
 class Langevin(DistNNPIntegrator):
@@ -73,7 +74,7 @@ class Langevin(DistNNPIntegrator):
         check_shapes_match(vel, frc, noise)
         self.cpp_integrator.halfstep2(vel, frc, mass, noise, self.gamma, self.kT, dt)
 
-    def step(self, state: SimState, model, dt=None):
+    def step(self, dist_state: DistNNPState, model: DistNNPModel, dt=None):
         """
         Update positions and velocities based on the Langevin integration method (BBK scheme).
 
@@ -82,24 +83,37 @@ class Langevin(DistNNPIntegrator):
             model (DistNNPModel): The potential model used to compute forces based on the current state.
             dt (float, optional): Optional override for the time step size.
         """
+
+        state = dist_state.local_molecular_info
         if dt is not None:
             step_size = dt
         else:
             step_size = self.dt
 
         # Langevin requires normally distributed noise for thermal kicks
-        noise1 = torch.randn_like(state.vel)
+        noise1 = torch.randn_like(state.atom_velocities)
 
-        energy, new_forces = model(state)
-        state.forces = new_forces
+        energy, new_forces = model(dist_state)
+        state.atom_forces = new_forces
         self.halfstep1_(
-            state.pos, state.vel, state.forces, state.mass, noise1, step_size
+            state.atom_positions,
+            state.atom_velocities,
+            state.atom_forces,
+            state.atom_masses,
+            noise1,
+            step_size,
         )
 
         # Recompute forces at new positions
-        energy, new_forces = model(state)
-        state.forces = new_forces
+        energy, new_forces = model(dist_state)
+        state.atom_forces = new_forces
 
         # Second random noise draw for the second half-step
-        noise2 = torch.randn_like(state.vel)
-        self.halfstep2_(state.vel, state.forces, state.mass, noise2, step_size)
+        noise2 = torch.randn_like(state.atom_velocities)
+        self.halfstep2_(
+            state.atom_velocities,
+            state.atom_forces,
+            state.atom_masses,
+            noise2,
+            step_size,
+        )

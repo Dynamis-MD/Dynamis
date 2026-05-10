@@ -52,17 +52,17 @@ python_add_library(distnnp_state_impl
     MODULE
     WITH_SOABI
     src/distnnp_state_bindings.cpp
-    src/partition/simple_spatial_partitioner.cpp
-    src/partition/kdtree_partitioner.cpp
-    src/partition/kdtree_cuda_.cpp
-    src/partition/kdtree_cuda.cu
-    src/partition/sfc_partitioner.cpp
-    src/partition/sfc_cuda_.cpp
-    src/partition/sfc_cuda.cu
-    src/partition/build_halo_maps.cpp
-    src/radius_pbc/radius_pbc_.cpp
-    src/radius_pbc/radius_pbc.cu
-    src/trajectory_writer.cpp
+    src/csrc/partition/simple_spatial_partitioner.cpp
+    src/csrc/partition/kdtree_partitioner.cpp
+    src/csrc/partition/kdtree_cuda_.cpp
+    src/csrc/partition/kdtree_cuda.cu
+    src/csrc/partition/sfc_partitioner.cpp
+    src/csrc/partition/sfc_cuda_.cpp
+    src/csrc/partition/sfc_cuda.cu
+    src/csrc/partition/build_halo_maps.cpp
+    src/csrc/radius_pbc/radius_pbc_.cpp
+    src/csrc/radius_pbc/radius_pbc.cu
+    src/csrc/trajectory_writer.cpp
 )
 
 target_include_directories(distnnp_state_impl

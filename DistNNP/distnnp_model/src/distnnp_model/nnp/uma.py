@@ -4,9 +4,10 @@ from distnnp_model.potential import DistNNPModel
 from distnnp_state import DistNNPState, radius_graph_pbc_cuda
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 
+
 class UMAModel(eSCNMDMoeBackbone, DistNNPModel):
     def __init__(
-        self, 
+        self,
         num_experts: int = 8,
         moe_dropout: float = 0.0,
         use_global_embedding: bool = False,  # obsolete
@@ -39,9 +40,9 @@ class UMAModel(eSCNMDMoeBackbone, DistNNPModel):
 
     def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
         # 1. Setup initial local tensors
-        prev_local_positions = distributed_state.local_partition_info.local_atom_positions
+        prev_local_positions = distributed_state.local_molecular_info.atom_positions
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
-        local_atom_types = distributed_state.local_partition_info.partition_indices
+        local_atom_types = distributed_state.local_molecular_info.atom_types
 
         n_local_atoms = local_positions.shape[0]
 
@@ -49,7 +50,7 @@ class UMAModel(eSCNMDMoeBackbone, DistNNPModel):
         boundary_positions = FeaturePushToExchange.apply(
             local_positions, distributed_state, self._feature_exchanger
         )
-        
+
         boundary_atom_types = FeaturePushToExchange.apply(
             local_atom_types.float(), distributed_state, self._feature_exchanger
         ).long()
@@ -60,7 +61,7 @@ class UMAModel(eSCNMDMoeBackbone, DistNNPModel):
         atom_types = torch.cat([local_atom_types, boundary_atom_types], dim=0)
 
         # 4. Construct the radius graph
-        sim_config = distributed_state.simulation_config
+        sim_config = distributed_state.sim_config
         with torch.no_grad():
             edge_index, _, _ = radius_graph_pbc_cuda(
                 data=type(
@@ -92,13 +93,13 @@ class UMAModel(eSCNMDMoeBackbone, DistNNPModel):
                 boundary_features = FeaturePushToExchange.apply(
                     x, distributed_state, self._feature_exchanger
                 )
-                
+
                 # Re-concatenate the synchronized features for the next layer
                 x = torch.cat([x, boundary_features], dim=0)
 
         # Compute total local energy using only the local atoms
         energy = self.output_head(x[:n_local_atoms])
-        
+
         energy.backward()
         assert (
             local_positions.grad is not None

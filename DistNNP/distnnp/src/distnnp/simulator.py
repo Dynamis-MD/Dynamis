@@ -2,11 +2,21 @@ from distnnp_state import (
     SimpleSpatialPartitioner,
     KDTreePartitioner,
     SFCPartitioner,
+    SFCCurveType,
+    DistEnvironment,
+    MolecularInfo,
+    SimulationConfig,
 )
 from distnnp_model import DistNNPModel
-from distnnp_state import DistNNPState, DistEnvironment, SimState
-from distnnp_integrator import Euler, Verlet, Langevin, AVALIABLE_INTEGRATORS
-from typing import Union, Literal
+from distnnp.simulatorState import SimState
+from distnnp_integrator import (
+    Euler,
+    Verlet,
+    Langevin,
+    DistNNPIntegrator,
+    AVALIABLE_INTEGRATORS,
+)
+from typing import Union, Literal, Optional
 from dataclasses import dataclass
 import torch
 from torch import distributed as dist
@@ -23,7 +33,7 @@ VALID_PARTITION_ALGORITHMS = ["simple", "kdtree", "sfc_morton", "sfc_hilbert"]
 
 # Typing check if integrator is one of the available integrators
 def check_integrator(integrator):
-    if integrator not in AVALIABLE_INTEGRATORS:
+    if type(integrator) not in [Euler, Verlet, Langevin]:
         raise ValueError(
             f"Integrator {integrator} is not available. Choose from {AVALIABLE_INTEGRATORS}."
         )
@@ -36,6 +46,9 @@ class SimulatorConfig:
     total_steps: int = 1000  # Total number of MD steps to run
 
     # Spatial decomposition
+    side_length_angstrom: float = (
+        10.0  # Initial side length of spatial partitioning cells (Å)
+    )
     cutoff_angstrom: float = 6.0  # NNP neighbour cutoff radius (Å)
     ghost_buffer_angstrom: float = 0.5  # Extra radius for ghost atom selection (Å)
     # Valid values: "sfc_morton" | "sfc_hilbert" | "kdtree" | "simple"
@@ -89,53 +102,74 @@ class Simulator:
         self,
         model: DistNNPModel,
         integrator: POSSIBLE_INTEGRATOR_TYPES,
+        dist_environment: DistEnvironment,
         config: SimulatorConfig,
+        device,
     ):
         self.model = model
         check_integrator(integrator)
-        self.integrator = integrator
+        self.integrator: DistNNPIntegrator = integrator
         self.config = config
+        self.dist_environment = dist_environment
+        self.device = device
 
-        self.initialize_distributed()
-
-    def initialize_distributed(self):
-        if not dist.is_initialized():
-            dist.init_process_group(backend=self.config.backend)
-
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "NO GPUs detected. CUDA is required for distributed simulation."
+    def _get_partitioner(self) -> POSSIBLE_PARTITIONERS_TYPES:
+        partition_algorithm = self.config.partition_algorithm
+        if partition_algorithm not in VALID_PARTITION_ALGORITHMS:
+            raise ValueError(
+                f"Partition algorithm {partition_algorithm} is not valid. Choose from {VALID_PARTITION_ALGORITHMS}."
+            )
+        if partition_algorithm == "simple":
+            return SimpleSpatialPartitioner()
+        elif partition_algorithm == "kdtree":
+            return KDTreePartitioner()
+        elif partition_algorithm == "sfc_morton":
+            return SFCPartitioner(curve_type=SFCCurveType.Morton)
+        elif partition_algorithm == "sfc_hilbert":
+            return SFCPartitioner(curve_type=SFCCurveType.Hilbert)
+        else:
+            raise ValueError(
+                f"Partition algorithm {partition_algorithm} is not recognized."
             )
 
-        num_gpus_per_node = max(
-            torch.cuda.device_count(), int(os.getenv("PROCS_PER_NODE", 0))
+    def _get_dist_environment(self) -> DistEnvironment:
+        return self.dist_environment
+
+    def _get_simulation_config(self) -> SimulationConfig:
+        sim_config = SimulationConfig()
+
+        sim_config.cutoff = self.config.cutoff_angstrom
+        sim_config.ghost_cutoff_buffer = self.config.ghost_buffer_angstrom
+        sim_config.cell = torch.eye(3) * self.config.side_length_angstrom
+        sim_config.pbc = torch.tensor([True, True, True], dtype=torch.bool)
+
+        return sim_config
+
+    def initialize_simulator_state(
+        self, molecular_system: MolecularInfo, device: Optional[torch.device] = None
+    ) -> None:
+        self.state = SimState(
+            molecular_system=molecular_system,
+            partitioner=self._get_partitioner(),
+            simulation_config=self._get_simulation_config(),
+            distributed_environment=self._get_dist_environment(),
+            device=device if device else self.device,
+        )
+        # Once the state is initialized, we can initialize the model buffers based on the local partition info
+
+        self.model.initialize_buffers(
+            self.state.parition_info, device=device if device else self.device
         )
 
-        local_rank = dist.get_rank() % num_gpus_per_node if num_gpus_per_node > 0 else 0
-        local_device = torch.device(f"cuda:{local_rank}")
-
-        torch.cuda.set_device(local_device)
-
-        global_rank = dist.get_rank()
-        world_size = dist.get_world_size()
-        num_nodes = (world_size + num_gpus_per_node - 1) // num_gpus_per_node
-
-        self.local_device = local_device
-        self.global_rank = global_rank
-        self.world_size = world_size
-
-        self.dist_env = DistEnvironment()
-        self.dist_env.global_rank = global_rank
-        self.dist_env.world_size = world_size
-        self.dist_env.gpus_per_node = num_gpus_per_node
-        self.dist_env.local_rank = local_rank
-        self.dist_env.num_nodes = num_nodes
-
-    def setup(self, file_path: str) -> None:
-        pass
+    def sync_and_repartition(self, device: Optional[torch.device] = None) -> None:
+        self.state.sync_and_repartition()
+        # TODO: ADD appropriate barriers/synchronization if needed here
+        self.model.initialize_buffers(
+            self.state.parition_info, device=device if device else self.device
+        )
 
     def _set_state(self, state: SimState):
         self.state = state
 
     def step(self, step_size: float):
-        self.integrator.step(self.state, self.model, step_size)
+        self.integrator.step(self.state._state, self.model, step_size)

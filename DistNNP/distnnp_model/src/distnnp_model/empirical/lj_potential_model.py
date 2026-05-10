@@ -1,10 +1,15 @@
 from distnnp_model.potential import DistNNPModel
 import torch
 import torch.nn.functional as F
-from distnnp_state import radius_graph_pbc_cuda, SimState
+from distnnp_state import (
+    radius_graph_pbc_cuda,
+    DistNNPState,
+    PartitionMessagePassingInfo,
+)
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 from distnnp_model.comm.exchanger import Exchanger, GPUDirectExchanger
 from typing import Optional
+import torch.distributed as dist
 
 
 def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma):
@@ -77,19 +82,29 @@ class LennardJonesPotentialModel(DistNNPModel):
             GPUDirectExchanger() if exchanger is None else exchanger
         )
 
-    def __call__(self, distributed_state: SimState, *args, **kwargs):
-        prev_local_positions = (
-            distributed_state.local_partition_info.local_atom_positions
+    def initialize_buffers(
+        self, partition_info: PartitionMessagePassingInfo, device
+    ) -> None:
+        # For this simple LJ model, we don't have any learnable parameters or buffers that depend on the partitioning
+        # However, if we wanted to, we could initialize any necessary buffers here based on the partition_info
+        self.position_exchanger.setup_exchanger(
+            feature_dim=3, partition_info=partition_info, device=device
         )
-        local_positions = prev_local_positions.clone().detach().requires_grad_(True)
-        local_atom_types = distributed_state.local_partition_info.partition_indices
+        self.atom_type_exchanger.setup_exchanger(
+            feature_dim=1, partition_info=partition_info, device=device
+        )
 
+    def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
+        prev_local_positions = distributed_state.local_molecular_info.atom_positions
+        local_positions = prev_local_positions.clone().detach().requires_grad_(True)
+        local_atom_types = distributed_state.local_molecular_info.atom_types
+        local_atom_types = local_atom_types.reshape(-1, 1)
         positions: torch.Tensor = FeaturePushToExchange.apply(
             local_positions, distributed_state, self.position_exchanger
         )  # type: ignore
 
         with torch.no_grad():
-            atom_types = FeaturePushToExchange.forward(
+            atom_types = FeaturePushToExchange.apply(
                 local_atom_types.float(), distributed_state, self.atom_type_exchanger
             ).long()  # type: ignore
 

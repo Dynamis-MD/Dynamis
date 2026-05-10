@@ -11,6 +11,8 @@ namespace distnnp_state
         torch::Tensor atom_types;         // Tensor of shape [num_atoms] containing atom types
         torch::Tensor atom_positions;     // Tensor of shape [num_atoms, 3] containing atomic positions
         torch::Tensor atom_velocities;    // Tensor of shape [num_atoms, 3] containing atomic velocities
+        torch::Tensor atom_forces;        // Tensor of shape [num_atoms, 3] containing atomic forces
+        torch::Tensor atom_masses;        // Tensor of shape [num_atoms] containing atomic masses
         torch::Tensor edge_counts; // [num_atoms], optional per-atom edge cost for weighted partitioning. Undefined = unweighted.
     };
 
@@ -38,8 +40,6 @@ namespace distnnp_state
 
         // --- Partition results ---
         torch::Tensor partition_indices;        // [num_local] global atom indices for this rank
-        torch::Tensor local_atom_positions;     // [num_local, 3]
-        torch::Tensor local_atom_velocities;    // [num_local, 3]
         torch::Tensor global_send_recv_matrix;  // [world_size, world_size] — only row[rank] is filled locally; needs all-reduce for full view
 
         // --- Halo communication maps (CSR, push-only) ---
@@ -67,8 +67,10 @@ namespace distnnp_state
         // Molecular system information
         MolecularInfo global_molecular_info; // Contains global atom information for the entire system
 
+        MolecularInfo local_molecular_info; // Contains local atom information for this partition
+
         // Partitioned data information
-        PartitionMessagePassingInfo local_partition_info; // Contains local atom information for this partition
+        PartitionMessagePassingInfo local_partition_info; // Contains local atom communication information for this partition
 
     };
 
