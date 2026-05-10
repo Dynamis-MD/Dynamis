@@ -9,7 +9,13 @@ from distnnp_state import (
 )
 from distnnp_model import DistNNPModel
 from distnnp.simulatorState import SimState
-from distnnp_integrator import Euler, Verlet, Langevin, AVALIABLE_INTEGRATORS
+from distnnp_integrator import (
+    Euler,
+    Verlet,
+    Langevin,
+    DistNNPIntegrator,
+    AVALIABLE_INTEGRATORS,
+)
 from typing import Union, Literal, Optional
 from dataclasses import dataclass
 import torch
@@ -102,7 +108,7 @@ class Simulator:
     ):
         self.model = model
         check_integrator(integrator)
-        self.integrator = integrator
+        self.integrator: DistNNPIntegrator = integrator
         self.config = config
         self.dist_environment = dist_environment
         self.device = device
@@ -151,15 +157,19 @@ class Simulator:
         )
         # Once the state is initialized, we can initialize the model buffers based on the local partition info
 
-        self.model.initialize_buffers(self.state.parition_info, device=device if device else self.device)
+        self.model.initialize_buffers(
+            self.state.parition_info, device=device if device else self.device
+        )
 
-    def sync_and_repartition(self) -> None:
+    def sync_and_repartition(self, device: Optional[torch.device] = None) -> None:
         self.state.sync_and_repartition()
         # TODO: ADD appropriate barriers/synchronization if needed here
-        self.model.initialize_buffers(self.state.parition_info)
+        self.model.initialize_buffers(
+            self.state.parition_info, device=device if device else self.device
+        )
 
     def _set_state(self, state: SimState):
         self.state = state
 
     def step(self, step_size: float):
-        self.integrator.step(self.state.local_state, self.model, step_size)
+        self.integrator.step(self.state._state, self.model, step_size)

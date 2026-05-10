@@ -110,6 +110,7 @@ def create_and_run_experiment():
             integrator=integrator,
             dist_environment=torch_distributed_env.dist_env,
             config=sim_config,
+            device=device,
         )
 
         partitioner = simulator._get_partitioner()

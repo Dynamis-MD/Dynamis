@@ -7,7 +7,8 @@ from distnnp_integrator._data_check import (
     check_shapes_match,
 )
 from distnnp_integrator.integrator import DistNNPIntegrator
-from distnnp_state import MolecularInfo
+from distnnp_state import DistNNPState
+from distnnp_model import DistNNPModel
 
 
 class Langevin(DistNNPIntegrator):
@@ -73,7 +74,7 @@ class Langevin(DistNNPIntegrator):
         check_shapes_match(vel, frc, noise)
         self.cpp_integrator.halfstep2(vel, frc, mass, noise, self.gamma, self.kT, dt)
 
-    def step(self, state: MolecularInfo, model, dt=None):
+    def step(self, dist_state: DistNNPState, model: DistNNPModel, dt=None):
         """
         Update positions and velocities based on the Langevin integration method (BBK scheme).
 
@@ -82,6 +83,8 @@ class Langevin(DistNNPIntegrator):
             model (DistNNPModel): The potential model used to compute forces based on the current state.
             dt (float, optional): Optional override for the time step size.
         """
+
+        state = dist_state.local_molecular_info
         if dt is not None:
             step_size = dt
         else:
@@ -90,7 +93,7 @@ class Langevin(DistNNPIntegrator):
         # Langevin requires normally distributed noise for thermal kicks
         noise1 = torch.randn_like(state.atom_velocities)
 
-        energy, new_forces = model(state)
+        energy, new_forces = model(dist_state)
         state.atom_forces = new_forces
         self.halfstep1_(
             state.atom_positions,
@@ -102,7 +105,7 @@ class Langevin(DistNNPIntegrator):
         )
 
         # Recompute forces at new positions
-        energy, new_forces = model(state)
+        energy, new_forces = model(dist_state)
         state.atom_forces = new_forces
 
         # Second random noise draw for the second half-step

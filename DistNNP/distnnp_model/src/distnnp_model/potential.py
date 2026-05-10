@@ -33,7 +33,9 @@ class DistNNPModel(ABC):
         ...
 
     @abstractmethod
-    def initialize_buffers(self, partition_info: PartitionMessagePassingInfo, device) -> None:
+    def initialize_buffers(
+        self, partition_info: PartitionMessagePassingInfo, device: torch.device
+    ) -> None:
         """
         Initialize any necessary buffers or internal state based on the distributed state.
 

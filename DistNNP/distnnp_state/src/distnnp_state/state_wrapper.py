@@ -8,7 +8,6 @@ import torch
 import torch.distributed as dist
 from typing import Union
 
-
 ABSTRACT_PARTITIONERS = Union[
     SFCPartitioner, SimpleSpatialPartitioner, KDTreePartitioner
 ]
@@ -22,6 +21,7 @@ class TorchDistEnv:
     def __init__(self, is_distributed: bool = True, **kwargs) -> None:
         if is_distributed:
             if not dist.is_initialized():
+                print("Initializing distributed environment...")
                 dist.init_process_group(backend="cuda:nccl,cpu:gloo", **kwargs)
             global_rank = dist.get_rank()
             world_size = dist.get_world_size()
@@ -60,7 +60,3 @@ class TorchDistEnv:
             dist.barrier()
         else:
             pass
-
-    def __del__(self):
-        if self.is_distributed and dist.is_initialized():
-            dist.destroy_process_group()
