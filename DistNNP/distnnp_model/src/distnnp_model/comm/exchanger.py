@@ -15,9 +15,9 @@ class Exchanger(ABC):
     @abstractmethod
     def setup_exchanger(
         self,
-        feature_dim:int,
+        feature_dim: int,
         partition_info: PartitionMessagePassingInfo,
-        device: torch.device
+        device: torch.device,
     ):
         """Helper function to setup the feature exchanger for testing.
 
@@ -189,9 +189,9 @@ class GPUDirectExchanger(Exchanger):
 
     def setup_exchanger(
         self,
-        feature_dim:int,
+        feature_dim: int,
         partition_info: PartitionMessagePassingInfo,
-        device: torch.device
+        device: torch.device,
     ):
         """Helper function to setup the feature exchanger for testing.
 
@@ -216,20 +216,20 @@ class GPUDirectExchanger(Exchanger):
         recv_offsets = partition_info.recv_offsets
 
         # --- Allocate IPC buffers ---
-        x_buffer = FeatureExchanger.allocate_ipc_buffer(n_local + total_recv, feature_dim, rank)
-        grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(total_send, feature_dim, rank)
+        x_buffer = FeatureExchanger.allocate_ipc_buffer(
+            n_local + total_recv, feature_dim, rank
+        )
+        grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(
+            total_send, feature_dim, rank
+        )
 
         # --- Exchange IPC handles via NCCL broadcast ---
         x_handle = self.exchanger.export_ipc_handle(x_buffer)
         grad_handle = self.exchanger.export_ipc_handle(grad_recv_buffer)
 
         handle_size = len(x_handle)
-        x_handle_tensor = torch.tensor(
-            x_handle, dtype=torch.uint8, device=device
-        )
-        grad_handle_tensor = torch.tensor(
-            grad_handle, dtype=torch.uint8, device=device
-        )
+        x_handle_tensor = torch.tensor(x_handle, dtype=torch.uint8, device=device)
+        grad_handle_tensor = torch.tensor(grad_handle, dtype=torch.uint8, device=device)
 
         all_x_handles_tensor = [
             torch.zeros(handle_size, dtype=torch.uint8, device=device)
@@ -248,9 +248,7 @@ class GPUDirectExchanger(Exchanger):
 
         # Gather recv_offsets and num_local from all ranks
 
-        send_local_indices = torch.zeros(
-            total_send, dtype=torch.int64, device=device
-        )
+        send_local_indices = torch.zeros(total_send, dtype=torch.int64, device=device)
 
         all_recv_offsets_list = [
             torch.zeros(world_size + 1, dtype=torch.int64, device=device)
@@ -259,8 +257,7 @@ class GPUDirectExchanger(Exchanger):
         dist.all_gather(all_recv_offsets_list, recv_offsets)
         all_recv_offsets = torch.stack(all_recv_offsets_list)  # [W, W+
         all_num_local_list = [
-            torch.zeros(1, dtype=torch.int64, device=device)
-            for _ in range(world_size)
+            torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)
         ]
         dist.all_gather(
             all_num_local_list,
@@ -284,3 +281,15 @@ class GPUDirectExchanger(Exchanger):
             rank,
             world_size,
         )
+
+        event_handle = self.exchanger.create_and_export_event()
+        event_handle_tensor = torch.tensor(
+            event_handle, dtype=torch.uint8, device=device
+        )
+        all_event_handles_tensor = [
+            torch.zeros(len(event_handle), dtype=torch.uint8, device=device)
+            for _ in range(world_size)
+        ]
+        dist.all_gather(all_event_handles_tensor, event_handle_tensor)
+        all_event_handles = [t.cpu().tolist() for t in all_event_handles_tensor]
+        self.exchanger.setup_events(all_event_handles)
