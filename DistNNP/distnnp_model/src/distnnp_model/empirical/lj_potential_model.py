@@ -81,11 +81,11 @@ class LennardJonesPotentialModel(DistNNPModel):
             GPUDirectExchanger() if exchanger is None else exchanger
         )
 
-    def initialize_buffers(self, partition_info: PartitionMessagePassingInfo) -> None:
+    def initialize_buffers(self, partition_info: PartitionMessagePassingInfo, device) -> None:
         # For this simple LJ model, we don't have any learnable parameters or buffers that depend on the partitioning
         # However, if we wanted to, we could initialize any necessary buffers here based on the partition_info
-        self.position_exchanger.setup_exchanger(partition_info)
-        self.atom_type_exchanger.initialize(partition_info)
+        self.position_exchanger.setup_exchanger(feature_dim=3, partition_info=partition_info, device=device)
+        self.atom_type_exchanger.setup_exchanger(feature_dim=1, partition_info=partition_info, device=device)
 
     def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
         prev_local_positions = distributed_state.local_molecular_info.atom_positions

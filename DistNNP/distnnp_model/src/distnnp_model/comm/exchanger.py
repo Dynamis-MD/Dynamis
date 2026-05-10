@@ -15,7 +15,6 @@ class Exchanger(ABC):
     @abstractmethod
     def setup_exchanger(
         self,
-        n_local: int,
         feature_dim:int,
         partition_info: PartitionMessagePassingInfo,
         device: torch.device
@@ -95,7 +94,10 @@ class Exchanger(ABC):
             torch.Tensor: The features received from neighboring partitions after the push to exchange operation.
         """
         if not self.is_ipc_setup:
-            self.setup_exchanger(features_to_push, partition_info)
+            feature_dim = features_to_push.shape[-1]
+            device = features_to_push.device
+
+            self.setup_exchanger(feature_dim, partition_info, device)
             self.is_ipc_setup = True
 
         return self.feature_push_impl(features_to_push, partition_info)
@@ -187,7 +189,6 @@ class GPUDirectExchanger(Exchanger):
 
     def setup_exchanger(
         self,
-        n_local: int,
         feature_dim:int,
         partition_info: PartitionMessagePassingInfo,
         device: torch.device
@@ -206,6 +207,7 @@ class GPUDirectExchanger(Exchanger):
         assert dist.is_initialized(), "Distributed process group is not initialized"
         rank = dist.get_rank()
         world_size = dist.get_world_size()
+        n_local = len(partition_info.partition_indices)
 
         total_recv = int(partition_info.global_send_recv_matrix.sum(dim=0)[rank].item())
         total_send = int(partition_info.global_send_recv_matrix.sum(dim=1)[rank].item())
