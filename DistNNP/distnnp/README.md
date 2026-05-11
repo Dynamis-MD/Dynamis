@@ -2,4 +2,4 @@
 
 
 ### `distnnp` (stub)
-Empty entry point for now. Will orchestrate the other sub-packages, including add simulator
+Orchestrates the other sub-packages: distnnp-state, distnnp-model, and distnnp-integrator
