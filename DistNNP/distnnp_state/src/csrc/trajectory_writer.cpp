@@ -11,18 +11,19 @@ namespace distnnp_state {
 
 TrajectoryWriter::TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, std::string output_dir)
     : rank(global_rank)
+    , output_dir(output_dir)
     // TODO validate both of these
     , run_id(run_id)
     , author(author)
 {
     // currently just overwriting, TODO increment number over time
     if (global_rank == 0)
-        fd = open((output_dir + "/trajectory.xyzbin").c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        fd = open((output_dir + "/trajectory.distnnp").c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
     else
-        fd = open((output_dir + "/trajectory.xyzbin").c_str(), O_RDWR | O_CREAT, 0644);
+        fd = open((output_dir + "/trajectory.distnnp").c_str(), O_RDWR | O_CREAT, 0644);
 
     if (fd < 0) {
-        std::cerr << "Failed to open " << output_dir << "/trajectory.xyzbin" << std::endl;
+        std::cerr << "Failed to open " << output_dir << "/trajectory.distnnp" << std::endl;
         exit(1);
     }
 }
@@ -31,8 +32,18 @@ TrajectoryWriter::~TrajectoryWriter() {
     if (res != 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
 }
 
-MolecularInfo TrajectoryWriter::initialize(std::string xyz_file_name, float time_per_step, uint32_t steps_per_write) {
-    auto state = load_file(xyz_file_name);
+MolecularInfo TrajectoryWriter::initialize(const std::string& input_file_name, const float time_per_step, const uint32_t steps_per_write) {
+
+    MolecularInfo state;
+    auto len = input_file_name.size();
+    if (len >= 4 && input_file_name.compare(len - 4, 4, ".xyz") == 0) {
+        state = load_xyz_file(input_file_name);
+    } else if (len >= 8 && input_file_name.compare(len - 8, 8, ".distnnp") == 0) {
+        state = load_distnnp_file(input_file_name);
+    } else {
+        std::cerr << input_file_name << " file type is not supported" << std::endl;
+        return state;
+    }
 
     if (rank == 0)
         write_front_matter(time_per_step, steps_per_write, state);
@@ -88,7 +99,8 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
 
     // run_id
     std::string r = run_id;
-    memcpy(buf.data() + offset, r.data(), 16);
+    memcpy(buf.data() + offset, r.data(), r.size());
+    memset(buf.data() + offset + r.size(), 0, 16 - r.size());
     offset += 16;
 
     // author
@@ -106,7 +118,7 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
 
     // steps_per_write 
     memcpy(buf.data() + offset, &steps_per_write, sizeof(steps_per_write));
-    offset += sizeof(time_per_step);
+    offset += sizeof(steps_per_write);
 
     // bytes_per_atom, id, position, velocity
     const uint32_t bytes_per_atom = 8 + (3 * 4) + (3 * 4);
@@ -234,7 +246,94 @@ void TrajectoryWriter::write_frame(uint32_t frame_idx, torch::Tensor indices, to
     writes += 1;
 }
 
-MolecularInfo TrajectoryWriter::load_file(std::string xyz_file_name) {
+MolecularInfo TrajectoryWriter::load_distnnp_file(const std::string& distnnp_file_name) {
+    // reads the last frame in from the file and returns it as the current state
+    MolecularInfo atoms;
+
+    int dist_fd = open(distnnp_file_name.c_str(), O_RDWR, 0644);
+
+    if (dist_fd < 0) {
+        std::cerr << "Failed to open " << distnnp_file_name << std::endl;
+        exit(1);
+    }
+
+    char magic[8];
+    auto n = pread(dist_fd, magic, 8, 0);
+    if (strcmp(magic, "DISTNNP\0") != 0) {
+        // TODO handle endian mismatch
+        std::cerr << distnnp_file_name << " is not a valid distnnp file" << std::endl;
+        return atoms;
+    }
+    uint32_t version;
+    n = pread(dist_fd, &version, sizeof(version), 8);
+    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    if (n != sizeof(version)) throw std::runtime_error("unexpected end of file");
+
+    if (version != 1) {
+        std::cerr << version << " not supported. Version 1 is only supported" << std::endl;
+        return atoms;
+    }
+
+    uint32_t bytes_per_atom;
+    uint64_t front_matter_size;
+
+    n = pread(dist_fd, &atoms.num_atoms, sizeof(atoms.num_atoms), 92);
+    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    if (n != sizeof(atoms.num_atoms)) throw std::runtime_error("unexpected end of file");
+
+    n = pread(dist_fd, &bytes_per_atom, sizeof(bytes_per_atom), 108);
+    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    if (n != sizeof(bytes_per_atom)) throw std::runtime_error("unexpected end of file");
+
+    n = pread(dist_fd, &front_matter_size, sizeof(front_matter_size), 212);
+    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    if (n != sizeof(front_matter_size)) throw std::runtime_error("unexpected end of file");
+
+    // 224 bytes is the offset of the first data and then its atom types
+    std::vector<uint8_t> types(atoms.num_atoms);
+    n = pread(dist_fd, types.data(), types.size(), 224);
+    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    if (n != types.size()) throw std::runtime_error("unexpected end of file");
+    atoms.atom_types = torch::from_blob(types.data(), {atoms.num_atoms}, torch::kUInt8).clone();
+
+    uint64_t frame_size = bytes_per_atom * atoms.num_atoms;
+
+    uint32_t size = lseek(dist_fd, 0, SEEK_END);
+    uint32_t loc = size - frame_size; // start of frame
+
+    // ids
+    
+    uint32_t block_size = atoms.num_atoms * sizeof(uint64_t);
+    // offset is the start of the frame
+    std::vector<uint64_t> ids(atoms.num_atoms);
+    n = pread(dist_fd, ids.data(), block_size, loc);
+    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    if (n != block_size) throw std::runtime_error("unexpected end of file");
+    atoms.atom_vertex_numbers = torch::from_blob(ids.data(), {atoms.num_atoms}, torch::kUInt64).clone();
+
+    loc += block_size; // new loc is at the end of this chunk of data
+
+    // positions
+    // resize to 3 floats per atom
+    block_size = atoms.num_atoms * 3 * sizeof(float);
+    std::vector<float> attribs(atoms.num_atoms * 3);
+    n = pread(dist_fd, attribs.data(), block_size, loc);
+    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    if (n != block_size) throw std::runtime_error("unexpected end of file");
+    atoms.atom_positions = torch::from_blob(attribs.data(), {atoms.num_atoms, 3}).clone();
+
+    loc += block_size; // new loc is at the end of this chunk of data
+
+    // velocities
+    n = pread(dist_fd, attribs.data(), block_size, loc);
+    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    if (n != block_size) throw std::runtime_error("unexpected end of file");
+    atoms.atom_velocities = torch::from_blob(attribs.data(), {atoms.num_atoms, 3}).clone();
+
+    return atoms;
+}
+
+MolecularInfo TrajectoryWriter::load_xyz_file(const std::string& xyz_file_name) {
     MolecularInfo atoms;
 
     // open the file
@@ -247,7 +346,7 @@ MolecularInfo TrajectoryWriter::load_file(std::string xyz_file_name) {
 
     // read in the atom numbers
     std::getline(xyz_file, line);
-    uint32_t num_atoms = std::stoi(line);
+    int num_atoms = std::stoi(line);
 
     int velocity_index = -1;
 
@@ -274,7 +373,7 @@ MolecularInfo TrajectoryWriter::load_file(std::string xyz_file_name) {
             std::cerr << name << " : " << ty << " : " << count << std::endl;
 
             // only care about velocity
-            if (name == "vel") {
+            if (name == "vel" || name == "momenta") {
                 velocity_index = current_index;
             }
 
@@ -329,4 +428,38 @@ MolecularInfo TrajectoryWriter::load_file(std::string xyz_file_name) {
 
     return atoms;
 }
+void TrajectoryWriter::write_to_xyz(const MolecularInfo& state, const std::string& file_name) {
+
+    std::unordered_map<uint8_t, std::string> reversed_table;
+
+    for (const auto& [label, number] : periodic_table) {
+        reversed_table.insert({number, label});
+    }
+
+    // accessors for the state info
+    auto types = state.atom_types.accessor<uint8_t, 1>();
+    auto positions = state.atom_positions.accessor<float, 2>();
+    auto velocities = state.atom_velocities.accessor<float, 2>();
+
+    // loop through and write to the xyz file
+    std::ofstream out(output_dir + "/" + file_name);
+
+    auto write_floats = [&](float x, float y, float z) {
+        out << std::to_string(x)
+            << '\t' << std::to_string(y)
+            << '\t' << std::to_string(z);
+    };
+
+    out << std::to_string(state.num_atoms) << '\n';
+    out << "Properties=species:S:1:pos:R:3:momenta:R:3\n";
+    for (int i = 0; i < state.num_atoms; i++) {
+        out << reversed_table[types[i]] << '\t';
+        write_floats(positions[i][0], positions[i][1], positions[i][2]);
+        out << '\t';
+        write_floats(velocities[i][0], velocities[i][1], velocities[i][2]);
+        out << '\n';
+    }
+    out.close();
+}
+
 } // namespace distnnp_state

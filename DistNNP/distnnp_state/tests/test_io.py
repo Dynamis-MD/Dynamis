@@ -44,6 +44,30 @@ def test_xyz_io():
     assert torch.equal(torch.zeros([6, 3]), env.atom_velocities)
     assert torch.equal(torch.arange(0, 6, 1).to(torch.uint64), env.atom_vertex_numbers)
 
+def test_distnnp_io():
+    """Distnnp test"""
+
+    # test setup
+    values = torch.arange(0, 9, 1).to(torch.float32)
+    positions = torch.concat((values, values), dim=0)
+    positions = positions.reshape([6, 3]).to(torch.float32)
+
+    with TrajectoryWriter(0, b"1234", "author", "./") as writer:
+        env = writer.initialize("tests/xyz.xyz", 1.0, 1)
+
+        writer.update_atom_counts([6])
+        writer.write_frame(0, env.atom_vertex_numbers, env.atom_positions, env.atom_velocities)
+
+    writer2 = TrajectoryWriter(1, b"1234", "author", "./")
+    env2 = writer2.initialize("./trajectory.distnnp", 1.0, 1)
+
+    assert env2.num_atoms == 6
+    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.uint8), env2.atom_types)
+    assert torch.equal(positions, env2.atom_positions)
+    assert torch.equal(torch.zeros([6, 3], dtype=torch.float32), env2.atom_velocities)
+    assert torch.equal(torch.arange(0, 6, 1).to(torch.uint64), env2.atom_vertex_numbers)
+
+
 def test_write_front_matter():
     writer = TrajectoryWriter(0, b"1234", "author", "./")
 
@@ -53,7 +77,7 @@ def test_write_front_matter():
     fixed_format = "<8sI16s64sQfIII32s32s32sQ4x6B2x"
     fixed_size = struct.calcsize(fixed_format)
 
-    with open("./trajectory.xyzbin", "rb") as f:
+    with open("./trajectory.distnnp", "rb") as f:
         raw_fixed = f.read(fixed_size)
         if len(raw_fixed) < fixed_size:
             raise ValueError(f"File too small to contain a valid header. got {len(raw_fixed)} expected {fixed_size}")
@@ -128,7 +152,7 @@ def test_write_frame():
     format = "<232x 6Q 18f 18f"
     size = struct.calcsize(format)
 
-    with open("./trajectory.xyzbin", "rb") as f:
+    with open("./trajectory.distnnp", "rb") as f:
         raw = f.read(size)
         if len(raw) < size:
             raise ValueError(f"File too small to contain a valid header. got {len(raw)} expected {size}")
@@ -151,3 +175,32 @@ def test_write_frame():
                                   , 3.0, 4.0, 5.0
                                   , 6.0, 7.0, 8.0)
         assert h["velocities"] == (0.0,) * 18
+
+def test_write_xyz():
+    writer = TrajectoryWriter(1, b"1234", "author", "./")
+
+    env = writer.initialize("tests/extended_xyz.xyz", 1.0, 1)
+
+    writer.write_to_xyz(env, "output.xyz");
+
+    with open("tests/extended_xyz.xyz", 'r') as orig:
+        with open("output.xyz", 'r') as fin:
+            orig_lines = orig.readlines()
+            fin_lines = fin.readlines()
+
+            # num atoms
+            orig_atoms = int(orig_lines[0].strip())
+            fin_atoms = int(fin_lines[0].strip())
+            assert(orig_atoms == fin_atoms)
+
+            orig_data = [line.split() for line in orig_lines[2:2+orig_atoms]]
+            fin_data = [line.split() for line in fin_lines[2:2+fin_atoms]]
+
+            orig_syms = [row[0] for row in orig_data]
+            fin_syms = [row[0] for row in fin_data]
+            assert(orig_syms == fin_syms)
+
+            orig_attribs = torch.tensor([[float(y) for y in x] for x in [row[1:7] for row in orig_data]], dtype=torch.float32)
+            fin_attribs= torch.tensor([[float(y) for y in x] for x in [row[1:7] for row in fin_data]], dtype=torch.float32)
+            assert torch.equal(orig_attribs, fin_attribs)
+
