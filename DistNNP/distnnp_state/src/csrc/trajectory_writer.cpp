@@ -32,7 +32,7 @@ TrajectoryWriter::~TrajectoryWriter() {
     if (res != 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
 }
 
-MolecularInfo TrajectoryWriter::initialize(std::string input_file_name, float time_per_step, uint32_t steps_per_write) {
+MolecularInfo TrajectoryWriter::initialize(const std::string& input_file_name, const float time_per_step, const uint32_t steps_per_write) {
 
     MolecularInfo state;
     auto len = input_file_name.size();
@@ -246,7 +246,7 @@ void TrajectoryWriter::write_frame(uint32_t frame_idx, torch::Tensor indices, to
     writes += 1;
 }
 
-MolecularInfo TrajectoryWriter::load_distnnp_file(std::string distnnp_file_name) {
+MolecularInfo TrajectoryWriter::load_distnnp_file(const std::string& distnnp_file_name) {
     // reads the last frame in from the file and returns it as the current state
     MolecularInfo atoms;
 
@@ -333,7 +333,7 @@ MolecularInfo TrajectoryWriter::load_distnnp_file(std::string distnnp_file_name)
     return atoms;
 }
 
-MolecularInfo TrajectoryWriter::load_xyz_file(std::string xyz_file_name) {
+MolecularInfo TrajectoryWriter::load_xyz_file(const std::string& xyz_file_name) {
     MolecularInfo atoms;
 
     // open the file
@@ -428,7 +428,7 @@ MolecularInfo TrajectoryWriter::load_xyz_file(std::string xyz_file_name) {
 
     return atoms;
 }
-void TrajectoryWriter::write_to_xyz(MolecularInfo state, std::string file_name) {
+void TrajectoryWriter::write_to_xyz(const MolecularInfo& state, const std::string& file_name) {
 
     std::unordered_map<uint8_t, std::string> reversed_table;
 

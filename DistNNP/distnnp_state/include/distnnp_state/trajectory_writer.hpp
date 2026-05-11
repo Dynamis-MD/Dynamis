@@ -12,7 +12,7 @@ public:
     ~TrajectoryWriter();
 
     // TODO eventually this can be initialize with the custom binary format as a file
-    MolecularInfo initialize(std::string input_file_name, float time_per_step, uint32_t steps_per_write);
+    MolecularInfo initialize(const std::string& input_file_name, const float time_per_step, const uint32_t steps_per_write);
 
     void write_frame(uint32_t frame_idx, torch::Tensor indices, torch::Tensor positions, torch::Tensor velocities);
 
@@ -20,11 +20,11 @@ public:
         rank_atom_counts = std::move(counts);
     }
 
-    void write_to_xyz(MolecularInfo state, std::string file_name = "output.xyz");
+    void write_to_xyz(const MolecularInfo& state, const std::string& file_name = "output.xyz");
 
 private:
-    MolecularInfo load_xyz_file(std::string xyz_file_name);
-    MolecularInfo load_distnnp_file(std::string xyz_file_name);
+    MolecularInfo load_xyz_file(const std::string& xyz_file_name);
+    MolecularInfo load_distnnp_file(const std::string& xyz_file_name);
     void write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state);
 
     py::bytes run_id;
