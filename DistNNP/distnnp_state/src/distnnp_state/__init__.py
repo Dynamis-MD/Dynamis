@@ -45,16 +45,3 @@ __all__ = [
     "BuildMode",
     "SimState",
 ]
-
-
-def __getattr__(name: str):
-    if name == "IPCExchanger":
-        # Lazy import to avoid circular dependency:
-        # distnnp_model depends on distnnp_state, so we cannot import distnnp_model
-        # at module load time. By the time __getattr__ is called, both packages
-        # are fully initialized.
-        import distnnp_model.distnnp_model_impl as _impl
-        IPCExchanger = _impl.IPCExchanger
-        globals()["IPCExchanger"] = IPCExchanger
-        return IPCExchanger
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

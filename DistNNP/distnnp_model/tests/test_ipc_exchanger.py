@@ -13,17 +13,8 @@ from distnnp_state import (
     DistEnvironment,
     SimulationConfig,
     SimpleSpatialPartitioner,
-    IPCExchanger,
 )
-
-
-def _make_global_state(num_atoms: int, device: torch.device) -> MolecularInfo:
-    state = MolecularInfo()
-    state.num_atoms = num_atoms
-    state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long, device=device)
-    state.atom_positions = torch.rand(num_atoms, 3, device=device) * 10.0
-    state.atom_velocities = torch.randn(num_atoms, 3, device=device) * 0.1
-    return state
+from distnnp_model.distnnp_model_impl import IPCExchanger
 
 
 def _make_env(rank: int, world_size: int) -> DistEnvironment:
