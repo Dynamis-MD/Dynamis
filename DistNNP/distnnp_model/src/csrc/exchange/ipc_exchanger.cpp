@@ -437,9 +437,9 @@ void IPCExchanger::setup_sync(
     for (auto &p : remote_counters_)
     {
         if (p)
-            cudaIpcCloseMemHandle(p);
+            cudaIpcCloseMemHandle(reinterpret_cast<void *>(p));
     }
-    remote_counters_.assign(world_size_, nullptr);
+    remote_counters_.assign(world_size_, 0);
 
     for (int64_t r = 0; r < world_size_; ++r)
     {
@@ -456,7 +456,7 @@ void IPCExchanger::setup_sync(
         TORCH_CHECK(err == cudaSuccess,
                     "cudaIpcOpenMemHandle (counter) for rank ", r,
                     " failed: ", cudaGetErrorString(err));
-        remote_counters_[r] = static_cast<uint32_t *>(ptr);
+        remote_counters_[r] = reinterpret_cast<CUdeviceptr>(ptr);
     }
 
     sync_setup_ = true;
@@ -490,7 +490,7 @@ void IPCExchanger::wait_for_pushes(cudaStream_t stream)
             continue;
         CUresult err = cuStreamWaitValue32(
             reinterpret_cast<CUstream>(stream),
-            reinterpret_cast<CUdeviceptr>(remote_counters_[r]),
+            remote_counters_[r],
             call_counter_, CU_STREAM_WAIT_VALUE_GEQ);
         if (err != CUDA_SUCCESS)
         {
@@ -514,8 +514,8 @@ void IPCExchanger::teardown()
     {
         if (p)
         {
-            cudaIpcCloseMemHandle(p);
-            p = nullptr;
+            cudaIpcCloseMemHandle(reinterpret_cast<void *>(p));
+            p = 0;
         }
     }
     remote_counters_.clear();

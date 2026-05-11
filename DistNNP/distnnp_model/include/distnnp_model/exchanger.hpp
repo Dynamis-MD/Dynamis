@@ -1,6 +1,7 @@
 #pragma once
 #include <torch/extension.h>
 #include <cuda_runtime.h>
+#include <cuda.h>
 #include <cstdint>
 #include <vector>
 #include "distnnp_state/distnnp_state.hpp"
@@ -125,7 +126,7 @@ private:
     // yet issued its write (unlike cudaStreamWaitEvent on an unrecorded
     // event, which is a silent no-op).
     uint32_t *local_counter_ = nullptr;             // cudaMalloc'd, IPC-shared
-    std::vector<uint32_t *> remote_counters_;       // peers' counters opened via IPC
+    std::vector<CUdeviceptr> remote_counters_;      // peers' counters opened via IPC
     uint32_t call_counter_ = 0;                     // step number, bumped each push
     bool sync_setup_ = false;
 };
