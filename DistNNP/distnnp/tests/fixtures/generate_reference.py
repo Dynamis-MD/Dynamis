@@ -31,16 +31,13 @@ import torch.distributed as dist
 from pathlib import Path
 
 from distnnp_model.empirical.lj_potential_model import LennardJonesPotentialModel
-from distnnp.simulation import SimState, Simulation
+from distnnp.simulator import Simulator, SimulatorConfig
 from distnnp_integrator.euler import Euler
 from distnnp_integrator.verlet import Verlet
 from distnnp_integrator.langevin import Langevin
 from distnnp_state import (
     MolecularInfo,
-    SimulationConfig,
     DistEnvironment,
-    SimpleSpatialPartitioner,
-    DistNNPState,
 )
 
 # The steps at which to save snapshots
@@ -61,20 +58,15 @@ def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> Molec
     state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long)
     state.atom_positions = torch.rand(num_atoms, 3) * 8.0
     state.atom_velocities = torch.randn(num_atoms, 3) * 0.1
+    state.atom_masses = torch.ones(num_atoms, dtype=torch.float32)
+    state.atom_types = torch.zeros(num_atoms, dtype=torch.long)
 
     state.atom_vertex_numbers = state.atom_vertex_numbers.to(device)
     state.atom_positions = state.atom_positions.to(device)
     state.atom_velocities = state.atom_velocities.to(device)
+    state.atom_masses = state.atom_masses.to(device)
+    state.atom_types = state.atom_types.to(device)
     return state
-
-
-def _make_sim_config(cutoff: float, device: torch.device) -> SimulationConfig:
-    cfg = SimulationConfig()
-    cfg.cutoff = cutoff
-    cfg.ghost_cutoff_buffer = 0.5
-    cfg.cell = torch.eye(3, device=device) * 8.0
-    cfg.pbc = torch.tensor([True, True, True], dtype=torch.bool, device=device)
-    return cfg
 
 
 def _make_env(rank: int, world_size: int, local_rank: int) -> DistEnvironment:
@@ -87,6 +79,41 @@ def _make_env(rank: int, world_size: int, local_rank: int) -> DistEnvironment:
     env.local_rank = local_rank
     return env
 
+def _build_simulator(molecular_info, env, integrator, device):
+    epsilon = torch.tensor([1.0], dtype=torch.float32, device=device)
+    sigma = torch.tensor([1.0], dtype=torch.float32, device=device)
+    lj_model = LennardJonesPotentialModel(epsilon, sigma)
+
+    # Constants are fairly arbitrary
+    # Not sure if the partition algo should be adjusted
+    config = SimulatorConfig(
+        cutoff_angstrom=3.5,
+        ghost_buffer_angstrom=0.5,
+        side_length_angstrom=8.0,
+        partition_algorithm="simple",
+    )
+
+    simulator = Simulator(
+        model=lj_model,
+        integrator=integrator,
+        dist_environment=env,
+        config=config,
+        device=device,
+    )
+    simulator.initialize_simulator_state(molecular_info, device=device)
+    return simulator, lj_model
+
+
+def _teardown_model(lj_model):
+    for wrapper in (
+        lj_model.position_exchanger,
+        lj_model.atom_type_exchanger,
+        lj_model.global_index_exchanger,
+    ):
+        if wrapper.is_ipc_setup:
+            wrapper.exchanger.teardown()
+
+
 def generate_reference(integrator_name: str, device: torch.device) -> None:
     """Generate and save the reference fixture for a given integrator.
 
@@ -95,31 +122,8 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
         device: CUDA device to run on.
     """
 
-    molecular_info = _make_global_state(16, 100, device)
-    sim_config = _make_sim_config(3.5, device)
-
     # Single-rank reference run — world_size=1, local_rank=0
     env = _make_env(0, 1, 0)
-
-    # Partitioner is a no-op at world_size=1 but still populates
-    # local_atom_positions, which the langevin loop reads as initial state.
-    partitioner = SimpleSpatialPartitioner()
-    partition_info = partitioner.partition(molecular_info, env)
-    partitioner.build_halo_maps(partition_info, molecular_info, env, sim_config)
-
-    distnnp_state = DistNNPState()
-    distnnp_state.dist_env = env
-    distnnp_state.global_molecular_info = molecular_info
-    distnnp_state.local_partition_info = partition_info
-
-    epsilon = torch.tensor([1.0], dtype=torch.float32, device=device)
-    sigma = torch.tensor([1.0], dtype=torch.float32, device=device)
-
-    # Use the same model class the regression tests run against so the fixture
-    # exercises the real FeaturePushToExchange / exchanger code path.
-    lj_model = LennardJonesPotentialModel(epsilon, sigma)
-
-    n_local = partition_info.local_atom_positions.shape[0]
 
     if integrator_name == "langevin":
         # Reference for the langevin canonical-ensemble check in
@@ -131,30 +135,25 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
         N_STEPS = 2500
         N_EQUIL = 1000
 
-        initial_pos = partition_info.local_atom_positions.clone()
-        initial_vel = molecular_info.atom_velocities.clone()
-
         ke_per_run, pe_per_run = [], []
         for run in range(N_RUNS):
             torch.manual_seed(1000 + run)
-
-            forces = torch.zeros(n_local, 3, dtype=torch.float32, device=device)
-            mass = torch.full((n_local,), 1.0, dtype=torch.float32, device=device)
-            sim_state = SimState(distnnp_state, sim_config, forces, mass)
-            sim_state.pos.copy_(initial_pos)
-            sim_state.vel.copy_(initial_vel)
+            molecular_info = _make_global_state(16, 100, device)
             integrator = Langevin(dt=1e-3, gamma=1.0, kT=0.6)
-            simulation = Simulation(sim_state, lj_model, integrator)
+            simulator, lj_model = _build_simulator(molecular_info, env, integrator, device)
 
             ke_acc, pe_acc = [], []
             for step in range(1, N_STEPS + 1):
-                energy, _ = simulation.step()
+                energy, _ = simulator.step()
                 if step > N_EQUIL:
-                    ke = 0.5 * (simulation.state.mass.unsqueeze(1) * simulation.state.vel ** 2).sum()
+                    local = simulator.state.local_state
+                    ke = 0.5 * (local.atom_masses.unsqueeze(1) * local.atom_velocities ** 2).sum()
                     ke_acc.append(ke.item())
                     pe_acc.append(energy.item())
             ke_per_run.append(sum(ke_acc) / len(ke_acc))
             pe_per_run.append(sum(pe_acc) / len(pe_acc))
+
+            _teardown_model(lj_model)
 
         torch.save(
             {
@@ -168,40 +167,25 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
         )
 
     elif integrator_name in ("euler", "verlet"):
-        # Deterministic integrators: a single trajectory is reproducible.
+        molecular_info = _make_global_state(16, 100, device)
         integrator = Euler(dt=1e-3) if integrator_name == "euler" else Verlet(dt=1e-3)
-
-        forces = torch.zeros(n_local, 3, dtype=torch.float32, device=device)
-        mass = torch.full((n_local,), 1.0, dtype=torch.float32, device=device)
-        sim_state = SimState(distnnp_state, sim_config, forces, mass)
-
-        simulation = Simulation(sim_state, lj_model, integrator)
+        simulator, lj_model = _build_simulator(molecular_info, env, integrator, device)
 
         snapshots = {}
         for step in range(1, max(SNAPSHOT_STEPS) + 1):
-            energy, forces = simulation.step()
+            energy, forces = simulator.step()
             if step in SNAPSHOT_STEPS:
                 snapshots[step] = {
-                    "positions": simulation.state.pos.clone(),
+                    "positions": simulator.state.pos.clone(),
                     "forces":    forces.clone(),
                     "energy":    energy.clone(),
                 }
 
         torch.save(snapshots, OUTPUT_DIR / f"lj_reference_{integrator_name}.pt")
+        _teardown_model(lj_model)
 
     else:
         raise ValueError("Invalid integrator_name: must be euler, verlet or langevin")
-
-    # Tear down exchangers before the next integrator builds its own model,
-    # mirroring the conftest fixture teardown. At world_size=1 IPC is never
-    # set up, so this is a no-op here but keeps the contract consistent.
-    for wrapper in (
-        lj_model.position_exchanger,
-        lj_model.atom_type_exchanger,
-        lj_model.global_index_exchanger,
-    ):
-        if wrapper.is_ipc_setup:
-            wrapper.exchanger.teardown()
 
 
 def main():
