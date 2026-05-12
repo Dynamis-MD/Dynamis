@@ -9,6 +9,7 @@ from distnnp_integrator._data_check import (
 from distnnp_integrator.integrator import DistNNPIntegrator
 from distnnp_state import DistNNPState
 from distnnp_model import DistNNPModel
+from distnnp_integrator.masses import TORCH_MASSES
 
 
 class Verlet(DistNNPIntegrator):
@@ -81,6 +82,7 @@ class Verlet(DistNNPIntegrator):
             step_size = self.dt
 
         state = dist_state.local_molecular_info
+        atom_masses = TORCH_MASSES.to(state.atom_positions.device)[state.atom_types.reshape(-1)]
 
         # 0. Compute forces
         energy, new_forces = model(dist_state)
@@ -90,7 +92,7 @@ class Verlet(DistNNPIntegrator):
             state.atom_positions,
             state.atom_velocities,
             state.atom_forces,
-            state.atom_masses,
+            atom_masses,
             step_size,
         )
 
@@ -100,5 +102,5 @@ class Verlet(DistNNPIntegrator):
 
         # 3. Complete the velocity full-step update
         self.halfstep2_(
-            state.atom_velocities, state.atom_forces, state.atom_masses, step_size
+            state.atom_velocities, state.atom_forces, atom_masses, step_size
         )

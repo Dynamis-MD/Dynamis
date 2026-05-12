@@ -4,7 +4,7 @@ from distnnp_integrator._data_check import check_devices, check_shapes_match
 from distnnp_integrator.integrator import DistNNPIntegrator
 from distnnp_state import DistNNPState
 from distnnp_model import DistNNPModel
-
+from distnnp_integrator.masses import TORCH_MASSES
 
 class Euler(DistNNPIntegrator):
     def __init__(self, dt: float) -> None:
@@ -51,12 +51,16 @@ class Euler(DistNNPIntegrator):
         else:
             step_size = self.dt
 
+        
+
         molecular_info = state.local_molecular_info
+
+        atom_masses = TORCH_MASSES.to(molecular_info.atom_positions.device)[state.atom_types.reshape(-1)]
         # Update positions and velocities using the Euler method
         self.step_(
             molecular_info.atom_positions,
             molecular_info.atom_velocities,
             forces,
-            molecular_info.atom_masses,
+            atom_masses,
             step_size,
         )
