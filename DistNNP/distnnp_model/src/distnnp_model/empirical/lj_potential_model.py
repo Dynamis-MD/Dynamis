@@ -101,6 +101,9 @@ class LennardJonesPotentialModel(DistNNPModel):
         self.atom_type_exchanger.setup_exchanger(
             feature_dim=1, partition_info=partition_info, device=device
         )
+        self.global_index_exchanger.setup_exchanger(
+            feature_dim=1, partition_info=partition_info, device=device
+        )
 
     def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
         prev_local_positions = distributed_state.local_molecular_info.atom_positions
