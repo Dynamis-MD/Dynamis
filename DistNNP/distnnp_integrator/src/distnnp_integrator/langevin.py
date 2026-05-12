@@ -9,6 +9,7 @@ from distnnp_integrator._data_check import (
 from distnnp_integrator.integrator import DistNNPIntegrator
 from distnnp_state import DistNNPState
 from distnnp_model import DistNNPModel
+from distnnp_integrator.masses import TORCH_MASSES
 
 
 class Langevin(DistNNPIntegrator):
@@ -92,6 +93,7 @@ class Langevin(DistNNPIntegrator):
 
         # Langevin requires normally distributed noise for thermal kicks
         noise1 = torch.randn_like(state.atom_velocities)
+        atom_masses = TORCH_MASSES.to(state.atom_positions.device)[state.atom_types.reshape(-1)]
 
         energy, new_forces = model(dist_state)
         state.atom_forces = new_forces
@@ -99,7 +101,7 @@ class Langevin(DistNNPIntegrator):
             state.atom_positions,
             state.atom_velocities,
             state.atom_forces,
-            state.atom_masses,
+            atom_masses,
             noise1,
             step_size,
         )
@@ -113,7 +115,7 @@ class Langevin(DistNNPIntegrator):
         self.halfstep2_(
             state.atom_velocities,
             state.atom_forces,
-            state.atom_masses,
+            atom_masses,
             noise2,
             step_size,
         )
