@@ -21,6 +21,7 @@ import numpy as np
 from pathlib import Path
 from scipy.stats import ks_2samp
 import torch.distributed as dist
+from distnnp_integrator.masses import TORCH_MASSES
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -126,7 +127,9 @@ def _langevin_run_means(sim, n_steps, n_equil):
     for step in range(1, n_steps + 1):
         energy, _ = sim.step()
         if step > n_equil:
-            local_ke = 0.5 * (sim.state.mass.unsqueeze(1) * sim.state.vel ** 2).sum()
+            local = sim.state.local_state
+            local_masses = TORCH_MASSES.to(local.atom_positions.device)[local.atom_types.reshape(-1)]
+            local_ke = 0.5 * (local_masses.unsqueeze(1) * local.atom_velocities ** 2).sum()
             dist.all_reduce(local_ke, op=dist.ReduceOp.SUM)
             total_pe = energy.clone()
             dist.all_reduce(total_pe, op=dist.ReduceOp.SUM)

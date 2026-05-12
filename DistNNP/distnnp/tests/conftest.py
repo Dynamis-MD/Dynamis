@@ -65,14 +65,12 @@ def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> Molec
     state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long)
     state.atom_positions = torch.rand(num_atoms, 3) * 8.0
     state.atom_velocities = torch.randn(num_atoms, 3) * 0.1
-    state.atom_masses = torch.ones(num_atoms, dtype=torch.float32)
     state.atom_types = torch.zeros(num_atoms, dtype=torch.long)
 
     # Now move the consistent data to the GPU
     state.atom_vertex_numbers = state.atom_vertex_numbers.to(device)
     state.atom_positions = state.atom_positions.to(device)
     state.atom_velocities = state.atom_velocities.to(device)
-    state.atom_masses = state.atom_masses.to(device)
     state.atom_types = state.atom_types.to(device)
     return state
 

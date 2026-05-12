@@ -35,6 +35,7 @@ from distnnp.simulator import Simulator, SimulatorConfig
 from distnnp_integrator.euler import Euler
 from distnnp_integrator.verlet import Verlet
 from distnnp_integrator.langevin import Langevin
+from distnnp_integrator.masses import TORCH_MASSES
 from distnnp_state import (
     MolecularInfo,
     DistEnvironment,
@@ -58,13 +59,11 @@ def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> Molec
     state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long)
     state.atom_positions = torch.rand(num_atoms, 3) * 8.0
     state.atom_velocities = torch.randn(num_atoms, 3) * 0.1
-    state.atom_masses = torch.ones(num_atoms, dtype=torch.float32)
     state.atom_types = torch.zeros(num_atoms, dtype=torch.long)
 
     state.atom_vertex_numbers = state.atom_vertex_numbers.to(device)
     state.atom_positions = state.atom_positions.to(device)
     state.atom_velocities = state.atom_velocities.to(device)
-    state.atom_masses = state.atom_masses.to(device)
     state.atom_types = state.atom_types.to(device)
     return state
 
@@ -147,7 +146,8 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
                 energy, _ = simulator.step()
                 if step > N_EQUIL:
                     local = simulator.state.local_state
-                    ke = 0.5 * (local.atom_masses.unsqueeze(1) * local.atom_velocities ** 2).sum()
+                    local_masses = TORCH_MASSES.to(local.atom_positions.device)[local.atom_types.reshape(-1)]
+                    ke = 0.5 * (local_masses.unsqueeze(1) * local.atom_velocities ** 2).sum()
                     ke_acc.append(ke.item())
                     pe_acc.append(energy.item())
             ke_per_run.append(sum(ke_acc) / len(ke_acc))
