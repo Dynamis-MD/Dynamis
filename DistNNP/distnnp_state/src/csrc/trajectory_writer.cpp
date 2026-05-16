@@ -45,13 +45,12 @@ MolecularInfo TrajectoryWriter::initialize(const std::string& input_file_name, c
         return state;
     }
 
-    if (rank == 0)
-        write_front_matter(time_per_step, steps_per_write, state);
+    write_front_matter(time_per_step, steps_per_write, state, rank);
 
     return state;
 }
 
-void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state) {
+void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state, uint32_t rank) {
     // figure out sizes of header and each rank size
     // resize file to the correct size
 
@@ -81,6 +80,21 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
     front_matter_size += state.num_atoms; // 8 bit unsigned ints for each atom
     uint32_t atom_type_padding = 8 - (state.num_atoms % 8);
     front_matter_size += atom_type_padding;
+
+    // all ranks need to know front matter size, bytes per atom, and total atoms
+
+    // This is only for version 1
+    const uint32_t bytes_per_atom = sizeof(uint64_t) // atom index
+                                  + (3 * sizeof(float)) // position
+                                  + (3 * sizeof(float)); // velocity
+
+    this->front_matter_size = front_matter_size;
+    this->bytes_per_atom = bytes_per_atom;
+    this->total_atoms = state.num_atoms;
+
+    // all other ranks only need to know the above 3 values so can return here
+    if (rank != 0) return;
+
 
     // create a buffer
     std::vector<uint8_t> buf(front_matter_size);
@@ -121,7 +135,6 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
     offset += sizeof(steps_per_write);
 
     // bytes_per_atom, id, position, velocity
-    const uint32_t bytes_per_atom = 8 + (3 * 4) + (3 * 4);
     memcpy(buf.data() + offset, &bytes_per_atom, sizeof(bytes_per_atom));
     offset += sizeof(bytes_per_atom);
 
@@ -189,25 +202,6 @@ void TrajectoryWriter::write_frame(uint32_t frame_idx, torch::Tensor indices, to
     // vertex_ids | uint8 x frame_size
     // atom_positions | 3 x float32 x frame_size
     // atom_velocities | 3 x float32 x frame_size
-
-    if (writes == 0) {
-        // first write, don't have these values saved
-        // need to read in total_atoms, bytes_per_atom, front_matter_size
-
-        // TODO need to guarentee that rank 0 is done writing
-
-        auto n = pread(fd, &total_atoms, sizeof(total_atoms), 92);
-        if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-        if (n != sizeof(total_atoms)) throw std::runtime_error("unexpected end of file");
-
-        n = pread(fd, &bytes_per_atom, sizeof(bytes_per_atom), 108);
-        if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-        if (n != sizeof(bytes_per_atom)) throw std::runtime_error("unexpected end of file");
-
-        n = pread(fd, &front_matter_size, sizeof(front_matter_size), 212);
-        if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-        if (n != sizeof(front_matter_size)) throw std::runtime_error("unexpected end of file");
-    }
 
     uint32_t offset = front_matter_size + (writes * total_atoms * bytes_per_atom);
 

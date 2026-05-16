@@ -25,7 +25,7 @@ public:
 private:
     MolecularInfo load_xyz_file(const std::string& xyz_file_name);
     MolecularInfo load_distnnp_file(const std::string& xyz_file_name);
-    void write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state);
+    void write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state, uint32_t rank);
 
     py::bytes run_id;
     std::string author;
