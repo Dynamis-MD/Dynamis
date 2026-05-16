@@ -28,8 +28,34 @@ TrajectoryWriter::TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const
     }
 }
 TrajectoryWriter::~TrajectoryWriter() {
+    // only flush and close if not already done
+    if (!flushed) {
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            stop_requested = true;
+        }
+        cv.notify_one();
+
+        if (background_thread.joinable())
+            background_thread.join();
+
+        auto res = close(fd);
+        if (res != 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    }
+}
+void TrajectoryWriter::flush() {
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        stop_requested = true;
+    }
+    cv.notify_one();
+
+    if (background_thread.joinable())
+        background_thread.join();
+
     auto res = close(fd);
     if (res != 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    flushed = true;
 }
 
 MolecularInfo TrajectoryWriter::initialize(const std::string& input_file_name, const float time_per_step, const uint32_t steps_per_write) {
@@ -46,6 +72,7 @@ MolecularInfo TrajectoryWriter::initialize(const std::string& input_file_name, c
     }
 
     write_front_matter(time_per_step, steps_per_write, state, rank);
+    background_thread = std::thread(&TrajectoryWriter::background_loop, this);
 
     return state;
 }
@@ -195,7 +222,47 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
         throw std::runtime_error("partial write");
     }
 }
-void TrajectoryWriter::write_frame(uint32_t frame_idx, torch::Tensor indices, torch::Tensor positions, torch::Tensor velocities) {
+
+void TrajectoryWriter::submit(uint32_t step, MolecularInfo state) {
+    // silently fail. TODO maybe make this explicit
+    if (flushed) return;
+
+    TrajectoryWriter::FileData msg {
+        .frame_idx = step,
+        .indices = state.atom_vertex_numbers,
+        .positions = state.atom_positions,
+        .velocities = state.atom_velocities,
+    };
+
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        // Moves the struct into the queue container
+        data_queue.push(std::move(msg));
+    }
+    cv.notify_one();
+}
+void TrajectoryWriter::background_loop() {
+    while(true) {
+        TrajectoryWriter::FileData data;
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            cv.wait(lock, [this]() {
+                return !data_queue.empty() || stop_requested;
+            });
+
+            if (stop_requested && data_queue.empty()) {
+                break;
+            }
+
+            // Move the struct out of the queue (Rust-like ownership transfer)
+            data = std::move(data_queue.front());
+            data_queue.pop();
+        }
+        write_frame(data);
+    }
+}
+
+void TrajectoryWriter::write_frame(const TrajectoryWriter::FileData& data) {
 
     // to make this easier, i think im going to write each tensor one after the other
     // so it will be
@@ -203,7 +270,7 @@ void TrajectoryWriter::write_frame(uint32_t frame_idx, torch::Tensor indices, to
     // atom_positions | 3 x float32 x frame_size
     // atom_velocities | 3 x float32 x frame_size
 
-    uint32_t offset = front_matter_size + (writes * total_atoms * bytes_per_atom);
+    uint32_t offset = front_matter_size + (data.frame_idx * total_atoms * bytes_per_atom);
 
     if (offset < 220)
         throw std::runtime_error("Illegal offset");
@@ -232,12 +299,9 @@ void TrajectoryWriter::write_frame(uint32_t frame_idx, torch::Tensor indices, to
         if (static_cast<size_t>(written) != tensor_bytes) throw std::runtime_error("partial write");
     };
 
-    write_tensor(indices.contiguous(), indices_offset); // TODO make sure on CPU
-    write_tensor(positions.contiguous(), positions_offset); // TODO make sure on CPU
-    write_tensor(velocities.contiguous(), velocities_offset); // TODO make sure on CPU
-
-    // to calculate frame offsets better
-    writes += 1;
+    write_tensor(data.indices.contiguous(), indices_offset); // TODO make sure on CPU
+    write_tensor(data.positions.contiguous(), positions_offset); // TODO make sure on CPU
+    write_tensor(data.velocities.contiguous(), velocities_offset); // TODO make sure on CPU
 }
 
 MolecularInfo TrajectoryWriter::load_distnnp_file(const std::string& distnnp_file_name) {

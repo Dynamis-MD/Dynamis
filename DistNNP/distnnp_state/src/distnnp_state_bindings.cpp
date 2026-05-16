@@ -110,12 +110,12 @@ PYBIND11_MODULE(distnnp_state_impl, m)
         .def("update_atom_counts", &distnnp_state::TrajectoryWriter::update_atom_counts,
              "Update the rank offsets. Should be called after every repartition",
              py::arg("counts"))
-        .def("write_frame", &distnnp_state::TrajectoryWriter::write_frame,
-             "Writes the frame to the binary file",
-             py::arg("frame_idx"),
-             py::arg("indices"),
-             py::arg("positions"),
-             py::arg("velocities"))
+        .def("submit", &distnnp_state::TrajectoryWriter::submit,
+             "Submits a state to be written",
+             py::arg("step"),
+             py::arg("state"))
+        .def("flush", &distnnp_state::TrajectoryWriter::flush,
+             "Flushes the queue and closes the file")
         .def("__enter__", [](distnnp_state::TrajectoryWriter &self) {
              return &self;
         })

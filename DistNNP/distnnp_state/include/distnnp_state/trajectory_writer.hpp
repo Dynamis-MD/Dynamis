@@ -1,6 +1,10 @@
 #pragma once
 #include "distnnp_state.hpp"
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
+#include <queue>
+#include <thread>
 #include <vector>
 #include <unordered_map>
 
@@ -14,7 +18,8 @@ public:
     // TODO eventually this can be initialize with the custom binary format as a file
     MolecularInfo initialize(const std::string& input_file_name, const float time_per_step, const uint32_t steps_per_write);
 
-    void write_frame(uint32_t frame_idx, torch::Tensor indices, torch::Tensor positions, torch::Tensor velocities);
+    void submit(uint32_t step, MolecularInfo state);
+    void flush();
 
     void update_atom_counts(std::vector<uint32_t> counts) {
         rank_atom_counts = std::move(counts);
@@ -27,10 +32,27 @@ private:
     MolecularInfo load_distnnp_file(const std::string& xyz_file_name);
     void write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state, uint32_t rank);
 
+    struct FileData {
+        uint32_t frame_idx;
+        torch::Tensor indices;
+        torch::Tensor positions;
+        torch::Tensor velocities;
+    };
+
+    void background_loop();
+    void write_frame(const FileData &data);
+
+    std::queue<FileData> data_queue;
+    std::condition_variable cv;
+    std::mutex queue_mutex;
+    bool stop_requested{ false };
+    std::thread background_thread;
+
+    // only set to true if the file has been closed and queue drained
+    bool flushed{ false };
+
     py::bytes run_id;
     std::string author;
-
-    uint32_t writes{ 0 };
 
     uint64_t total_atoms;
     uint32_t bytes_per_atom;
