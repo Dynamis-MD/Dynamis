@@ -261,7 +261,12 @@ class GPUDirectExchanger(Exchanger):
 
         # Gather recv_offsets and num_local from all ranks
 
-        send_local_indices = torch.zeros(total_send, dtype=torch.int64, device=device)
+        # Local indices of the atoms this rank pushes to its peers, in CSR order
+        # matching send_offsets. build_halo_maps populates this; using a zero
+        # tensor here would make every send push local atom 0.
+        send_local_indices = partition_info.send_local_indices.to(
+            dtype=torch.int64, device=device
+        )
 
         all_recv_offsets_list = [
             torch.zeros(world_size + 1, dtype=torch.int64, device=device)
