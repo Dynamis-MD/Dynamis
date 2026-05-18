@@ -1,10 +1,6 @@
 #pragma once
 #include "distnnp_state.hpp"
-#include <condition_variable>
 #include <cstdint>
-#include <mutex>
-#include <queue>
-#include <thread>
 #include <vector>
 #include <unordered_map>
 
@@ -32,23 +28,7 @@ private:
     MolecularInfo load_distnnp_file(const std::string& xyz_file_name);
     void write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state, uint32_t rank);
 
-    struct FileData {
-        uint32_t frame_idx;
-        torch::Tensor indices;
-        torch::Tensor positions;
-        torch::Tensor velocities;
-    };
-
-    void background_loop();
-    void write_frame(const FileData &data);
-
-    std::queue<FileData> data_queue;
-    std::condition_variable cv;
-    std::mutex queue_mutex;
-    bool stop_requested{ false };
-    std::thread background_thread;
-
-    // only set to true if the file has been closed and queue drained
+    // only set to true if the file has been closed
     bool flushed{ false };
 
     py::bytes run_id;
