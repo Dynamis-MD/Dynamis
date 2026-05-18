@@ -218,6 +218,14 @@ class GPUDirectExchanger(Exchanger):
         """
 
         assert dist.is_initialized(), "Distributed process group is not initialized"
+
+        # With a single rank there are no peers, no halo, and a 0-byte
+        # grad_recv_buffer that cudaIpcGetMemHandle would reject. Skip IPC
+        # setup entirely; feature_push_forward/backward act as identity.
+        if self._is_single_rank():
+            self.is_ipc_setup = True
+            return
+
         rank = dist.get_rank()
         world_size = dist.get_world_size()
         n_local = len(partition_info.partition_indices)
