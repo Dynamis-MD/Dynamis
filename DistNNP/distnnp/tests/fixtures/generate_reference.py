@@ -59,7 +59,9 @@ def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> Molec
     state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long)
     state.atom_positions = torch.rand(num_atoms, 3) * 8.0
     state.atom_velocities = torch.randn(num_atoms, 3) * 0.1
-    state.atom_types = torch.zeros(num_atoms, dtype=torch.long)
+    # Argon — atomic number 18; TORCH_MASSES is indexed by atomic number,
+    # and index 0 is a 0.0 placeholder that would give infinite acceleration.
+    state.atom_types = torch.full((num_atoms,), 18, dtype=torch.long)
 
     state.atom_vertex_numbers = state.atom_vertex_numbers.to(device)
     state.atom_positions = state.atom_positions.to(device)
