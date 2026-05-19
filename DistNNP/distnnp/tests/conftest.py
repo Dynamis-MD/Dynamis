@@ -141,7 +141,6 @@ def simulation_factory(request):
         # Store exchangers for teardown
         created.append(lj_model.position_exchanger.exchanger)
         created.append(lj_model.atom_type_exchanger.exchanger)
-        created.append(lj_model.global_index_exchanger.exchanger)
 
         return simulator
 

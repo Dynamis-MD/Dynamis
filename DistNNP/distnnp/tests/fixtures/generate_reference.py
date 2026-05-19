@@ -109,7 +109,6 @@ def _teardown_model(lj_model):
     for wrapper in (
         lj_model.position_exchanger,
         lj_model.atom_type_exchanger,
-        lj_model.global_index_exchanger,
     ):
         if wrapper.is_ipc_setup:
             wrapper.exchanger.teardown()
