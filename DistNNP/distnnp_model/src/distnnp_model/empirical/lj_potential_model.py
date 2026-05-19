@@ -12,7 +12,7 @@ from typing import Optional
 import torch.distributed as dist
 
 
-def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma, global_indices, n_local):
+def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma, n_local):
     """
     Calculates the total Lennard-Jones potential energy for a set of particles
     using Lorentz-Berthelot mixing rules and a cutoff radius graph.
@@ -23,7 +23,6 @@ def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma, g
         edge_index (torch.Tensor): A (2, E) tensor of edge indices from the radius graph.
         epsilon (torch.Tensor): A (num_types,) 1D tensor of well depths for each type.
         sigma (torch.Tensor): A (num_types,) 1D tensor of zero-potential distances for each type.
-        global_indices (torch.Tensor): An (N,) integer tensor of global atom indices.
         n_local (int): Number of local (non-halo) atoms in the buffer.
 
     Returns:
@@ -33,10 +32,11 @@ def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma, g
     # Extract source and target node indices
     idx_i, idx_j = edge_index[0], edge_index[1]
 
-    # Count pair only when atom i is LOCAL and has the smaller global index.
-    # This assigns each cross-rank pair to exactly one rank (the one that owns the
-    # lower-global-index atom locally), while handling local-local pairs correctly.
-    mask = (idx_i < n_local) & (global_indices[idx_i] < global_indices[idx_j])
+    # Count every edge whose SOURCE atom is local. radius_graph_pbc emits each pair
+    # as two directed edges, so an intra-rank pair is counted twice on its rank, and
+    # a cross-rank pair is counted once on each of the two ranks it straddles -- i.e.
+    # every pair is double-counted uniformly. The /2 on total_energy below cancels it.
+    mask = idx_i < n_local
     idx_i = idx_i[mask]
     idx_j = idx_j[mask]
 
@@ -57,8 +57,8 @@ def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma, g
     # 5. Compute the full LJ potential for all pairs
     pairwise_potentials = 4 * epsilon_ij * (sr6**2 - sr6)
 
-    # 6. Sum the potentials of all unique pairs
-    total_energy = pairwise_potentials.sum()
+    # 6. Sum the potentials. Every pair is counted twice (see mask above), so halve.
+    total_energy = pairwise_potentials.sum() / 2.0
 
     return total_energy
 
@@ -83,7 +83,6 @@ class LennardJonesPotentialModel(DistNNPModel):
         # to prevent IPC buffer shape mismatches.
         self.position_exchanger = GPUDirectExchanger()
         self.atom_type_exchanger = GPUDirectExchanger()
-        self.global_index_exchanger = GPUDirectExchanger()
 
     def initialize_buffers(
         self, partition_info: PartitionMessagePassingInfo, device
@@ -94,9 +93,6 @@ class LennardJonesPotentialModel(DistNNPModel):
             feature_dim=3, partition_info=partition_info, device=device
         )
         self.atom_type_exchanger.setup_exchanger(
-            feature_dim=1, partition_info=partition_info, device=device
-        )
-        self.global_index_exchanger.setup_exchanger(
             feature_dim=1, partition_info=partition_info, device=device
         )
 
@@ -118,13 +114,6 @@ class LennardJonesPotentialModel(DistNNPModel):
                 local_atom_types.float().unsqueeze(1),
                 distributed_state,
                 self.atom_type_exchanger,
-            ).squeeze(1).long()  # type: ignore
-
-            local_global_indices = distributed_state.local_partition_info.partition_indices.float()
-            global_indices = FeaturePushToExchange.apply(
-                local_global_indices.unsqueeze(1),
-                distributed_state,
-                self.global_index_exchanger,
             ).squeeze(1).long()  # type: ignore
 
         # Construct the radius graph with PBC using the local positions (including boundary atoms)
@@ -151,7 +140,7 @@ class LennardJonesPotentialModel(DistNNPModel):
 
         # Compute the Lennard-Jones potential energy using the local atom types, positions, and edge index
         energy = lennard_jones_potential(
-            atom_types, positions, edge_index, self.epsilon, self.sigma, global_indices,
+            atom_types, positions, edge_index, self.epsilon, self.sigma,
             n_local=local_positions.shape[0],
         )
 
