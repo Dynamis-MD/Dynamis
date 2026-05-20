@@ -79,6 +79,10 @@ class Exchanger(ABC):
         """
         ...
 
+    @staticmethod
+    def _is_single_rank() -> bool:
+        return dist.is_initialized() and dist.get_world_size() == 1
+
     def feature_push_forward(
         self,
         features_to_push: torch.Tensor,
@@ -93,6 +97,12 @@ class Exchanger(ABC):
         Returns:
             torch.Tensor: The features received from neighboring partitions after the push to exchange operation.
         """
+        # With a single rank there are no peers, no halo, and a 0-byte
+        # grad_recv_buffer that cudaIpcGetMemHandle would reject. Skip IPC
+        # entirely and act as identity.
+        if self._is_single_rank():
+            return features_to_push
+
         if not self.is_ipc_setup:
             feature_dim = features_to_push.shape[-1]
             device = features_to_push.device
@@ -119,6 +129,9 @@ class Exchanger(ABC):
         Returns:
             torch.Tensor: The gradients for the input features that were pushed in the forward pass.
         """
+        if self._is_single_rank():
+            return grad_output
+
         if not self.is_ipc_setup:
             raise RuntimeError(
                 "Exchanger is not setup for backward pass. Call feature_push_forward first."
@@ -205,6 +218,13 @@ class GPUDirectExchanger(Exchanger):
         """
 
         assert dist.is_initialized(), "Distributed process group is not initialized"
+
+        # With a single rank there are no peers, no halo, and a 0-byte
+        # grad_recv_buffer that cudaIpcGetMemHandle would reject. Skip IPC
+        # setup entirely; feature_push_forward/backward act as identity.
+        if self._is_single_rank():
+            self.is_ipc_setup = True
+            return
 
         rank = dist.get_rank()
         world_size = dist.get_world_size()
