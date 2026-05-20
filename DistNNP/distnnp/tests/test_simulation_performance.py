@@ -14,6 +14,24 @@ import torch.distributed as dist
 import pytest
 
 
+# Run 20 times and make perf bounds 1.5x std dev of the mean.
+# The data is noisy and it shows that it can fail 
+# sometimes when nothing is necessarily wrong.
+
+# Euler    per_step:  Mean = 15.1 ms,  Std Dev = 3.06 ms,  Bound = 19.690 ms
+# Euler    N100:      Mean = 1.641 s,  Std Dev = 0.066 s,  Bound = 1.740 s
+# Verlet   per_step:  Mean = 33.4 ms,  Std Dev = 5.47 ms,  Bound = 41.605 ms
+# Verlet   N100:      Mean = 3.288 s,  Std Dev = 0.150 s,  Bound = 3.513 s
+# Langevin per_step:  Mean = 31.7 ms,  Std Dev = 7.52 ms,  Bound = 42.98 ms
+# Langevin N100:      Mean = 3.307 s,  Std Dev = 0.128 s,  Bound = 3.499 s
+
+PERF_BOUNDS = {
+    "euler":    {"per_step_ms": 19.69, "N100_total_s": 1.74},
+    "verlet":   {"per_step_ms": 41.605, "N100_total_s": 3.513},
+    "langevin": {"per_step_ms": 42.98,  "N100_total_s": 3.499},
+}
+
+
 @pytest.mark.perf
 def test_per_step_time(simulation_factory, request):
     integrator_name = request.node.callspec.params["simulation_factory"]
@@ -67,121 +85,3 @@ def test_N_step_time(simulation_factory, request):
     # elapsed is a float in seconds
     elapsed = start_event.elapsed_time(end_event) / 1000  # ms -> s
     assert elapsed < PERF_BOUNDS[integrator_name]["N100_total_s"]
-
-
-# Run 20 times and make perf bounds 1.5x std dev of the mean.
-# The data is noisy and it shows that it can fail 
-# sometimes when nothing is necessarily wrong.
-
-# Euler    per_step:  Mean = 15.1 ms,  Std Dev = 3.06 ms,  Bound = 19.690 ms
-# Euler    N100:      Mean = 1.641 s,  Std Dev = 0.066 s,  Bound = 1.740 s
-# Verlet   per_step:  Mean = 33.4 ms,  Std Dev = 5.47 ms,  Bound = 41.605 ms
-# Verlet   N100:      Mean = 3.288 s,  Std Dev = 0.150 s,  Bound = 3.513 s
-# Langevin per_step:  Mean = 31.7 ms,  Std Dev = 7.52 ms,  Bound = 42.98 ms
-# Langevin N100:      Mean = 3.307 s,  Std Dev = 0.128 s,  Bound = 3.499 s
-
-PERF_BOUNDS = {
-    "euler":    {"per_step_ms": 19.69, "N100_total_s": 1.74},
-    "verlet":   {"per_step_ms": 41.605, "N100_total_s": 3.513},
-    "langevin": {"per_step_ms": 42.98,  "N100_total_s": 3.499},
-}
-
-# Run 1:
-# Euler: 17 ms, 1.746s
-# Verlet: 49 ms, 3.488s
-# Langevin: 34 ms, 3.433s
-
-# Run 2:
-# Euler: 14 ms, 1.726s
-# Verlet: 34 ms, 3.484s
-# Langevin: 33 ms, 3.529s
-
-# Run 3:
-# Euler: 13 ms, 1.585s
-# Verlet: 37 ms, 2.914s
-# Langevin: 29 ms, 2.984s
-
-# Run 4:
-# Euler: 16 ms, 1.627s
-# Verlet: 33 ms, 3.191s
-# Langevin: 18 ms, 3.176s
-
-# Run 5:
-# Euler: 17 ms, 1.643s
-# Verlet: 34 ms, 3.432s
-# Langevin: 31 ms, 3.253s
-
-# Run 6:
-# Euler: 11 ms, 1.634s
-# Verlet: 30 ms, 3.404s
-# Langevin: 28 ms, 3.467s
-
-# Run 7:
-# Euler: 13 ms, 1.642s
-# Verlet: 35 ms, 3.263s
-# Langevin: 31 ms, 3.421s
-
-# Run 8:
-# Euler: 17 ms, 1.666s
-# Verlet: 28 ms, 3.275s
-# Langevin: 39 ms, 3.304s
-
-# Run 9:
-# Euler: 18 ms, 1.550s
-# Verlet: 34 ms, 3.223s
-# Langevin: 17 ms, 3.342s
-
-# Run 10:
-# Euler: 17 ms, 1.676s
-# Verlet: 22 ms, 3.283s
-# Langevin: 27 ms, 3.354s
-
-# Run 11:
-# Euler: 17 ms, 1.719s
-# Verlet: 40 ms, 3.414s
-# Langevin: 23 ms, 3.244s
-
-# Run 12:
-# Euler: 17 ms, 1.615s
-# Verlet: 32 ms, 3.289s
-# Langevin: 34 ms, 3.295s
-
-# Run 13:
-# Euler: 17 ms, 1.662s
-# Verlet: 37 ms, 3.370s
-# Langevin: 36 ms, 3.204s
-
-# Run 14:
-# Euler: 17 ms, 1.601s
-# Verlet: 34 ms, 3.235s
-# Langevin: 35 ms, 3.283s
-
-# Run 15:
-# Euler: 17 ms, 1.749s
-# Verlet: 31 ms, 3.366s
-# Langevin: 39 ms, 3.362s
-
-# Run 16:
-# Euler: 8 ms, 1.647s
-# Verlet: 34 ms, 3.356s
-# Langevin: 37 ms, 3.488s
-
-# Run 17:
-# Euler: 17 ms, 1.573s
-# Verlet: 27 ms, 3.370s
-# Langevin: 50 ms, 3.344s
-
-# Run 18:
-# Euler: 8 ms, 1.480s
-# Verlet: 35 ms, 2.971s
-# Langevin: 36 ms, 3.255s
-
-# Run 19:
-# Euler: 17 ms, 1.664s
-# Verlet: 28 ms, 3.259s
-# Langevin: 29 ms, 3.239s
-
-# Run 20:
-# Euler: 14 ms, 1.618s
-# Verlet: 34 ms, 3.169s
-# Langevin: 28 ms, 3.168s
