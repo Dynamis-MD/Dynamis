@@ -2,6 +2,7 @@
 
 #include "distnnp_model/exchanger.hpp"
 #include <cuda_runtime.h>
+#include <cuda.h>
 #include <stdexcept>
 #include <cstring>
 
@@ -396,106 +397,130 @@ void IPCExchanger::push_backward(torch::Tensor grad_at_ghost, cudaStream_t strea
         stream);
 }
 
-// --- IPC Event synchronization ---
+// --- IPC push synchronization (generation counter) ---
 
-std::vector<uint8_t> IPCExchanger::create_and_export_event()
+std::vector<uint8_t> IPCExchanger::create_and_export_sync_handle()
 {
-    // Clean up any previous event
-    if (local_event_)
+    // Allocate a single uint32 counter in IPC-shareable memory.
+    if (local_counter_)
     {
-        cudaEventDestroy(local_event_);
-        local_event_ = nullptr;
+        cudaFree(local_counter_);
+        local_counter_ = nullptr;
     }
+    call_counter_ = 0;
 
-    auto err = cudaEventCreate(&local_event_,
-                               cudaEventDisableTiming | cudaEventInterprocess);
-    TORCH_CHECK(err == cudaSuccess,
-                "cudaEventCreate (interprocess) failed: ", cudaGetErrorString(err));
+    auto err = cudaMalloc(&local_counter_, sizeof(uint32_t));
+    TORCH_CHECK(err == cudaSuccess, 
+                "cudaMalloc (counter) failed: ", cudaGetErrorString(err));
+    err = cudaMemset(local_counter_, 0, sizeof(uint32_t));
+    TORCH_CHECK(err == cudaSuccess, 
+                "cudaMemset (counter) failed: ", cudaGetErrorString(err));
 
-    cudaIpcEventHandle_t handle;
-    err = cudaIpcGetEventHandle(&handle, local_event_);
+    cudaIpcMemHandle_t handle;
+    err = cudaIpcGetMemHandle(&handle, local_counter_);
     TORCH_CHECK(err == cudaSuccess,
-                "cudaIpcGetEventHandle failed: ", cudaGetErrorString(err));
+                "cudaIpcGetMemHandle (counter) failed: ", cudaGetErrorString(err));
 
     std::vector<uint8_t> bytes(sizeof(handle));
     std::memcpy(bytes.data(), &handle, sizeof(handle));
     return bytes;
 }
 
-void IPCExchanger::setup_events(
-    const std::vector<std::vector<uint8_t>> &all_event_handles)
+void IPCExchanger::setup_sync(
+    const std::vector<std::vector<uint8_t>> &all_sync_handles)
 {
-    TORCH_CHECK(is_setup_, "setup_events: must call setup() first");
-    TORCH_CHECK(local_event_ != nullptr,
-                "setup_events: must call create_and_export_event() first");
+    TORCH_CHECK(is_setup_, "setup_sync: must call setup() first");
+    TORCH_CHECK(local_counter_ != nullptr,
+                "setup_sync: must call create_and_export_sync_handle() first");
 
-    // Open remote events
-    for (auto &e : remote_events_)
+    // Close any previously opened remote counters.
+    for (auto &p : remote_counters_)
     {
-        if (e)
-            cudaEventDestroy(e);
+        if (p)
+            cudaIpcCloseMemHandle(reinterpret_cast<void *>(p));
     }
-    remote_events_.resize(world_size_, nullptr);
+    remote_counters_.assign(world_size_, 0);
 
     for (int64_t r = 0; r < world_size_; ++r)
     {
         if (r == rank_)
             continue;
 
-        cudaIpcEventHandle_t h;
-        TORCH_CHECK(all_event_handles[r].size() == sizeof(h),
-                    "Invalid IPC event handle size from rank ", r);
-        std::memcpy(&h, all_event_handles[r].data(), sizeof(h));
+        cudaIpcMemHandle_t h;
+        TORCH_CHECK(all_sync_handles[r].size() == sizeof(h),
+                    "Invalid IPC counter handle size from rank ", r);
+        std::memcpy(&h, all_sync_handles[r].data(), sizeof(h));
 
-        auto err = cudaIpcOpenEventHandle(&remote_events_[r], h);
+        void *ptr = nullptr;
+        auto err = cudaIpcOpenMemHandle(&ptr, h, cudaIpcMemLazyEnablePeerAccess);
         TORCH_CHECK(err == cudaSuccess,
-                    "cudaIpcOpenEventHandle for rank ", r,
+                    "cudaIpcOpenMemHandle (counter) for rank ", r,
                     " failed: ", cudaGetErrorString(err));
+        remote_counters_[r] = reinterpret_cast<CUdeviceptr>(ptr);
     }
 
-    events_setup_ = true;
+    sync_setup_ = true;
 }
 
 void IPCExchanger::record_push_complete(cudaStream_t stream)
 {
-    TORCH_CHECK(events_setup_, "record_push_complete: events not set up");
-    auto err = cudaEventRecord(local_event_, stream);
-    TORCH_CHECK(err == cudaSuccess,
-                "cudaEventRecord failed: ", cudaGetErrorString(err));
+    TORCH_CHECK(sync_setup_, "record_push_complete: counter not set up");
+    ++call_counter_;
+    // cuStreamWriteValue32 with default flags is ordered after prior stream
+    // operations — i.e. the write follows the push memcpy on this stream.
+    CUresult err = cuStreamWriteValue32(
+        reinterpret_cast<CUstream>(stream),
+        reinterpret_cast<CUdeviceptr>(local_counter_),
+        call_counter_, 0);
+    if (err != CUDA_SUCCESS)
+    {
+        const char *msg = nullptr;
+        cuGetErrorString(err, &msg);
+        TORCH_CHECK(false, "cuStreamWriteValue32 failed: ",
+                    (msg ? msg : "(unknown)"));
+    }
 }
 
 void IPCExchanger::wait_for_pushes(cudaStream_t stream)
 {
-    TORCH_CHECK(events_setup_, "wait_for_pushes: events not set up");
+    TORCH_CHECK(sync_setup_, "wait_for_pushes: counter not set up");
     for (int64_t r = 0; r < world_size_; ++r)
     {
-        if (r == rank_ || !remote_events_[r])
+        if (r == rank_ || !remote_counters_[r])
             continue;
-        auto err = cudaStreamWaitEvent(stream, remote_events_[r], 0);
-        TORCH_CHECK(err == cudaSuccess,
-                    "cudaStreamWaitEvent for rank ", r,
-                    " failed: ", cudaGetErrorString(err));
+        CUresult err = cuStreamWaitValue32(
+            reinterpret_cast<CUstream>(stream),
+            remote_counters_[r],
+            call_counter_, CU_STREAM_WAIT_VALUE_GEQ);
+        if (err != CUDA_SUCCESS)
+        {
+            const char *msg = nullptr;
+            cuGetErrorString(err, &msg);
+            TORCH_CHECK(false, "cuStreamWaitValue32 for rank ", r,
+                        " failed: ", (msg ? msg : "(unknown)"));
+        }
     }
 }
 
 void IPCExchanger::teardown()
 {
-    // Clean up events
-    if (local_event_)
+    // Clean up generation counter
+    if (local_counter_)
     {
-        cudaEventDestroy(local_event_);
-        local_event_ = nullptr;
+        cudaFree(local_counter_);
+        local_counter_ = nullptr;
     }
-    for (auto &e : remote_events_)
+    for (auto &p : remote_counters_)
     {
-        if (e)
+        if (p)
         {
-            cudaEventDestroy(e);
-            e = nullptr;
+            cudaIpcCloseMemHandle(reinterpret_cast<void *>(p));
+            p = 0;
         }
     }
-    remote_events_.clear();
-    events_setup_ = false;
+    remote_counters_.clear();
+    call_counter_ = 0;
+    sync_setup_ = false;
 
     if (!is_setup_)
         return;

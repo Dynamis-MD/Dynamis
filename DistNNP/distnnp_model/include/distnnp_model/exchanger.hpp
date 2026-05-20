@@ -1,6 +1,8 @@
 #pragma once
 #include <torch/extension.h>
 #include <cuda_runtime.h>
+#include <cuda.h>
+#include <cstdint>
 #include <vector>
 #include "distnnp_state/distnnp_state.hpp"
 
@@ -69,9 +71,9 @@ public:
     // write into peers' grad_recv_buffer.
     void push_backward(torch::Tensor grad_at_ghost, cudaStream_t stream = 0);
 
-    // --- IPC Event synchronization ---
-    std::vector<uint8_t> create_and_export_event();
-    void setup_events(const std::vector<std::vector<uint8_t>> &all_event_handles);
+    // --- IPC push synchronization (generation counter) ---
+    std::vector<uint8_t> create_and_export_sync_handle();
+    void setup_sync(const std::vector<std::vector<uint8_t>> &all_sync_handles);
     void record_push_complete(cudaStream_t stream = 0);
     void wait_for_pushes(cudaStream_t stream = 0);
 
@@ -115,10 +117,18 @@ private:
     std::vector<void *> opened_x_ptrs_;
     std::vector<void *> opened_grad_ptrs_;
 
-    // IPC events for stream-level synchronization
-    cudaEvent_t local_event_ = nullptr;           // this rank's event
-    std::vector<cudaEvent_t> remote_events_;      // opened events from peers
-    bool events_setup_ = false;
+    // IPC generation counter for one-sided push synchronization.
+    // After each push, the producer writes step N to its own counter via
+    // cudaStreamWriteValue32 (ordered after the push on the same stream).
+    // Consumers wait for the peer's counter >= N via cudaStreamWaitValue32
+    // before reading the ghost region. Monotonic — no slot reuse, and
+    // cudaStreamWaitValue32 blocks correctly even if the producer has not
+    // yet issued its write (unlike cudaStreamWaitEvent on an unrecorded
+    // event, which is a silent no-op).
+    uint32_t *local_counter_ = nullptr;             // cudaMalloc'd, IPC-shared
+    std::vector<CUdeviceptr> remote_counters_;      // peers' counters opened via IPC
+    uint32_t call_counter_ = 0;                     // step number, bumped each push
+    bool sync_setup_ = false;
 };
 
 // High-level feature exchanger interface.
@@ -167,8 +177,8 @@ public:
         int64_t rank,
         int64_t world_size);
 
-    std::vector<uint8_t> create_and_export_event() { return ipc_.create_and_export_event(); }
-    void setup_events(const std::vector<std::vector<uint8_t>> &all_event_handles) { ipc_.setup_events(all_event_handles); }
+    std::vector<uint8_t> create_and_export_sync_handle() { return ipc_.create_and_export_sync_handle(); }
+    void setup_sync(const std::vector<std::vector<uint8_t>> &all_sync_handles) { ipc_.setup_sync(all_sync_handles); }
     void record_push_complete() { ipc_.record_push_complete(0); }
     void wait_for_pushes() { ipc_.wait_for_pushes(0); }
 

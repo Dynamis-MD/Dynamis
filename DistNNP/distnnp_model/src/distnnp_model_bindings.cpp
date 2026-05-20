@@ -7,6 +7,41 @@ PYBIND11_MODULE(distnnp_model_impl, m)
 {
   m.def("push_buffer_create", &distnnp_model::push_buffer_create, "Gather rows into buffer by index");
 
+  py::class_<distnnp_model::IPCExchanger>(m, "IPCExchanger")
+    .def(py::init<>())
+    .def_static("allocate_ipc_buffer", &distnnp_model::IPCExchanger::allocate_ipc_buffer,
+         py::arg("rows"), py::arg("cols"), py::arg("device_index"))
+    .def("export_ipc_handle", &distnnp_model::IPCExchanger::export_ipc_handle,
+         py::arg("buffer"))
+    .def("setup", &distnnp_model::IPCExchanger::setup,
+         py::arg("x_buffer"),
+         py::arg("grad_recv_buffer"),
+         py::arg("all_x_handles"),
+         py::arg("all_grad_handles"),
+         py::arg("send_offsets"),
+         py::arg("send_local_indices"),
+         py::arg("recv_offsets"),
+         py::arg("all_recv_offsets"),
+         py::arg("all_num_local"),
+         py::arg("num_local"),
+         py::arg("feature_dim"),
+         py::arg("rank"),
+         py::arg("world_size"))
+    .def("push_forward",
+         [](distnnp_model::IPCExchanger &self, torch::Tensor x) { self.push_forward(x); },
+         py::arg("x_buffer"))
+    .def("push_backward",
+         [](distnnp_model::IPCExchanger &self, torch::Tensor g) { self.push_backward(g); },
+         py::arg("grad_at_ghost"))
+    .def("create_and_export_sync_handle", &distnnp_model::IPCExchanger::create_and_export_sync_handle)
+    .def("setup_sync", &distnnp_model::IPCExchanger::setup_sync,
+         py::arg("all_sync_handles"))
+    .def("record_push_complete",
+         [](distnnp_model::IPCExchanger &self) { self.record_push_complete(); })
+    .def("wait_for_pushes",
+         [](distnnp_model::IPCExchanger &self) { self.wait_for_pushes(); })
+    .def("teardown", &distnnp_model::IPCExchanger::teardown);
+
   py::class_<distnnp_model::FeatureExchanger>(m, "FeatureExchanger")
     .def(py::init<>())
     // --- shehtab's public interface ---
@@ -38,15 +73,15 @@ PYBIND11_MODULE(distnnp_model_impl, m)
          py::arg("feature_dim"),
          py::arg("rank"),
          py::arg("world_size"))
-    .def("create_and_export_event", &distnnp_model::FeatureExchanger::create_and_export_event,
-         "Create interprocess event and return IPC handle (64 bytes)")
-    .def("setup_events", &distnnp_model::FeatureExchanger::setup_events,
-         "Open remote IPC events for stream-level sync",
-         py::arg("all_event_handles"))
+    .def("create_and_export_sync_handle", &distnnp_model::FeatureExchanger::create_and_export_sync_handle,
+         "Allocate IPC sync counter and return its IPC mem handle")
+    .def("setup_sync", &distnnp_model::FeatureExchanger::setup_sync,
+         "Open remote IPC sync counters for stream-level push synchronization",
+         py::arg("all_sync_handles"))
     .def("record_push_complete", &distnnp_model::FeatureExchanger::record_push_complete,
-         "Record completion event on default stream")
+         "Bump sync counter on default stream after push completes")
     .def("wait_for_pushes", &distnnp_model::FeatureExchanger::wait_for_pushes,
-         "Wait for all remote pushes to complete on default stream")
+         "Wait on default stream until all peers' sync counters reach current step")
     .def("teardown", &distnnp_model::FeatureExchanger::teardown)
     .def("is_ipc_setup", &distnnp_model::FeatureExchanger::is_ipc_setup)
     .def("set_ce_threshold_bytes", &distnnp_model::FeatureExchanger::set_ce_threshold_bytes,

@@ -90,13 +90,13 @@ def _worker(rank, world_size, result_dict):
         n_local, F, rank, world_size,
     )
 
-    # Setup events
-    event_handle = exchanger.create_and_export_event()
-    event_handle_tensor = torch.tensor(event_handle, dtype=torch.uint8, device=device)
-    all_event_handles_tensor = [torch.zeros(len(event_handle), dtype=torch.uint8, device=device) for _ in range(world_size)]
-    dist.all_gather(all_event_handles_tensor, event_handle_tensor)
-    all_event_handles = [t.cpu().tolist() for t in all_event_handles_tensor]
-    exchanger.setup_events(all_event_handles)
+    # Setup push-sync counter
+    sync_handle = exchanger.create_and_export_sync_handle()
+    sync_handle_tensor = torch.tensor(sync_handle, dtype=torch.uint8, device=device)
+    all_sync_handles_tensor = [torch.zeros(len(sync_handle), dtype=torch.uint8, device=device) for _ in range(world_size)]
+    dist.all_gather(all_sync_handles_tensor, sync_handle_tensor)
+    all_sync_handles = [t.cpu().tolist() for t in all_sync_handles_tensor]
+    exchanger.setup_sync(all_sync_handles)
 
     # --- Create local features ---
     # Use deterministic values: rank * 1000 + atom_index for easy verification
