@@ -18,3 +18,9 @@
 #define CHECK_INPUT(x) \
   CHECK_CUDA(x);       \
   CHECK_CONTIGUOUS(x)
+
+
+#define FI_CHECK(call, msg) \
+  do { int err = (call); if (err != 0) { \
+      std::cerr << msg << ": " << fi_strerror(-err) << std::endl; exit(1); \
+  }} while(0)

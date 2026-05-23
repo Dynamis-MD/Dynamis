@@ -5,6 +5,10 @@
 #include <cstdint>
 #include <vector>
 #include "distnnp_state/distnnp_state.hpp"
+#include "distnnp_model/p2p_exchanger.hpp"
+#include "distnnp_model/rdma_exchanger.hpp"
+#include <nccl.h>
+
 
 namespace distnnp_model
 {
@@ -18,6 +22,7 @@ struct PushTarget
     int64_t send_start;     // start index in send_local_indices for this peer
     int64_t send_count;     // number of atoms to push to this peer
 };
+
 
 // One-sided push feature exchanger over NVLink (CUDA IPC).
 //
@@ -131,8 +136,12 @@ private:
     bool sync_setup_ = false;
 };
 
+
 // High-level feature exchanger interface.
-// Wraps IPCExchanger for NVLink-based one-sided push.
+// Wraps IPCExchanger for NVLink-based one-sided push
+// and wraps RDMAExchanger for LibFabric(interconnect)-based 
+// one-sided push and sync primitives
+
 class FeatureExchanger
 {
 public:
@@ -189,6 +198,8 @@ public:
 
 private:
     IPCExchanger ipc_;
+    RDMAExchanger rdma_;
+
     int64_t ce_threshold_bytes_ = 0;
 
     // References to IPC-allocated buffers (kept alive via torch::Tensor refcount)
