@@ -17,12 +17,21 @@ public:
   ~FeatureExchanger();
 
 public:
-  // --- Public interface ---
-  virtual void setup();
-  virtual void reset();
-  virtual torch::Tensor feature_push(
-      const torch::Tensor local_features,
+  virtual void setup(const DistEnvironment &dist_env,
+                     const PartitionMessagePassingInfo &partition_comm_info,
+                     const size_t max_feature_dim);
+  virtual void reset(const PartitionMessagePassingInfo &partition_comm_info,
+                     const size_t max_feature_dim);
+  virtual void feature_push_forward(
+      torch::Tensor return_features, const torch::Tensor local_features,
       const distnnp_state::PartitionMessagePassingInfo &partition_info);
+  virtual void feature_push_grad(
+      torch::Tensor grad_local_features,
+      const torch::Tensor grad_output_features,
+      const distnnp_state::PartitionMessagePassingInfo &partition_info);
+
+private:
+  size_t max_feature_dim_ = 0;
 };
 
 // Trampoline Class
@@ -39,11 +48,21 @@ public:
     PYBIND11_OVERRIDE_PURE(void, FeatureExchanger, reset);
   }
 
-  torch::Tensor feature_push(const torch::Tensor local_features,
-                             const distnnp_state::PartitionMessagePassingInfo
-                                 &partition_info) override {
+  void feature_push_forward(torch::Tensor return_features,
+                            const torch::Tensor local_features,
+                            const distnnp_state::PartitionMessagePassingInfo
+                                &partition_info) override {
     PYBIND11_OVERRIDE_PURE(torch::Tensor, FeatureExchanger, feature_push,
-                           local_features, partition_info);
+                           return_features, local_features, partition_info);
+  }
+
+  void feature_push_grad(torch::Tensor grad_local_features,
+                         const torch::Tensor grad_output_features,
+                         const distnnp_state::PartitionMessagePassingInfo
+                             &partition_info) override {
+    PYBIND11_OVERRIDE_PURE(torch::Tensor, FeatureExchanger, feature_push,
+                           grad_local_features, grad_output_features,
+                           partition_info);
   }
 };
 
