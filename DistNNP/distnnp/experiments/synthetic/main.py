@@ -1,9 +1,12 @@
-from setup_system import create_dist_nnp_state, sync_and_repartition
+from setup_system import generate_synthetic_dataset, create_dist_sim_state
 from distnnp_model.empirical import LennardJonesPotentialModel
 from distnnp.simulator import Simulator, SimulatorConfig
 from distnnp_integrator import Verlet
-from distnnp_state import SimState
+from distnnp import SimState
 import torch
+from distnnp_state import TorchDistEnv
+import os
+import gc
 
 
 def log_state(state: SimState, step_num: int):
@@ -11,18 +14,44 @@ def log_state(state: SimState, step_num: int):
     rank = state.dist_env.global_rank
 
     local_torch_state = {}
-    local_torch_state["pos"] = state.local_partition_info.local_atom_positions
-    local_torch_state["vel"] = state.local_partition_info.local_atom_velocities
-    local_torch_state["atom"] = state.local_partition_info.partition_indices
+    local_torch_state["pos"] = state._local_molecular_info.atom_positions
+    local_torch_state["vel"] = state._local_molecular_info.atom_velocities
+    local_torch_state["atom"] = state._local_molecular_info.atom_types
 
     torch.save(local_torch_state, f"rank_{rank}_step_{step_num}.pt")
 
 
+def reset_gpu():
+    """Reset GPU memory stats."""
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+
+
+def get_peak_mb():
+    return torch.cuda.max_memory_allocated() / (1024 * 1024)
+
+
 def create_and_run_experiment(num_atoms: int):
+    torch_distributed_env = TorchDistEnv()
+
+    local_rank = torch_distributed_env.local_rank
+    global_rank = torch_distributed_env.global_rank
+    world_size = torch_distributed_env.world_size
+    device = torch_distributed_env.device
+
+    for i in range(world_size):
+        if i == global_rank:
+            print(
+                f"Hello from global rank {global_rank}, local rank {local_rank}, world size {world_size}, device {device}!"
+            )
+        torch_distributed_env.barrier()
+
     sim_config = SimulatorConfig(
         timestep_fs=0.5,
         total_steps=1000,
         cutoff_angstrom=6.0,
+        side_length_angstrom=20.0,
         ghost_buffer_angstrom=0.5,
         partition_algorithm="sfc_morton",
         # integrator="verlet",
@@ -36,29 +65,26 @@ def create_and_run_experiment(num_atoms: int):
         backend="nccl",
     )
 
-    dist_nnp_state = create_dist_nnp_state(num_atoms)
+    global_molecular_system = generate_synthetic_dataset(
+        num_atoms=1000, box_size=20.0, device=device
+    )
 
-    epsilons = torch.rand(100, requires_grad=True).to(device="cuda")
-    sigmas = torch.rand(100, requires_grad=True).to(device="cuda")
-
+    dist_nnp_state = create_dist_sim_state(num_atoms=num_atoms)
+    epsilons = torch.rand(100, requires_grad=True).to(device=device)
+    sigmas = torch.rand(100, requires_grad=True).to(device=device)
     potential = LennardJonesPotentialModel(epsilon=epsilons, sigma=sigmas)
-
     integrator = Verlet(sim_config.timestep_fs)
-    simulator = Simulator(potential, integrator, sim_config)
-
-    simulator._set_state(dist_nnp_state)
-
-    for step_num in range(sim_config.total_steps):
-        step_size = sim_config.timestep_fs
-        simulator.step(step_size)
-
-        if step_num % sim_config.rebalance_interval == 0:
-            dist_nnp_state = simulator.state
-            repartitioned_state = sync_and_repartition(dist_nnp_state)
-            simulator._set_state(repartitioned_state)
-
-        if step_num % sim_config.log_interval == 0:
-            log_state(dist_nnp_state, step_num)
+    simulator = Simulator(
+        model=potential,
+        integrator=integrator,
+        dist_environment=torch_distributed_env.dist_env,
+        config=sim_config,
+        device=device,
+    )
+    simulator.initialize_simulator_state(global_molecular_system, device=device)
+    torch_distributed_env.barrier()
+    simulator.step(sim_config.timestep_fs)
+    torch_distributed_env.barrier()
 
 
 def main():

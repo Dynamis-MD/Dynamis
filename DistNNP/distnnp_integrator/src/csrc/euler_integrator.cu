@@ -15,10 +15,11 @@ namespace
       const int num_atoms)
   {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < num_atoms)
+    if (idx < num_atoms * 3)
     {
+      const int atom_idx = idx / 3;
       // Update velocity: v(t + dt) = v(t) + (F(t) / m) * dt
-      velocities[idx] += (forces[idx] / masses[idx]) * dt;
+      velocities[idx] += (forces[idx] / masses[atom_idx]) * dt;
       // Update position: x(t + dt) = x(t) + v(t + dt) * dt
       positions[idx] += velocities[idx] * dt;
     }
@@ -49,7 +50,7 @@ namespace distnnp_integrator
 
     // Launch the CUDA kernel to perform the Euler integration step
     int threads_per_block = 256;
-    int blocks = (num_atoms + threads_per_block - 1) / threads_per_block;
+    int blocks = (num_atoms * 3 + threads_per_block - 1) / threads_per_block;
 
     auto device_index = positions.device().index();
     auto stream = at::cuda::getCurrentCUDAStream(device_index);

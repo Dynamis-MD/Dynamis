@@ -96,9 +96,6 @@ static PartitionMessagePassingInfo do_partition(
     int64_t num_local = my_indices.size(0);
 
     info.partition_indices     = state.atom_vertex_numbers.index_select(0, my_indices);
-    info.local_atom_positions  = state.atom_positions.index_select(0, my_indices);
-    info.local_atom_velocities = state.atom_velocities.index_select(0, my_indices);
-
     info.global_send_recv_matrix = torch::zeros({W, W}, long_opts);
     info.global_send_recv_matrix.index_put_({R, R}, num_local);
 

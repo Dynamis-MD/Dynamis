@@ -16,7 +16,7 @@ SFCCurveType = distnnp_state_impl.SFCCurveType
 # CUDA radius graph with PBC
 from distnnp_state.radius_graph_pbc_cuda import radius_graph_pbc_cuda
 from distnnp_state.distnnp_state_impl import edge_distances
-from distnnp_state.state_wrapper import SimState
+from distnnp_state.state_wrapper import TorchDistEnv
 
 # IO
 TrajectoryWriter = distnnp_state_impl.TrajectoryWriter
@@ -34,5 +34,5 @@ __all__ = [
     "TrajectoryWriter",
     "radius_graph_pbc_cuda",
     "edge_distances",
-    "SimState",
+    "TorchDistEnv",
 ]

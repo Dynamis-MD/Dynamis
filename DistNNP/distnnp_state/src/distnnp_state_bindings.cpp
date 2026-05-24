@@ -1,7 +1,6 @@
 #include "distnnp_state/distnnp_state.hpp"
 #include "distnnp_state/partitioner.hpp"
 #include "distnnp_state/radius_pbc.hpp"
-#include "distnnp_state/edge_distances.hpp"
 #include "distnnp_state/trajectory_writer.hpp"
 #include <torch/extension.h>
 
@@ -14,6 +13,7 @@ PYBIND11_MODULE(distnnp_state_impl, m)
         .def_readwrite("atom_types", &distnnp_state::MolecularInfo::atom_types)
         .def_readwrite("atom_positions", &distnnp_state::MolecularInfo::atom_positions)
         .def_readwrite("atom_velocities", &distnnp_state::MolecularInfo::atom_velocities)
+        .def_readwrite("atom_forces", &distnnp_state::MolecularInfo::atom_forces)
         .def_readwrite("edge_counts", &distnnp_state::MolecularInfo::edge_counts);
 
     py::class_<distnnp_state::DistEnvironment>(m, "DistEnvironment")
@@ -35,8 +35,6 @@ PYBIND11_MODULE(distnnp_state_impl, m)
         .def(py::init<>())
         .def_readwrite("partition_id", &distnnp_state::PartitionMessagePassingInfo::partition_id)
         .def_readwrite("partition_indices", &distnnp_state::PartitionMessagePassingInfo::partition_indices)
-        .def_readwrite("local_atom_positions", &distnnp_state::PartitionMessagePassingInfo::local_atom_positions)
-        .def_readwrite("local_atom_velocities", &distnnp_state::PartitionMessagePassingInfo::local_atom_velocities)
         .def_readwrite("global_send_recv_matrix", &distnnp_state::PartitionMessagePassingInfo::global_send_recv_matrix)
         .def_readwrite("send_offsets", &distnnp_state::PartitionMessagePassingInfo::send_offsets)
         .def_readwrite("send_local_indices", &distnnp_state::PartitionMessagePassingInfo::send_local_indices)
@@ -51,6 +49,7 @@ PYBIND11_MODULE(distnnp_state_impl, m)
         .def_readwrite("dist_env", &distnnp_state::DistNNPState::dist_env)
         .def_readwrite("sim_config", &distnnp_state::DistNNPState::sim_config)
         .def_readwrite("global_molecular_info", &distnnp_state::DistNNPState::global_molecular_info)
+        .def_readwrite("local_molecular_info", &distnnp_state::DistNNPState::local_molecular_info)
         .def_readwrite("local_partition_info", &distnnp_state::DistNNPState::local_partition_info);
 
     py::class_<distnnp_state::KDTreePartitioner>(m, "KDTreePartitioner")
@@ -101,9 +100,13 @@ PYBIND11_MODULE(distnnp_state_impl, m)
              py::arg("output_dir") = "./trajectory")
         .def("initialize", &distnnp_state::TrajectoryWriter::initialize,
              "Writes front matter and initializes environment from an xyz file",
-             py::arg("xyz_file_name"),
+             py::arg("input_file_name"),
              py::arg("time_per_step"),
              py::arg("steps_per_write"))
+        .def("write_to_xyz", &distnnp_state::TrajectoryWriter::write_to_xyz,
+             "Writes state to an xyz file",
+             py::arg("state"),
+             py::arg("file_name"))
         .def("update_atom_counts", &distnnp_state::TrajectoryWriter::update_atom_counts,
              "Update the rank offsets. Should be called after every repartition",
              py::arg("counts"))
@@ -112,7 +115,11 @@ PYBIND11_MODULE(distnnp_state_impl, m)
              py::arg("frame_idx"),
              py::arg("indices"),
              py::arg("positions"),
-             py::arg("velocities"));
+             py::arg("velocities"))
+        .def("__enter__", [](distnnp_state::TrajectoryWriter &self) {
+             return &self;
+        })
+        .def("__exit__", [](distnnp_state::TrajectoryWriter &self, py::args args) {});
 
     m.def("radius_graph_pbc", &radius_graph_pbc,
           "CUDA cell-list radius graph with selective PBC tiling",
@@ -122,9 +129,4 @@ PYBIND11_MODULE(distnnp_state_impl, m)
           py::arg("radius"),
           py::arg("max_num_neighbors"),
           py::arg("enforce_max_strictly"));
-
-    m.def("edge_distances", &edge_distances,
-          "CUDA edge distance vector/magnitude computation",
-          py::arg("pos"),
-          py::arg("edge_index"));
 }

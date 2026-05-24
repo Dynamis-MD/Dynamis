@@ -7,7 +7,9 @@ from distnnp_integrator._data_check import (
     check_shapes_match,
 )
 from distnnp_integrator.integrator import DistNNPIntegrator
-from distnnp_state import SimState
+from distnnp_state import DistNNPState
+from distnnp_model import DistNNPModel
+from distnnp_integrator.masses import TORCH_MASSES
 
 
 class Verlet(DistNNPIntegrator):
@@ -65,12 +67,12 @@ class Verlet(DistNNPIntegrator):
 
         self.cpp_integrator.halfstep2(vel, frc, mass, dt)
 
-    def step(self, state: SimState, model, dt=None):
+    def step(self, dist_state: DistNNPState, model: DistNNPModel, dt=None):
         """
         Update positions and velocities based on the Velocity Verlet integration method.
 
         Args:
-            state (DistNNPState): The current state of the system, containing positions, velocities, forces, and masses.
+            dist_state (DistNNPState): The current state of the system, containing positions, velocities, forces, and masses.
             model (DistNNPModel): The potential model used to compute forces based on the current state.
             dt (float, optional): Optional override for the time step size.
         """
@@ -79,14 +81,26 @@ class Verlet(DistNNPIntegrator):
         else:
             step_size = self.dt
 
-        energy, new_forces = model(state)
-        state.forces = new_forces
+        state = dist_state.local_molecular_info
+        atom_masses = TORCH_MASSES.to(state.atom_positions.device)[state.atom_types.reshape(-1)]
+
+        # 0. Compute forces
+        energy, new_forces = model(dist_state)
+        state.atom_forces = new_forces
         # 1. Update v to half-step, and pos to full-step
-        self.halfstep1_(state.pos, state.vel, state.forces, state.mass, step_size)
+        self.halfstep1_(
+            state.atom_positions,
+            state.atom_velocities,
+            state.atom_forces,
+            atom_masses,
+            step_size,
+        )
 
         # 2. Recompute forces at new positions
-        energy, new_forces = model(state)
-        state.forces = new_forces
+        energy, new_forces = model(dist_state)
+        state.atom_forces = new_forces
 
         # 3. Complete the velocity full-step update
-        self.halfstep2_(state.vel, state.forces, state.mass, step_size)
+        self.halfstep2_(
+            state.atom_velocities, state.atom_forces, atom_masses, step_size
+        )

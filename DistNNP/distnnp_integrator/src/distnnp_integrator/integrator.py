@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from distnnp_state import DistNNPState
-from distnnp_model import DistNNPModel
+
+
+# atomic_masses =
 
 
 class DistNNPIntegrator(ABC):
