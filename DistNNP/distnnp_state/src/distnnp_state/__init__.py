@@ -35,4 +35,6 @@ __all__ = [
     "radius_graph_pbc_cuda",
     "edge_distances",
     "TorchDistEnv",
+    "edge_distances",
+    "SimState",
 ]

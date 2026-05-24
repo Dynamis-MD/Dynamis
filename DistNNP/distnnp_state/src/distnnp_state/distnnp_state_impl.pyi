@@ -60,6 +60,16 @@ class KDTreePartitioner:
         Partition: auto-compute edge weights via radius_graph_pbc (CUDA)
         """
 class MolecularInfo:
+<<<<<<< HEAD
+=======
+    atom_forces: torch.Tensor
+    atom_masses: torch.Tensor
+    atom_vertex_numbers: torch.Tensor
+    atom_types: torch.Tensor
+    atom_positions: torch.Tensor
+    atom_types: torch.Tensor
+    atom_velocities: torch.Tensor
+>>>>>>> 7d5976a8c0bd10ab3afaff4d588a0d6fcdcd3dac
     atom_vertex_numbers: torch.Tensor
     atom_types: torch.Tensor
     atom_positions: torch.Tensor
@@ -181,4 +191,9 @@ class TrajectoryWriter:
 def radius_graph_pbc(pos: torch.Tensor, cell: torch.Tensor, pbc: torch.Tensor, radius: typing.SupportsFloat, max_num_neighbors: typing.SupportsInt, enforce_max_strictly: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     CUDA cell-list radius graph with selective PBC tiling
+    """
+
+def edge_distances(pos: torch.Tensor, edge_index: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    CUDA pairwise atom distance calculation
     """
