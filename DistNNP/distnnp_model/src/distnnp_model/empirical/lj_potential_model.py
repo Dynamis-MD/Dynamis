@@ -7,9 +7,10 @@ from distnnp_state import (
     PartitionMessagePassingInfo,
 )
 from distnnp_model.comm.feature_push import FeaturePushToExchange
-from distnnp_model.comm.exchanger import Exchanger, GPUDirectExchanger
+from distnnp_model.comm.exchanger import Exchanger
+from distnnp_model.comm.gpudirect_exchanger import GPUDirectExchanger
 from typing import Optional
-import torch.distributed as dist
+
 
 
 def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma, n_local):
@@ -83,22 +84,19 @@ class LennardJonesPotentialModel(DistNNPModel):
         self.exchanger_ = exchanger if exchanger else GPUDirectExchanger()
 
     def initialize_buffers(
-        self, partition_info: PartitionMessagePassingInfo, device
+        self, partition_info: DistNNPState, device
     ) -> None:
         # For this simple LJ model, we don't have any learnable parameters or buffers that depend on the partitioning
         # However, if we wanted to, we could initialize any necessary buffers here based on the partition_info
-        self.position_exchanger.setup_exchanger(
-            feature_dim=3, partition_info=partition_info, device=device
-        )
-        self.atom_type_exchanger.setup_exchanger(
-            feature_dim=1, partition_info=partition_info, device=device
+        self.exchanger_.setup_exchanger(
+            max_feature_dim=3, partition_info=partition_info
         )
 
     def __call__(self, distributed_state: DistNNPState, *args, **kwargs):
         prev_local_positions = distributed_state.local_molecular_info.atom_positions
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
         positions: torch.Tensor = FeaturePushToExchange.apply(
-            local_positions, distributed_state, self.position_exchanger
+            local_positions, distributed_state, self.exchanger_
         )  # type: ignore
 
         # Define local_atom_types (Argon = type 0) for exchange
@@ -111,7 +109,7 @@ class LennardJonesPotentialModel(DistNNPModel):
             atom_types = FeaturePushToExchange.apply(
                 local_atom_types.float().unsqueeze(1),
                 distributed_state,
-                self.atom_type_exchanger,
+                self.exchanger_,
             ).squeeze(1).long()  # type: ignore
 
         # Construct the radius graph with PBC using the local positions (including boundary atoms)

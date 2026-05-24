@@ -1,5 +1,5 @@
 import torch
-from distnnp_state import PartitionMessagePassingInfo
+from distnnp_state import PartitionMessagePassingInfo, DistEnvironment
 from abc import ABC, abstractmethod
 
 
@@ -10,21 +10,19 @@ class Exchanger(ABC):
         super().__init__()
 
     @abstractmethod
-    def setup_exchanger(
-        self,
-        feature_dim: int,
+    def setup_exchanger(self,
+        distributed_env: DistEnvironment,
         partition_info: PartitionMessagePassingInfo,
-        device: torch.device,
-    ) -> None:
+        max_feature_dim: int) -> None:
         """Helper function to setup the feature exchanger for testing.
 
         This function performs the necessary steps to initialize the feature exchanger,
         including allocating IPC buffers, exchanging handles, and setting up events.
 
         Args:
-            exchanger (FeatureExchanger): The feature exchanger instance to setup.
-            local_features (torch.Tensor): The local features tensor for the current rank.
+            distributed_env: The current distributed world description
             partition_info: The partition information containing send/recv details.
+            max_feature_dim: Maximum feature size of any row sent
         """
         ...
 
@@ -50,7 +48,8 @@ class Exchanger(ABC):
             partition_info: The partition information containing send/recv details.
 
         Returns:
-            torch.Tensor: The features received from neighboring partitions after the push to exchange operation.
+            torch.Tensor: The features received from neighboring partitions after the push to exchange operation concatenated 
+                          with the local features_to_push. 
         """
         ...
 
@@ -64,10 +63,12 @@ class Exchanger(ABC):
         """Perform the backward pass for the feature push operation.
 
         Args:
-            grad_output (torch.Tensor): The gradients received from the neighboring partitions for the features that were
-                pushed in the forward pass.
+            grad_output (torch.Tensor): The gradients calculated locally for the local vertices as well as the vertices 
+                                        received from the neighboring partitions for the features that were
+                                        pushed in the forward pass.
             partition_info: The partition information containing send/recv details.
 
         Returns:
-            torch.Tensor: The gradients for the input features that were pushed in the forward pass.
+            torch.Tensor: The gradients for the input features that were pushed in the forward pass. 
+                          Gradients received from are added into the local gradients.
         """

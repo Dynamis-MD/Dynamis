@@ -2,7 +2,7 @@ import torch
 from distnnp_model import FeatureExchanger
 import torch.distributed as dist
 from distnnp_model.comm.exchanger import Exchanger
-from distnnp_state import PartitionMessagePassingInfo
+from distnnp_state import PartitionMessagePassingInfo, DistEnvironment
 
 
 class GPUDirectExchanger(Exchanger):
@@ -59,16 +59,14 @@ class GPUDirectExchanger(Exchanger):
         """
         # The actual implementation of the backward pass for the feature push using GPU Direct would go here.
         # This is a placeholder to illustrate where the communication logic for the backward pass would be implemented.
-        return self.exchanger.feature_push_backward(
+        return self.exchanger_.feature_push_backward(
             grad_output, partition_info
         )
 
-    def setup_exchanger(
-        self,
-        feature_dim: int,
+     def setup_exchanger(self,
+        distributed_env: DistEnvironment,
         partition_info: PartitionMessagePassingInfo,
-        device: torch.device,
-    ):
+        max_feature_dim: int) -> None:
         """Helper function to setup the feature exchanger for testing.
 
         This function performs the necessary steps to initialize the feature exchanger,

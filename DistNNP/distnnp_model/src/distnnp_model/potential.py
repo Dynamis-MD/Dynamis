@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Any
-from distnnp_state import DistNNPState, PartitionMessagePassingInfo
+from distnnp_state import DistNNPState
 from typing import Tuple, Union
 import torch
 
@@ -34,7 +34,7 @@ class DistNNPModel(ABC):
 
     @abstractmethod
     def initialize_buffers(
-        self, partition_info: PartitionMessagePassingInfo, device: torch.device
+        self, distributed_state: DistNNPState, device: torch.device
     ) -> None:
         """
         Initialize any necessary buffers or internal state based on the distributed state.
@@ -43,6 +43,6 @@ class DistNNPModel(ABC):
         or buffers that depend on the current partitioning of the system.
 
         Args:
-            distributed_state (PartitionMessagePassingInfo): The current state of the distributed system.
+            distributed_state (DistNNPState): The current state of the distributed system.
         """
         ...
