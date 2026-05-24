@@ -13,9 +13,8 @@ class Exchanger(ABC):
         self.is_ipc_setup = False
 
     @abstractmethod
-    def setup_exchanger(
-        self,
-        feature_dim: int,
+    def setup_exchanger(self,
+        distributed_env: DistEnvironment,
         partition_info: PartitionMessagePassingInfo,
         device: torch.device,
     ):
@@ -25,9 +24,9 @@ class Exchanger(ABC):
         including allocating IPC buffers, exchanging handles, and setting up events.
 
         Args:
-            exchanger (FeatureExchanger): The feature exchanger instance to setup.
-            local_features (torch.Tensor): The local features tensor for the current rank.
+            distributed_env: The current distributed world description
             partition_info: The partition information containing send/recv details.
+            max_feature_dim: Maximum feature size of any row sent
         """
         ...
 
@@ -95,7 +94,8 @@ class Exchanger(ABC):
             partition_info: The partition information containing send/recv details.
 
         Returns:
-            torch.Tensor: The features received from neighboring partitions after the push to exchange operation.
+            torch.Tensor: The features received from neighboring partitions after the push to exchange operation concatenated 
+                          with the local features_to_push. 
         """
         # With a single rank there are no peers, no halo, and a 0-byte
         # grad_recv_buffer that cudaIpcGetMemHandle would reject. Skip IPC
@@ -127,7 +127,8 @@ class Exchanger(ABC):
             partition_info: The partition information containing send/recv details.
 
         Returns:
-            torch.Tensor: The gradients for the input features that were pushed in the forward pass.
+            torch.Tensor: The gradients for the input features that were pushed in the forward pass. 
+                          Gradients received from are added into the local gradients.
         """
         if self._is_single_rank():
             return grad_output
