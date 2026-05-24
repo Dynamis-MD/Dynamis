@@ -79,10 +79,8 @@ class LennardJonesPotentialModel(DistNNPModel):
         super().__init__()
         self.epsilon = epsilon
         self.sigma = sigma
-        # Always use independent exchangers for different dimensionalities (3D pos vs 1D types)
-        # to prevent IPC buffer shape mismatches.
-        self.position_exchanger = GPUDirectExchanger()
-        self.atom_type_exchanger = GPUDirectExchanger()
+        
+        self.exchanger_ = exchanger if exchanger else GPUDirectExchanger()
 
     def initialize_buffers(
         self, partition_info: PartitionMessagePassingInfo, device

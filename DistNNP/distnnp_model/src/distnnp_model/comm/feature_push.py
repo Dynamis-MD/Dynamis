@@ -32,7 +32,6 @@ class FeaturePushToExchange(Function):
         ctx._exchanger = exchanger
 
         partition_info: PartitionMessagePassingInfo = state.local_partition_info
-
         received_features = exchanger.feature_push_forward(
             features_to_push, partition_info
         )
@@ -53,11 +52,10 @@ class FeaturePushToExchange(Function):
         # Implement the backward pass for the feature push operation
 
         state = ctx._state
-        input_feature_shape = ctx._features_to_push_shape
         exchanger = ctx._exchanger
 
         recevied_features_grad = exchanger.feature_push_backward(
-            grad_output, input_feature_shape, state.local_partition_info
+            grad_output, state.local_partition_info
         )
 
         return recevied_features_grad, None, None  # No gradients for state or exchanger
