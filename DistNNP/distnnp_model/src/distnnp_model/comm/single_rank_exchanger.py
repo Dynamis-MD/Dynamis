@@ -1,14 +1,14 @@
 import torch
 from distnnp_model.comm.exchanger import Exchanger
-from distnnp_state import PartitionMessagePassingInfo
+from distnnp_state import PartitionMessagePassingInfo, DistEnvironment
 
 
 class SingleRankExchanger(Exchanger):
     def __init__(self) -> None:
         super().__init__()
 
-    def setup_exchanger(self, feature_dim: int, partition_info: PartitionMessagePassingInfo, device: torch.device):
-        pass
+    def setup_exchanger(self, distributed_env: DistEnvironment, partition_info: PartitionMessagePassingInfo, max_feature_dim: int) -> None:
+        pass 
 
     def reset_buffers(self, feature_dim: int, partition_info: PartitionMessagePassingInfo, device: torch.device) -> None:
         pass 

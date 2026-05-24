@@ -55,7 +55,8 @@ struct PartitionMessagePassingInfo {
   torch::Tensor send_local_indices; // [total_send] local atom indices to push
                                     // to neighbors
   torch::Tensor recv_offsets;       // [world_size + 1] CSR row pointers
-  torch::Tensor recv_ghost_indices; // [total_recv] local ghost slot indices
+  torch::Tensor recv_ghost_indices; // [total_recv] local ghost slot indices.
+                                    // Where the received gradients go
 
   // --- Interior mask ---
   torch::Tensor

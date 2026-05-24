@@ -28,7 +28,7 @@ class Exchanger(ABC):
 
     @abstractmethod
     def reset_buffers(self,
-        feature_dim: int,
+        max_feature_dim: int,
         partition_info: PartitionMessagePassingInfo,
         device: torch.device,
     ) -> None:

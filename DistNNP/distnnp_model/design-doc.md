@@ -193,19 +193,21 @@ class Exchanger(ABC):
 
 ### `setup_exchanger`
 
-Called **once per partition** before any exchange. Takes the full `DistEnvironment` and `PartitionMessagePassingInfo` to establish connectivity between ranks, and allocates persistent internal buffers sized for `max_feature_dim` columns. After this call, the exchanger is ready to handle any `feature_dim <= max_feature_dim` without further setup.
+Called **once per partition** before any exchange. Takes the full `DistEnvironment` and `PartitionMessagePassingInfo` to establish connectivity between ranks, and allocates persistent internal buffers sized for `max_feature_dim` columns. After this call, the exchanger is ready to handle any exchange where `features_to_push.shape[1] <= max_feature_dim`.
 
-Pass the largest feature dimension that will appear across all layers (or across all steps if repartitioning changes atom counts) as `max_feature_dim`.
+`max_feature_dim` is a hard upper bound. Passing a tensor with `F > max_feature_dim` to `feature_push_forward` is undefined behavior — implementations will raise an error or produce memory errors.
+
+Pass the largest feature dimension that will appear across all layers as `max_feature_dim`.
 
 ### `reset_buffers`
 
-Called **once per exchange** to reconfigure the active feature dimension to `feature_dim`. This is a lightweight operation — it does not reallocate buffers or re-establish connections. It allows the same exchanger to be reused across GNN layers with different embedding widths.
+Called **after repartitioning** to rebuild the exchanger for a new partition topology. `feature_dim` is the new `max_feature_dim` for the reallocated buffers. This is an expensive operation — it reallocates buffers and re-establishes inter-rank connectivity, equivalent to a fresh `setup_exchanger` call for the new topology.
 
-`reset_buffers` must be called before each call to `FeaturePushToExchange.apply`. It is also the right place to re-upload any device-side metadata that is feature-dim-dependent.
+Do not call `reset_buffers` between GNN layers or between normal steps. It is only needed when `partition_info` has changed.
 
 ### `feature_push_forward`
 
-Executes the halo exchange. Reads `send_local_indices` from `partition_info` to gather rows from `features_to_push`, sends them to peer ranks, receives ghost features, and returns them concatenated with the input as `[num_local + num_ghost, F]`. Called internally by `FeaturePushToExchange.forward`.
+Executes the halo exchange. Infers the active feature dimension `F` from `features_to_push.shape[1]` at call time, checks `F <= max_feature_dim` (raises an error if violated), gathers rows identified by `send_local_indices`, sends them to peer ranks, receives ghost features, and returns them concatenated with the input as `[num_local + num_ghost, F]`. Called internally by `FeaturePushToExchange.forward`.
 
 ### `feature_push_backward`
 
@@ -265,31 +267,30 @@ Radius graph construction is performed inside `torch.no_grad()`. Graph topology 
 
 For GNN-based NNP models with `L` message-passing layers, a single position exchange before the first layer is insufficient. After each layer, each atom's embedding depends on its neighbours' embeddings from the previous layer. Rank `R` needs the layer-`l` embeddings of its ghost atoms to compute layer `l+1`.
 
-The exchange pattern:
+The exchange pattern (after `setup_exchanger` with `max_feature_dim = max(3, F_0, ..., F_{L-1})`):
 
 ```
-reset_buffers(feature_dim=3)
 exchange positions                               → all_pos [num_local + num_ghost, 3]
 layer 0 message passing                          → h [num_local + num_ghost, F_0]
 
-reset_buffers(feature_dim=F_0)
 exchange h[:num_local]                           → h [num_local + num_ghost, F_0]
 layer 1 message passing                          → h [num_local + num_ghost, F_1]
 
 ...
 
-reset_buffers(feature_dim=F_{L-2})
 exchange h[:num_local]                           → h [num_local + num_ghost, F_{L-2}]
 layer L-1 message passing                        → output embeddings / energy
 ```
 
-Each exchange uses the same halo maps (fixed topology for the step) but a different feature dimension.
+Each exchange uses the same halo maps (fixed topology for the step). The active feature dimension `F` is read from the tensor shape at call time — no reconfiguration is needed between layers.
 
 ### Implementation pattern for GNN subclasses
 
 ```python
 class MyGNNModel(DistNNPModel):
-    def setup(self, distributed_env, partition_info, max_feature_dim):
+    def setup(self, distributed_env, partition_info):
+        # max_feature_dim must cover positions (3) and every layer embedding width
+        max_feature_dim = max(3, max(l.feature_dim for l in self.message_passing_layers))
         self._feature_exchanger.setup_exchanger(
             distributed_env, partition_info, max_feature_dim
         )
@@ -298,10 +299,8 @@ class MyGNNModel(DistNNPModel):
         local_pos = state.local_partition_info.local_atom_positions.clone()
         local_pos.requires_grad_(True)
         num_local = local_pos.shape[0]
-        device = local_pos.device
 
-        # Exchange positions
-        self._feature_exchanger.reset_buffers(3, state.local_partition_info, device)
+        # Exchange positions — F=3, within max_feature_dim
         all_pos = FeaturePushToExchange.apply(local_pos, state, self._feature_exchanger)
         # all_pos: [num_local + num_ghost, 3]
 
@@ -311,9 +310,7 @@ class MyGNNModel(DistNNPModel):
         h = self.embedding(all_pos)  # [num_local + num_ghost, F_0]
 
         for layer in self.message_passing_layers:
-            self._feature_exchanger.reset_buffers(
-                layer.feature_dim, state.local_partition_info, device
-            )
+            # F_l inferred from h[:num_local].shape[1] at call time
             h = FeaturePushToExchange.apply(h[:num_local], state, self._feature_exchanger)
             # h: [num_local + num_ghost, F_l]
             h = layer(h, edge_index)
@@ -328,11 +325,18 @@ Because `FeaturePushToExchange` is called `L+1` times in the forward pass, `ener
 
 ### Single-exchange models
 
-For simple pairwise potentials that only need positions (e.g., `LennardJonesPotentialModel`), one exchange per step is sufficient:
+For simple pairwise potentials that only need positions (e.g., `LennardJonesPotentialModel`), one exchange per step is sufficient. `setup_exchanger` is called once with `max_feature_dim=3`:
 
 ```python
-self._feature_exchanger.reset_buffers(3, state.local_partition_info, device)
 all_pos = FeaturePushToExchange.apply(local_pos, state, self._feature_exchanger)
 ```
 
-`reset_buffers` is still called each step because `partition_info` may change across steps if repartitioning occurs.
+### Repartitioning
+
+When the partition topology changes (ghost counts or neighbour relationships change), call `reset_buffers` before the next exchange:
+
+```python
+exchanger.reset_buffers(max_feature_dim, new_partition_info, device)
+```
+
+This is an expensive operation — equivalent to reinitializing connectivity for the new topology — and should only be triggered on actual repartitioning events, not between normal steps or GNN layers.
