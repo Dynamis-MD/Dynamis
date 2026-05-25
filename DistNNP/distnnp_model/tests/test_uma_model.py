@@ -174,7 +174,7 @@ def test_uma_distributed_parity():
     
     if rank == 0:
         torch.testing.assert_close(
-            local_energy_sum, global_energy.detach(), 
+            local_energy_sum.item(), global_energy, 
             rtol=1e-3, atol=1e-3, # Use generous tolerance for reduction ordering differences
             msg="Distributed total energy does not match Standard model energy!"
         )
@@ -182,7 +182,7 @@ def test_uma_distributed_parity():
 
     # B. Check Forces Parity (Local forces must exactly match their slice of global forces)
     # The dist_model only computes grad for n_local atoms
-    n_local = state.local_partition_info.local_atom_positions.shape[0]
+    n_local = state.local_molecular_info.num_atoms
     
     # Each rank gathers back correctly to global
     local_indices = state.local_partition_info.partition_indices[:n_local].long()
@@ -205,6 +205,8 @@ def test_uma_distributed_parity():
             msg="Distributed forces do not match Standard model forces!"
         )
         print("Forces Parity Passed!")
+
+    dist.destroy_process_group()
 
 if __name__ == "__main__":
     if int(os.environ.get("WORLD_SIZE", 1)) < 2:

@@ -74,14 +74,15 @@ class UMAModel(DistNNPModel):
             datasets = [datasets]
 
         #ESCN FORWARD
-        mol_info = distributed_state.local_molecular_info
+        local_mol_info = distributed_state.local_molecular_info
+        global_mol_info = distributed_state.global_molecular_info
         sim_config = distributed_state.sim_config
-        part_info = distributed_state.local_partition_info
 
-        prev_local_positions = mol_info.atom_positions
+        prev_local_positions = local_mol_info.atom_positions
         local_positions = prev_local_positions.clone().requires_grad_(True)
-        local_atom_types = mol_info.atom_types
-        n_local_atoms = local_positions.shape[0]
+        local_atom_types = local_mol_info.atom_types
+        n_local_atoms = local_mol_info.num_atoms
+        n_global_atoms = global_mol_info.num_atoms
 
         device = prev_local_positions.device if device is None else device
         self.predict_unit.model.to(device)
@@ -263,7 +264,7 @@ class UMAModel(DistNNPModel):
                 x_message,
                 charge=charge,
                 spin=spin,
-                natoms=torch.tensor([atom_types.shape[0]], device=device),
+                natoms=torch.tensor([n_global_atoms], device=device), # balance based on total no. of atoms to scale properly vs local model
                 batch=batch_full,
             )
 
@@ -361,12 +362,17 @@ class UMAModel(DistNNPModel):
 
                             m.global_mole_tensors.expert_mixing_coefficients = head_coefs
 
+        local_out = {
+            "node_embedding": out["node_embedding"][:n_local_atoms],
+            "batch": batch,
+        }
+
         energy, energy_part = compute_energy(
-            out,
+            local_out,
             output_head.energy_block,
-            batch_full,
+            batch,
             num_systems=1,
-            natoms=n_atoms,
+            natoms=n_local_atoms,
             reduce=output_head.reduce,
         )
 
@@ -380,7 +386,7 @@ class UMAModel(DistNNPModel):
 
         # Determine if we need create_graph for higher-order derivatives
         # Hessian computation requires second derivatives, so we need create_graph=True
-        create_graph = output_head.training or output_head.regress_config.hessian
+        # create_graph = output_head.training or output_head.regress_config.hessian
 
         # if output_head.regress_config.stress and not output_head.regress_config.direct_stress:
         #     forces, stress = compute_forces_and_stress(
@@ -400,7 +406,7 @@ class UMAModel(DistNNPModel):
         #     energy.backward()
         #     forces = -local_positions.grad
 
-        energy.backward()
+        energy_part.backward()
         assert (
             local_positions.grad is not None
         ), "Gradient should not be None after backward()"
@@ -423,6 +429,6 @@ class UMAModel(DistNNPModel):
         #         {"hessian": hessian} if output_head.wrap_property else hessian
         #     )
 
-        total_energy = dist.reduce(energy.detach(), op=dist.ReduceOp.SUM)
+        local_energy = energy.detach().clone()
         local_forces = forces[:n_local_atoms]
-        return total_energy, local_forces
+        return local_energy, local_forces
