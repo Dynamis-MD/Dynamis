@@ -13,6 +13,7 @@ class TorchNCCLExchanger(Exchanger):
         self._world_size = 0
         self._send_split_sizes: list = []  # atom counts per rank (forward send)
         self._recv_split_sizes: list = []  # atom counts per rank (forward recv)
+        self._max_dim = 0
 
     def setup_exchanger(
         self,
@@ -42,6 +43,7 @@ class TorchNCCLExchanger(Exchanger):
         self._recv_buffer = torch.zeros(
             partition_info.num_in_halo_atoms * max_feature_dim, device=self._device
         )
+        self._max_dim = max_feature_dim
 
     def reset_buffers(
         self,
@@ -49,8 +51,11 @@ class TorchNCCLExchanger(Exchanger):
         partition_info: PartitionMessagePassingInfo,
         device: torch.device,
     ) -> None:
-        self._send_buffer.zero_()
-        self._recv_buffer.zero_()
+        
+        if self._max_dim > max_feature_dim:
+            self._send_buffer = torch.empty(partition_info.num_out_halo_atoms * max_feature_dim, device=device)
+            self._recv_buffer = torch.empty(partition_info.num_in_halo_atoms * max_feature_dim, device=device)
+            self._max_dim = max_feature_dim
 
     def feature_push_forward(
         self,
