@@ -1,6 +1,5 @@
 import torch
 from distnnp_state import MolecularInfo
-from distnnp_state.masses import TORCH_ATOMIC_MASSES
 
 ELEMENT_TO_Z = {
     'H': 1, 'He': 2, 'Li': 3, 'Be': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8, 'F': 9, 'Ne': 10,
@@ -21,8 +20,7 @@ def load_capsid_from_xyz(xyz_path: str, device: torch.device) -> tuple:
 
     Positions are shifted so the structure's minimum corner sits at
     BOX_BUFFER_ANGSTROM on each axis, placing all atoms inside a cubic box of
-    side length (max_extent + 2*BOX_BUFFER_ANGSTROM). Velocities are zeroed;
-    masses are looked up from TORCH_ATOMIC_MASSES by atomic number.
+    side length (max_extent + 2*BOX_BUFFER_ANGSTROM). Velocities are zeroed.
 
     Args:
         xyz_path: Path to .xyz file produced by retrieve_data.py
@@ -59,15 +57,12 @@ def load_capsid_from_xyz(xyz_path: str, device: torch.device) -> tuple:
         [ELEMENT_TO_Z.get(el, 6) for el in elements], dtype=torch.long
     )
 
-    atom_masses_table = TORCH_ATOMIC_MASSES.to(device)
-
     mol_info = MolecularInfo()
     mol_info.num_atoms = num_atoms
     mol_info.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long, device=device)
     mol_info.atom_positions = pos.to(device)
     mol_info.atom_velocities = torch.zeros(num_atoms, 3, dtype=torch.float32, device=device)
     mol_info.atom_types = atom_types.to(device)
-    mol_info.atom_masses = atom_masses_table[atom_types].to(device)
     mol_info.atom_forces = torch.zeros(num_atoms, 3, dtype=torch.float32, device=device)
 
     print(f"Loaded {num_atoms:,} atoms | bounding box: {box_size:.1f} Å")
