@@ -1,90 +1,42 @@
+#include "distnnp_model/NCCLFeatureExchanger/NCCLExchanger.hpp"
+#include "distnnp_model/NVFeatureExchanger/NVExchanger.hpp"
+
 #include "distnnp_model/exchanger.hpp"
-#include <torch/extension.h>
 #include "distnnp_model/push_buffer.hpp"
+#include <torch/extension.h>
 
+PYBIND11_MODULE(distnnp_model_impl, m) {
+  m.def("push_buffer_create", &distnnp_model::push_buffer_create,
+        "Gather rows into buffer by index");
+  py::class_<distnnp_model::NVFeatureExchanger>(m, "NVFeatureExchanger")
+      .def(py::init<>())
+      .def("setup", &distnnp_model::NVFeatureExchanger::setup,
+           py::arg("dist_env"), py::arg("partition_comm_info"),
+           py::arg("max_feature_dim"))
+      .def("reset", &distnnp_model::NVFeatureExchanger::reset,
+           py::arg("partition_comm_info"), py::arg("max_feature_dim"))
+      .def("feature_push_forward",
+           &distnnp_model::NVFeatureExchanger::feature_push_forward,
+           py::arg("return_features"), py::arg("local_features"),
+           py::arg("partition_info"))
+      .def("feature_push_grad",
+           &distnnp_model::NVFeatureExchanger::feature_push_grad,
+           py::arg("grad_local_features"), py::arg("grad_output_features"),
+           py::arg("partition_info"));
 
-PYBIND11_MODULE(distnnp_model_impl, m)
-{
-  m.def("push_buffer_create", &distnnp_model::push_buffer_create, "Gather rows into buffer by index");
-
-  py::class_<distnnp_model::IPCExchanger>(m, "IPCExchanger")
-    .def(py::init<>())
-    .def_static("allocate_ipc_buffer", &distnnp_model::IPCExchanger::allocate_ipc_buffer,
-         py::arg("rows"), py::arg("cols"), py::arg("device_index"))
-    .def("export_ipc_handle", &distnnp_model::IPCExchanger::export_ipc_handle,
-         py::arg("buffer"))
-    .def("setup", &distnnp_model::IPCExchanger::setup,
-         py::arg("x_buffer"),
-         py::arg("grad_recv_buffer"),
-         py::arg("all_x_handles"),
-         py::arg("all_grad_handles"),
-         py::arg("send_offsets"),
-         py::arg("send_local_indices"),
-         py::arg("recv_offsets"),
-         py::arg("all_recv_offsets"),
-         py::arg("all_num_local"),
-         py::arg("num_local"),
-         py::arg("feature_dim"),
-         py::arg("rank"),
-         py::arg("world_size"))
-    .def("push_forward",
-         [](distnnp_model::IPCExchanger &self, torch::Tensor x) { self.push_forward(x); },
-         py::arg("x_buffer"))
-    .def("push_backward",
-         [](distnnp_model::IPCExchanger &self, torch::Tensor g) { self.push_backward(g); },
-         py::arg("grad_at_ghost"))
-    .def("create_and_export_sync_handle", &distnnp_model::IPCExchanger::create_and_export_sync_handle)
-    .def("setup_sync", &distnnp_model::IPCExchanger::setup_sync,
-         py::arg("all_sync_handles"))
-    .def("record_push_complete",
-         [](distnnp_model::IPCExchanger &self) { self.record_push_complete(); })
-    .def("wait_for_pushes",
-         [](distnnp_model::IPCExchanger &self) { self.wait_for_pushes(); })
-    .def("teardown", &distnnp_model::IPCExchanger::teardown);
-
-  py::class_<distnnp_model::FeatureExchanger>(m, "FeatureExchanger")
-    .def(py::init<>())
-    // --- shehtab's public interface ---
-    .def("feature_push_forward", &distnnp_model::FeatureExchanger::feature_push_forward,
-         "Push features forward to neighbors",
-         py::arg("local_features"), py::arg("partition_info"))
-    .def("feature_push_backward", &distnnp_model::FeatureExchanger::feature_push_backward,
-         "Push feature gradients backward to neighbors",
-         py::arg("grad_output"), py::arg("grad_input_shape"), py::arg("partition_info"))
-    // --- IPC configuration ---
-    .def_static("allocate_ipc_buffer", &distnnp_model::FeatureExchanger::allocate_ipc_buffer,
-         "Allocate a tensor via raw cudaMalloc (required for IPC)",
-         py::arg("rows"), py::arg("cols"), py::arg("device_index"))
-    .def("export_ipc_handle", &distnnp_model::FeatureExchanger::export_ipc_handle,
-         "Export CUDA IPC handle for a buffer as bytes",
-         py::arg("buffer"))
-    .def("setup_ipc", &distnnp_model::FeatureExchanger::setup_ipc,
-         "Open remote IPC handles and build push targets",
-         py::arg("x_buffer"),
-         py::arg("grad_recv_buffer"),
-         py::arg("all_x_handles"),
-         py::arg("all_grad_handles"),
-         py::arg("send_offsets"),
-         py::arg("send_local_indices"),
-         py::arg("recv_offsets"),
-         py::arg("all_recv_offsets"),
-         py::arg("all_num_local"),
-         py::arg("num_local"),
-         py::arg("feature_dim"),
-         py::arg("rank"),
-         py::arg("world_size"))
-    .def("create_and_export_sync_handle", &distnnp_model::FeatureExchanger::create_and_export_sync_handle,
-         "Allocate IPC sync counter and return its IPC mem handle")
-    .def("setup_sync", &distnnp_model::FeatureExchanger::setup_sync,
-         "Open remote IPC sync counters for stream-level push synchronization",
-         py::arg("all_sync_handles"))
-    .def("record_push_complete", &distnnp_model::FeatureExchanger::record_push_complete,
-         "Bump sync counter on default stream after push completes")
-    .def("wait_for_pushes", &distnnp_model::FeatureExchanger::wait_for_pushes,
-         "Wait on default stream until all peers' sync counters reach current step")
-    .def("teardown", &distnnp_model::FeatureExchanger::teardown)
-    .def("is_ipc_setup", &distnnp_model::FeatureExchanger::is_ipc_setup)
-    .def("set_ce_threshold_bytes", &distnnp_model::FeatureExchanger::set_ce_threshold_bytes,
-         py::arg("threshold"))
-    .def("ce_threshold_bytes", &distnnp_model::FeatureExchanger::ce_threshold_bytes);
+  py::class_<distnnp_model::NCCLFeatureExchanger>(m, "NCCLFeatureExchanger")
+      .def(py::init<>())
+      .def("setup", &distnnp_model::NCCLFeatureExchanger::setup,
+           py::arg("dist_env"), py::arg("partition_comm_info"),
+           py::arg("max_feature_dim"))
+      .def("reset", &distnnp_model::NCCLFeatureExchanger::reset,
+           py::arg("partition_comm_info"), py::arg("max_feature_dim"))
+      .def("feature_push_forward",
+           &distnnp_model::NCCLFeatureExchanger::feature_push_forward,
+           py::arg("return_features"), py::arg("local_features"),
+           py::arg("partition_info"))
+      .def("feature_push_grad",
+           &distnnp_model::NCCLFeatureExchanger::feature_push_grad,
+           py::arg("grad_local_features"), py::arg("grad_output_features"),
+           py::arg("partition_info"));
 }

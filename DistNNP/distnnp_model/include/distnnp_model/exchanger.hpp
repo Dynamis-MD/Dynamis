@@ -30,7 +30,7 @@ public:
       const torch::Tensor grad_output_features,
       const distnnp_state::PartitionMessagePassingInfo &partition_info);
 
-private:
+protected:
   size_t max_feature_dim_ = 0;
 };
 

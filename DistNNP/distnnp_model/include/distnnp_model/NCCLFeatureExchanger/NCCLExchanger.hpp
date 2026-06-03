@@ -19,7 +19,18 @@ void register_process_group(c10::intrusive_ptr<c10d::ProcessGroup> pg,
 
 class NCCLFeatureExchanger : public FeatureExchanger {
 public:
-  void setup() override;
-  void reset() override;
+  void setup(const distnnp_state::DistEnvironment &dist_env,
+             const distnnp_state::PartitionMessagePassingInfo &partition_comm_info,
+             const size_t max_feature_dim) override;
+  void reset(const distnnp_state::PartitionMessagePassingInfo &partition_comm_info,
+             const size_t max_feature_dim) override;
+  void feature_push_forward(
+      torch::Tensor return_features,
+      const torch::Tensor local_features,
+      const distnnp_state::PartitionMessagePassingInfo &partition_info) override;
+  void feature_push_grad(
+      torch::Tensor grad_local_features,
+      const torch::Tensor grad_output_features,
+      const distnnp_state::PartitionMessagePassingInfo &partition_info) override;
 };
 } // namespace distnnp_model
