@@ -8,6 +8,7 @@ from distnnp_state import (
     SimpleSpatialPartitioner,
     KDTreePartitioner,
 )
+from distnnp_state.masses import TORCH_ATOMIC_MASSES
 import torch
 import torch.distributed as dist
 from typing import Union, Literal, Optional
@@ -62,6 +63,9 @@ class SimState:
             partition_info.partition_indices
         ]
         local_molecular_info.atom_velocities = molecular_system.atom_velocities[
+            partition_info.partition_indices
+        ]
+        local_molecular_info.atom_masses = molecular_system.atom_masses[
             partition_info.partition_indices
         ]
         local_molecular_info.atom_types = molecular_system.atom_types[
