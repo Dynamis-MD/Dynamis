@@ -45,7 +45,7 @@ def test_uma_distributed_parity():
     
     predictor = pretrained_mlip.get_predict_unit("uma-s-1p2", device=device)
     standard_calc = FAIRChemCalculator(predictor, task_name="omol")
-    dist_model = UMAModel("uma-s-1p2", device=device)
+    dist_model = UMAModel("uma-s-1p2", device=device, rank=rank)
 
     # ==========================================
     # 2. Setup Global Data (Ground Truth)
@@ -65,7 +65,8 @@ def test_uma_distributed_parity():
         numbers=global_atomic_numbers.cpu().clone().detach(),
         positions=global_positions.cpu().clone().detach(),
         cell=global_cell.cpu().clone().detach(),
-        pbc=global_pbc.cpu().clone().detach()
+        pbc=global_pbc.cpu().clone().detach(),
+        info={"charge": 0, "spin": 1},
     )
 
     # ==========================================
@@ -119,34 +120,34 @@ def test_uma_distributed_parity():
     state.local_partition_info = partition_info
     state.sim_config = sim_config
 
+    dist_model.initialize_buffers(partition_info, device)
+
+    print(f"[rank {rank}] world_size={world_size}, n_local={n_local}, n_ghosts={partition_info.recv_ghost_indices.shape[0]}")
     # ==========================================
     # 4. Forward & Backward Pass: STANDARD MODEL
     # ==========================================
+    data = type("Data", (object,), {
+        "pos": global_positions,
+        "atomic_numbers": global_atomic_numbers,
+        "cell": sim_config.cell.unsqueeze(0),
+        "natoms": torch.tensor([total_atoms], device=device),
+        "pbc": sim_config.pbc.unsqueeze(0),
+        "batch": torch.zeros(total_atoms, dtype=torch.long, device=device),
+        "tags": torch.zeros(total_atoms, dtype=torch.long, device=device),
+        # "edge_index": global_edge_index,
+    })()
+
+    # Build strict Graph for Fairchem if needed
+    with torch.no_grad():
+        global_edge_index, _, _ = radius_graph_pbc_cuda(
+            data,
+            radius=sim_config.cutoff,
+            max_num_neighbors_threshold=0,
+            enforce_max_neighbors_strictly=False,
+        )
+
+    data.edge_index = global_edge_index
     if rank == 0:
-        global_pos_std = global_positions.clone().detach().requires_grad_(True)
-        
-        data = type("Data", (object,), {
-            "pos": global_pos_std,
-            "atomic_numbers": global_atomic_numbers,
-            "cell": sim_config.cell.unsqueeze(0),
-            "natoms": torch.tensor([total_atoms], device=device),
-            "pbc": sim_config.pbc.unsqueeze(0),
-            "batch": torch.zeros(total_atoms, dtype=torch.long, device=device),
-            "tags": torch.zeros(total_atoms, dtype=torch.long, device=device),
-            # "edge_index": global_edge_index,
-        })()
-
-        # Build strict Graph for Fairchem if needed
-        with torch.no_grad():
-            global_edge_index, _, _ = radius_graph_pbc_cuda(
-                data,
-                radius=sim_config.cutoff,
-                max_num_neighbors_threshold=0,
-                enforce_max_neighbors_strictly=False,
-            )
-
-        data.edge_index = global_edge_index
-
         # Fairchem Backbone Output
         global_energy = standard_calc.get_potential_energy(ase_system)
         global_forces = standard_calc.get_forces(ase_system)
@@ -173,6 +174,7 @@ def test_uma_distributed_parity():
     dist.all_reduce(local_energy_sum, op=dist.ReduceOp.SUM)
     
     if rank == 0:
+        print(f"Energy from distributed model: {local_energy_sum.item()}, global energy: {global_energy}")
         torch.testing.assert_close(
             local_energy_sum.item(), global_energy, 
             rtol=1e-3, atol=1e-3, # Use generous tolerance for reduction ordering differences
