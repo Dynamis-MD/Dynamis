@@ -1,8 +1,8 @@
 """
 HIV Capsid MD Simulation using DistNNP
 =======================================
-Runs a short Lennard-Jones molecular dynamics simulation of the full HIV-1
-capsid (PDB: 3J3Q, ~2.4 M atoms) distributed across one or more GPUs.
+Runs a soft-core Lennard-Jones molecular dynamics simulation of the full
+HIV-1 capsid (PDB: 3J3Q, ~2.4 M atoms) distributed across one or more GPUs.
 
 Prerequisites
 -------------
@@ -26,12 +26,24 @@ Multi-GPU (torchrun):
 
 Multi-GPU (SLURM):
     srun --ntasks=<NUM_GPUS> --gpus-per-task=1 python main.py
+
+Limitations
+-----------
+- Hydrogen atoms are absent (heavy-atom only; see retrieve_data.py).
+- No equilibration phase; velocities are initialised from a Maxwell-Boltzmann
+  distribution at 310 K and dynamics run NVE (Verlet). A production simulation
+  would require energy minimization, ~1 ns NVT equilibration, and ~1 ns NPT
+  equilibration before collecting data (Perilla et al. 2017).
+- No barostat; simulation runs NVE only.
+- Soft-core UFF LJ (Rappe et al. 1992) is used as a placeholder potential.
+  Bonded pairs are not excluded; the soft-core form (alpha=sigma^6) prevents
+  singularity blow-up at covalent bond distances.
 """
 
 import gc
-import os
 
 import torch
+import torch.distributed as dist
 
 from distnnp_integrator import Verlet
 from distnnp_model.empirical import LennardJonesPotentialModel
@@ -76,8 +88,8 @@ def main():
     sim_config = SimulatorConfig(
         timestep_fs=0.5,
         total_steps=TOTAL_STEPS,
-        cutoff_angstrom=6.0,
-        side_length_angstrom=box_size,
+        cutoff_angstrom=6.0,            # <- Might need tuning, not sure. I saw 10-12 for this
+        side_length_angstrom=box_size,  # sim online but that causes OOM error on 2 GPUs.
         ghost_buffer_angstrom=0.5,
         partition_algorithm="sfc_morton",
         edge_weighted_partition=True,
@@ -90,10 +102,36 @@ def main():
         backend="nccl",
     )
 
-    # LJ parameters: 100-element tensors indexed by atom type (atomic number).
-    # Random values are used here as stand-ins for real force-field parameters.
-    epsilons = torch.rand(100, requires_grad=True).to(device=device)
-    sigmas = torch.rand(100, requires_grad=True).to(device=device)
+    # LJ parameters: each value is found via this paper - https://pubs.acs.org/doi/10.1021/ja00051a040
+    # Not sure if all of these are needed but I just did everything in setup_system.py/ELEMENT_TO_Z to be safe
+    _epsilons = { # Unit: amu * Å^2 * fs^-2
+        1 : 1.84096e-5, 2 : 2.34304e-5, 3 : 1.046e-5, 4 : 3.5564e-5, 5 : 7.5312e-5,
+        6 : 4.3932e-5, 7 : 2.88696e-5, 8 : 2.5104e-5, 9 : 2.092e-5, 10 : 1.75728e-5,
+        11 : 1.2552e-5, 12 : 4.64424e-5, 13 : 2.11292e-4, 14 : 1.681968e-4, 15 : 1.27612e-4,
+        16 : 1.146416e-4, 17 : 9.49768e-5, 18 : 7.7404e-5, 19 : 1.4644e-5, 20 : 9.95792e-5,
+        21 : 7.9496e-6, 22 : 7.1128e-6, 23 : 6.6944e-6, 24 : 6.276e-6, 25 : 5.4392e-6,
+        26 : 5.4392e-6, 27 : 5.8576e-6, 28 : 6.276e-6, 29 : 2.092e-6, 30 : 5.18816e-5,
+        31 : 1.73636e-4, 32 : 1.585736e-4, 33 : 1.292856e-4, 34 : 1.217544e-4,
+        35 : 1.050184e-4, 36 : 9.2048e-5, 53 : 1.418376e-4
+    }
+    _sigmas = { # Unit: Å
+        1 : 2.571, 2 : 2.104, 3 : 2.184, 4 : 2.446, 5 : 3.638, 
+        6 : 3.431, 7 : 3.261, 8 : 3.118, 9 : 2.997, 10 : 2.889, 
+        11 : 2.658, 12 : 2.691, 13 : 4.008, 14 : 3.826, 15 : 3.695, 
+        16 : 3.595, 17 : 3.516, 18 : 3.446, 19 : 2.396, 20 : 3.028, 
+        21 : 2.936, 22 : 2.829, 23 : 2.801, 24 : 2.693, 25 : 2.638, 
+        26 : 2.595, 27 : 3.559, 28 : 2.525, 29 : 3.114, 30 : 2.462, 
+        31 : 3.905, 32 : 3.813, 33 : 3.769, 34 : 3.746, 35 : 3.732, 
+        36 : 3.689, 53 : 4.009
+    }
+    
+    epsilons = torch.zeros(100).to(device=device)
+    sigmas = torch.zeros(100).to(device=device)
+    for z, val in _epsilons.items():
+        epsilons[z] = val
+    for z, val in _sigmas.items():
+        sigmas[z] = val
+    
     potential = LennardJonesPotentialModel(epsilon=epsilons, sigma=sigmas)
     integrator = Verlet(sim_config.timestep_fs)
 
@@ -130,6 +168,8 @@ def main():
     if global_rank == 0:
         print(f"\nPeak GPU memory: {get_peak_mb():.1f} MB")
         print("Simulation complete.")
+
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":

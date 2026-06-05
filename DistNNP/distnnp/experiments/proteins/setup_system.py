@@ -1,5 +1,6 @@
 import torch
 from distnnp_state import MolecularInfo
+from distnnp_integrator.masses import TORCH_MASSES
 
 ELEMENT_TO_Z = {
     'H': 1, 'He': 2, 'Li': 3, 'Be': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8, 'F': 9, 'Ne': 10,
@@ -20,7 +21,8 @@ def load_capsid_from_xyz(xyz_path: str, device: torch.device) -> tuple:
 
     Positions are shifted so the structure's minimum corner sits at
     BOX_BUFFER_ANGSTROM on each axis, placing all atoms inside a cubic box of
-    side length (max_extent + 2*BOX_BUFFER_ANGSTROM). Velocities are zeroed.
+    side length (max_extent + 2*BOX_BUFFER_ANGSTROM). Velocities are drawn from
+    a Maxwell-Boltzmann distribution at 310 K.
 
     Args:
         xyz_path: Path to .xyz file produced by retrieve_data.py
@@ -61,9 +63,15 @@ def load_capsid_from_xyz(xyz_path: str, device: torch.device) -> tuple:
     mol_info.num_atoms = num_atoms
     mol_info.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long, device=device)
     mol_info.atom_positions = pos.to(device)
-    mol_info.atom_velocities = torch.zeros(num_atoms, 3, dtype=torch.float32, device=device)
     mol_info.atom_types = atom_types.to(device)
     mol_info.atom_forces = torch.zeros(num_atoms, 3, dtype=torch.float32, device=device)
+    
+    # Draw velocities from a Maxwell-Boltzmann Distribution
+    # I read that 310 K is a good temperature for an HIV Capsid sim
+    kT = 2.577e-4  # amu * Å^2 * fs^-2 at 310 K
+    masses = TORCH_MASSES[atom_types]  # shape (N,)
+    std = torch.sqrt(kT / masses)  # shape (N,)
+    mol_info.atom_velocities = (torch.randn(num_atoms, 3, dtype=torch.float32) * std.unsqueeze(1)).to(device)
 
     print(f"Loaded {num_atoms:,} atoms | bounding box: {box_size:.1f} Å")
     return mol_info, box_size
