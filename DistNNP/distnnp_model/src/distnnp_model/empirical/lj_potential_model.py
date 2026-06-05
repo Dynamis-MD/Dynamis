@@ -9,7 +9,6 @@ from distnnp_state import (
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 from distnnp_model.comm.exchanger import Exchanger, GPUDirectExchanger
 from typing import Optional
-import torch.distributed as dist
 
 
 def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma, n_local):
