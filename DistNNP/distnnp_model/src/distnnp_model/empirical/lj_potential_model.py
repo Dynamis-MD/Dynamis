@@ -50,8 +50,10 @@ def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma, n
     sigma_ij = (sigma[type_i] + sigma[type_j]) / 2.0
     epsilon_ij = torch.sqrt(epsilon[type_i] * epsilon[type_j])
 
-    # 4. Compute the (sigma / r)^6 term
-    sr6 = (sigma_ij / distances) ** 6
+    # 4. Compute soft-core (sigma/r)^6: alpha=sigma^6 prevents singularity at r->0
+    # (bonded pairs at covalent distances contribute zero energy/force)
+    sigma6_ij = sigma_ij ** 6
+    sr6 = sigma6_ij / (distances ** 6 + sigma6_ij)
 
     # 5. Compute the full LJ potential for all pairs
     pairwise_potentials = 4 * epsilon_ij * (sr6**2 - sr6)
