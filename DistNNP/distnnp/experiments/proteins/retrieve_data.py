@@ -1,6 +1,10 @@
 import urllib.request
 import gzip
 
+# Hydrogen atoms are not present in the 3J3Q cryo-EM structure and are not added here.
+# This simulation uses heavy atoms only. Proper hydrogen placement could be required
+# when swapping in a real NNP model.
+
 def download_and_convert_to_xyz(pdb_id="3J3Q"):
     url = f"https://files.rcsb.org/download/{pdb_id}.cif.gz"
     cif_filename = f"{pdb_id}.cif.gz"
@@ -22,10 +26,10 @@ def download_and_convert_to_xyz(pdb_id="3J3Q"):
         in_atom_site = False
         columns = []
         sym_idx, x_idx, y_idx, z_idx = -1, -1, -1, -1
-        
+
         for line in f:
             line = line.strip()
-            
+
             if line.startswith("loop_"):
                 # Reset column definitions when a new loop block starts
                 columns = []
@@ -35,19 +39,19 @@ def download_and_convert_to_xyz(pdb_id="3J3Q"):
                 columns.append(line)
             elif in_atom_site and (line.startswith("ATOM") or line.startswith("HETATM")):
                 if sym_idx == -1:
-                    # Dynamically identify the indices of the required columns 
+                    # Dynamically identify the indices of the required columns
                     sym_idx = columns.index("_atom_site.type_symbol")
                     x_idx = columns.index("_atom_site.Cartn_x")
                     y_idx = columns.index("_atom_site.Cartn_y")
                     z_idx = columns.index("_atom_site.Cartn_z")
-                
+
                 parts = line.split()
                 # Extract Element and X,Y,Z coordinates
                 element = parts[sym_idx]
                 x = parts[x_idx]
                 y = parts[y_idx]
                 z = parts[z_idx]
-                
+
                 atom_lines.append(f"{element} {x} {y} {z}\n")
 
     print(f"Successfully extracted {len(atom_lines)} atoms.")
