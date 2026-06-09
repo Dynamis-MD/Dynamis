@@ -9,7 +9,6 @@ from distnnp_state import (
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 from distnnp_model.comm.exchanger import Exchanger, GPUDirectExchanger
 from typing import Optional
-import torch.distributed as dist
 
 
 def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma, n_local):
@@ -103,10 +102,7 @@ class LennardJonesPotentialModel(DistNNPModel):
             local_positions, distributed_state, self.position_exchanger
         )  # type: ignore
 
-        # Define local_atom_types (Argon = type 0) for exchange
-        local_atom_types = torch.zeros(
-            local_positions.shape[0], dtype=torch.long, device=local_positions.device
-        )
+        local_atom_types = distributed_state.local_molecular_info.atom_types
 
         with torch.no_grad():
             # Exchanger expects 2D [N, F], so we unsqueeze(1) then squeeze(1) back
