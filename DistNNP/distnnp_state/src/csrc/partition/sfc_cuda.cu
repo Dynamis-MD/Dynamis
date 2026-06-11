@@ -137,10 +137,21 @@ __global__ void assign_partition_unweighted_kernel(
 
 // ---------------------------------------------------------------------------
 // K4: Assign partitions (weighted) — cumsum-based, 0 CPU-GPU sync
+//
+// cumsum is computed in int64 (weights are integer edge counts), not float32.
+// The total edge weight routinely exceeds 2^24 ≈ 16.7M — the largest integer
+// float32 represents exactly — so a float prefix sum rounds, and an atom whose
+// weighted cumulative position lands exactly on a cut boundary k·total/W can be
+// pushed to either side by a sub-ULP difference. That made the partition
+// NON-DETERMINISTIC across ranks (each rank computes the full partition from
+// identical inputs but the float scan combined partial sums differently),
+// so a boundary atom was claimed by two ranks (duplicate edges) or none
+// (missing edges). int64 addition is exact and associative → bit-identical on
+// every rank → a single, consistent owner. See dist_build_graph_v5 step 5.
 // ---------------------------------------------------------------------------
 __global__ void assign_partition_weighted_kernel(
     const int64_t* __restrict__ perm,      // [N] sort permutation
-    const float* __restrict__ cumsum_w,    // [N] prefix sum of sorted weights
+    const int64_t* __restrict__ cumsum_w,  // [N] prefix sum of sorted weights (exact int64)
     int64_t* __restrict__ labels,          // [N] output partition labels
     int64_t N,
     int64_t W
@@ -149,10 +160,12 @@ __global__ void assign_partition_weighted_kernel(
     if (i >= N) return;
 
     // Read total cost from last element (on device, no sync)
-    float total = cumsum_w[N - 1];
-    float cs = cumsum_w[i];
+    int64_t total = cumsum_w[N - 1];
+    int64_t cs = cumsum_w[i];
 
-    int64_t p = (int64_t)(cs * (float)W / total);
+    // floor(cs * W / total) via exact integer arithmetic. cs*W <= total*W fits
+    // in int64 for any realistic system (total ~1e8, W ~1e3 → ~1e11 << 2^63).
+    int64_t p = (total > 0) ? (cs * W) / total : (int64_t)0;
     // Clamp to [0, W-1]
     p = max(p, (int64_t)0);
     p = min(p, W - 1);
@@ -214,13 +227,14 @@ at::Tensor sfc_partition_cuda_impl(
     auto labels = at::empty({N}, long_opts);
 
     if (weights.defined()) {
-        // Weighted: cumsum of sorted weights
-        auto sorted_w = weights.index_select(0, perm);
-        auto cumsum_w = sorted_w.cumsum(0);
+        // Weighted: exact int64 prefix sum of sorted (integer) weights. Float32
+        // would round above 2^24 and make cut boundaries rank-dependent.
+        auto sorted_w = weights.to(at::kLong).index_select(0, perm);
+        auto cumsum_w = sorted_w.cumsum(0);  // int64, exact
 
         assign_partition_weighted_kernel<<<blocks_N, BLOCK, 0, stream>>>(
             perm.data_ptr<int64_t>(),
-            cumsum_w.data_ptr<float>(),
+            cumsum_w.data_ptr<int64_t>(),
             labels.data_ptr<int64_t>(),
             N, W
         );

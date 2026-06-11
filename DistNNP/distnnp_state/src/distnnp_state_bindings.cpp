@@ -1,6 +1,7 @@
 #include "distnnp_state/distnnp_state.hpp"
 #include "distnnp_state/partitioner.hpp"
 #include "distnnp_state/radius_pbc.hpp"
+#include "distnnp_state/dist_graph_ops.hpp"
 #include "distnnp_state/trajectory_writer.hpp"
 #include <torch/extension.h>
 
@@ -129,4 +130,82 @@ PYBIND11_MODULE(distnnp_state_impl, m)
           py::arg("radius"),
           py::arg("max_num_neighbors"),
           py::arg("enforce_max_strictly"));
+
+    m.def("radius_graph_pbc_ex", &radius_graph_pbc_ex,
+          "Extended radius graph: accepts optional target_indices subset, returns "
+          "(edge_index, cell_shifts, num_neighbors_image, neighbor_counts).",
+          py::arg("pos"),
+          py::arg("cell"),
+          py::arg("pbc"),
+          py::arg("radius"),
+          py::arg("max_num_neighbors"),
+          py::arg("enforce_max_strictly"),
+          py::arg("target_indices") = c10::optional<at::Tensor>{});
+
+    m.def("radius_graph_pbc_counts_ex", &radius_graph_pbc_counts_ex,
+          "Count-only variant: returns just neighbor_counts[N_target] int32. "
+          "Skips edge buffer + prefix-sum + B4 write kernel (~50% faster).",
+          py::arg("pos"),
+          py::arg("cell"),
+          py::arg("pbc"),
+          py::arg("radius"),
+          py::arg("target_indices") = c10::optional<at::Tensor>{});
+
+    // ===== Distributed build_graph hot-path ops (v5 Mode A) =====
+
+    m.def("filter_edges_to_radius", &filter_edges_to_radius,
+          "Filter edges built at r+skin down to true cutoff r: keep edge iff "
+          "||pos[src] + cell_shift @ cell - pos[dst]||^2 <= r^2. Order-preserving. "
+          "Fused CUDA kernel + compaction; replaces the ATen recompute (v5 step 8).",
+          py::arg("edges"),
+          py::arg("cell_shifts"),
+          py::arg("pos"),
+          py::arg("cell"),
+          py::arg("radius"));
+
+    m.def("extract_halo_info", &extract_halo_info,
+          "Derive halo send/recv CSR + interior mask from per-rank edges "
+          "(dst in my_outer) via graph symmetry, grouped by peer and sorted by "
+          "global atom id within each peer (no NCCL). Returns "
+          "(send_offsets, send_local_indices, recv_offsets, recv_ghost_indices, "
+          "interior_mask, recv_atom_global). v5 step 7.",
+          py::arg("edges"),
+          py::arg("pid_outer"),
+          py::arg("my_outer_atoms"),
+          py::arg("my_rank"),
+          py::arg("world_size"),
+          py::arg("N"));
+
+    // ===== Distributed pipeline =====
+
+    m.def("dist_partition_sfc", &distnnp_state::dist_partition_sfc,
+          "Compute SFC unweighted partition_id[N] from globally-replicated pos. "
+          "Deterministic across ranks — no NCCL needed.",
+          py::arg("pos"),
+          py::arg("env"),
+          py::arg("curve_type") = distnnp_state::SFCCurveType::Hilbert);
+
+    py::class_<distnnp_state::DistGraphResult>(m, "DistGraphResult")
+        .def(py::init<>())
+        .def_readwrite("edge_index",      &distnnp_state::DistGraphResult::edge_index)
+        .def_readwrite("cell_shifts",     &distnnp_state::DistGraphResult::cell_shifts)
+        .def_readwrite("neighbor_counts", &distnnp_state::DistGraphResult::neighbor_counts)
+        .def_readwrite("my_atoms",        &distnnp_state::DistGraphResult::my_atoms);
+
+    m.def("dist_build_graph", &distnnp_state::dist_build_graph,
+          "Build per-rank radius graph at (cutoff + ghost_cutoff_buffer) with target "
+          "endpoints restricted to atoms where partition_id == env.global_rank. "
+          "Sources span full N (with PBC). Returns DistGraphResult.",
+          py::arg("pos"),
+          py::arg("partition_id"),
+          py::arg("env"),
+          py::arg("config"));
+
+    m.def("dist_build_halo_map", &distnnp_state::dist_build_halo_map,
+          "Derive halo send/recv CSR from per-rank edges + partition_id via graph "
+          "symmetry. Pre: info.partition_id is set. Fills info.partition_indices, "
+          "send/recv CSR fields, interior_mask, edge_index_halo. No NCCL.",
+          py::arg("info"),
+          py::arg("graph"),
+          py::arg("env"));
 }

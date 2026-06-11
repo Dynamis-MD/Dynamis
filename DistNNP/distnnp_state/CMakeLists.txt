@@ -62,6 +62,11 @@ python_add_library(distnnp_state_impl
     src/csrc/partition/build_halo_maps.cpp
     src/csrc/radius_pbc/radius_pbc_.cpp
     src/csrc/radius_pbc/radius_pbc.cu
+    src/csrc/distributed/dist_partition.cpp
+    src/csrc/distributed/dist_build_graph.cpp
+    src/csrc/distributed/dist_build_halo_map.cpp
+    src/csrc/dist_graph/dist_graph_ops.cu
+    src/csrc/dist_graph/dist_graph_ops_.cpp
     src/csrc/trajectory_writer.cpp
 )
 

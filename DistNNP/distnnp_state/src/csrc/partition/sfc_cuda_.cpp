@@ -27,7 +27,11 @@ at::Tensor sfc_partition_cuda(
         TORCH_CHECK(weights.is_cuda(), "weights must be a CUDA tensor");
         TORCH_CHECK(weights.dim() == 1 && weights.size(0) == pos.size(0),
                     "weights must have shape [N], got [", weights.size(0), "]");
-        weights = weights.to(at::kFloat).contiguous();
+        // Keep weights as exact integers: the weighted partition uses an int64
+        // prefix sum so cut boundaries are deterministic and identical on every
+        // rank. A float32 cumsum rounds above 2^24 and made boundary atoms flip
+        // partitions per-rank → duplicate/missing edges.
+        weights = weights.to(at::kLong).contiguous();
     }
 
     return sfc_partition_cuda_impl(pos, weights, W, curve_type);

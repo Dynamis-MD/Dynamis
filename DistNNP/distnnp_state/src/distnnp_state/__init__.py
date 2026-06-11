@@ -17,6 +17,13 @@ SFCCurveType = distnnp_state_impl.SFCCurveType
 from distnnp_state.radius_graph_pbc_cuda import radius_graph_pbc_cuda
 from distnnp_state.state_wrapper import TorchDistEnv
 
+# Phase 5 v5: graph-aware distributed halo builder (no NCCL halo exchange)
+from distnnp_state.dist_build_graph_v5 import (
+    DistGraphBuilderV5,
+    DistBuildGraphResultV5,
+    BuildMode,
+)
+
 # IO
 TrajectoryWriter = distnnp_state_impl.TrajectoryWriter
 
@@ -33,4 +40,7 @@ __all__ = [
     "TrajectoryWriter",
     "radius_graph_pbc_cuda",
     "TorchDistEnv",
+    "DistGraphBuilderV5",
+    "DistBuildGraphResultV5",
+    "BuildMode",
 ]
