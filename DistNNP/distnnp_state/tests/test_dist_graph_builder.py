@@ -1,4 +1,4 @@
-"""Correctness tests for dist_build_graph_v5.
+"""Correctness tests for dist_graph_builder.
 
 Verifies v5's per-rank PartitionMessagePassingInfo matches both (a) a single-GPU
 oracle that mirrors `main::distnnp_state/src/partition/build_halo_maps.cpp`, and
@@ -19,8 +19,8 @@ import torch
 import torch.distributed as dist
 
 import distnnp_state.distnnp_state_impl as _impl
-from distnnp_state.dist_build_graph_v5 import (
-    DistGraphBuilderV5,
+from distnnp_state.dist_graph_builder import (
+    DistGraphBuilder,
     BuildMode,
     _extract_halo_info_local,
 )
@@ -168,7 +168,7 @@ def test_v5_single_rank_smoke():
     env.gpus_per_node = 1
     env.num_nodes = 1
 
-    builder = DistGraphBuilderV5(
+    builder = DistGraphBuilder(
         cell, pbc, cutoff=4.0, ghost_buffer=0.5, env=env,
         refresh_interval=100,
     )
@@ -260,7 +260,7 @@ import os, sys, json
 import torch
 import torch.distributed as dist
 import distnnp_state.distnnp_state_impl as _impl
-from distnnp_state.dist_build_graph_v5 import DistGraphBuilderV5, BuildMode
+from distnnp_state.dist_graph_builder import DistGraphBuilder, BuildMode
 
 
 def oracle_build_halo_maps(pos, partition_id, cell, pbc, cutoff_plus_skin, rank, world_size):
@@ -354,7 +354,7 @@ def main():
     env.gpus_per_node = world_size
     env.num_nodes = 1
 
-    builder = DistGraphBuilderV5(
+    builder = DistGraphBuilder(
         cell, pbc, cutoff=4.0, ghost_buffer=0.5, env=env,
         refresh_interval=100,
     )
@@ -513,7 +513,7 @@ import os, sys
 import torch
 import torch.distributed as dist
 import distnnp_state.distnnp_state_impl as _impl
-from distnnp_state.dist_build_graph_v5 import DistGraphBuilderV5, BuildMode
+from distnnp_state.dist_graph_builder import DistGraphBuilder, BuildMode
 
 
 def main():
@@ -535,7 +535,7 @@ def main():
     env.global_rank = rank; env.world_size = world_size
     env.local_rank = local_rank; env.gpus_per_node = world_size; env.num_nodes = 1
 
-    builder = DistGraphBuilderV5(
+    builder = DistGraphBuilder(
         cell, pbc, cutoff=4.0, ghost_buffer=0.5, env=env, refresh_interval=100,
     )
     # 1st call: Mode A (refresh) at pos

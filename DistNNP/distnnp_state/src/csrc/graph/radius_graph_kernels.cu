@@ -1,4 +1,4 @@
-// radius_pbc.cu — CUDA cell-list radius graph with selective PBC tiling
+// radius_graph_kernels.cu — CUDA cell-list radius graph with selective PBC tiling
 //
 // Stage A: Selective PBC replication (only boundary atoms near cell faces)
 // Stage B: Cell-list construction + two-pass neighbor search

@@ -1,4 +1,4 @@
-// dist_graph_ops_.cpp — C++ entry points with input validation.
+// dist_graph_ops.cpp — C++ entry points with input validation.
 
 #include "distnnp_state/dist_graph_ops.hpp"
 

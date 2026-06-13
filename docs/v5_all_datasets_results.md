@@ -1,10 +1,10 @@
 # v5 Distributed build_graph — Multi-Dataset Benchmark
 
-Per-dataset timing of `DistGraphBuilderV5` (graph-aware distributed build_graph,
+Per-dataset timing of `DistGraphBuilder` (graph-aware distributed build_graph,
 no NCCL halo exchange) across ch4, solvated proteins, membrane, and water.
 
-**Date:** 2026-06-12
-**Hardware:** 4× NVIDIA A100-SXM4-40GB on Delta `gpua019` (single node, gpuA100x4, NVLink NV4)
+**Date:** 2026-06-13 (re-run after the `distnnp_state` csrc consolidation: `graph/`+`partition/`+`io/` layout, `DistGraphBuilderV5` → `DistGraphBuilder`)
+**Hardware:** 4× NVIDIA A100-SXM4-40GB on Delta `gpua060` (single node, gpuA100x4, NVLink NV4)
 **Parameters:** `cutoff = 6.0 Å`, `ghost = 0.5 Å` (r+skin = 6.5), `refresh_interval K = 100`
 **Methodology:** CUDA-event timing, median of timed iters (2 warmup + 3 for Mode A,
 2 warmup + 10 for Mode B); distributed time is the **max-over-ranks** median
@@ -12,10 +12,11 @@ no NCCL halo exchange) across ch4, solvated proteins, membrane, and water.
 **Script:** `DistNNP/benchmarks/dist_build_graph_benchmark.py --mode timing`
 **Implementation:** Mode A steps 7 (halo extraction) and 8 (edge filter) run as
 fused CUDA ops (`_impl.extract_halo_info` / `_impl.filter_edges_to_radius`).
-**Correctness:** the distributed edge set is bit-exact vs the single-GPU serial
-build (7/7 datasets at W=1/2/4); the SFC weighted partition uses an exact int64
-prefix sum so boundary-atom ownership is deterministic across ranks — **0
-duplicate edges** (`dist_build_graph_benchmark.py --mode verify`).
+**Correctness:** the distributed edge multiset is bit-exact vs the single-GPU
+serial build — **9/9 datasets PASS at W=4, 0 duplicate edges** (this run; e.g.
+9gmo_density = 132,316,209 edges identical to serial). The SFC weighted partition
+uses an exact int64 prefix sum so boundary-atom ownership is deterministic across
+ranks (`dist_build_graph_benchmark.py --mode verify`).
 
 Columns:
 - `A_ms` — Mode A (refresh): full pipeline incl. `all_reduce(degrees)` + SFC weighted partition.
@@ -37,19 +38,19 @@ Uniform methane lattice, near-cubic boxes. `splited` partitioning.
 
 ```
    N        box(Å)   A_ms    B_ms   amort   base_ms  speedup   r0_outer  r0_halo  int%   peakGB
-   8001       60     4.14    1.46    1.48     1.48     0.99x       1981     1018   52%    0.01
-  16002       76     4.46    1.52    1.55     1.69     1.09x       3979     1192   71%    0.02
-  32004       95     4.88    1.77    1.80     2.08     1.16x       8042     2400   75%    0.03
-  63999      120     5.24    1.98    2.01     2.74     1.36x      16054     4238   76%    0.06
- 127998      151     5.48    2.40    2.43     3.97     1.63x      31930     6490   81%    0.10
- 255996      190     6.73    3.00    3.03     6.60     2.18x      63918    10068   85%    0.20
- 512001      240     8.57    4.13    4.18    11.06     2.65x     127988    15764   88%    0.38
-1024002      302    11.67    6.02    6.08    18.06     2.97x     255965    24929   90%    0.75
+   8001       60     4.46    1.47    1.50     1.26     0.84x       1981     1018   52%    0.01
+  16002       76     4.34    1.48    1.51     1.40     0.93x       3979     1192   71%    0.02
+  32004       95     4.29    1.55    1.58     1.72     1.09x       8042     2400   75%    0.03
+  63999      120     4.55    1.72    1.75     2.23     1.28x      16054     4238   76%    0.06
+ 127998      151     4.82    2.05    2.08     3.22     1.55x      31930     6490   81%    0.10
+ 255996      190     5.76    2.60    2.63     5.37     2.04x      63918    10068   85%    0.20
+ 512001      240     9.06    4.38    4.43    11.92     2.69x     127988    15764   88%    0.38
+1024002      302    11.82    6.00    6.06    18.01     2.97x     255965    24929   90%    0.75
 ```
 
 **Trends**
-- **Speedup grows monotonically with N:** ~1.0× (8k) → **2.97× (1M)** on 4 GPUs.
-  Crossover (speedup > 1) is at ~16k.
+- **Speedup grows monotonically with N:** <1× below ~32k → **2.97× (1M)** on 4 GPUs
+  (0.84× at 8k, 0.93× at 16k, 1.09× at 32k). Crossover (speedup > 1) is at ~32k.
 - **interior% climbs 52% → 90%** as the box grows. Larger box ⇒ smaller
   surface-to-volume ratio ⇒ relatively fewer halo atoms ⇒ higher distributed
   efficiency. This is the root cause of the size-dependent speedup.
@@ -67,15 +68,15 @@ Realistically packed solvated systems span a range of densities and box shapes.
 
 ```
 system                    N       box(Å)   A_ms    B_ms   amort   base_ms  speedup  int%   peakGB
-ch4_8k_splited            8001     60       4.16    1.45    1.48     1.46    0.99x    52%    0.01
-1aki_density             25846     62       4.35    1.61    1.64     1.82    1.11x    36%    0.05
-pt_water_17k_density     21180     67       4.34    1.58    1.61     1.70    1.06x    35%    0.05
-dppc_membrane_28k        28160     56       4.42    1.62    1.65     1.88    1.14x    42%    0.06
-2rik_density            112727     73       5.28    2.26    2.29     3.73    1.63x    53%    0.19
-ch4_128k_splited        127998    151       5.49    2.40    2.43     3.97    1.63x    81%    0.10
-ch4_512k_splited        512001    240       8.99    4.40    4.45     9.53    2.14x    88%    0.38
-9gmo_512k_solvated      511998    283       9.08    4.46    4.51    11.44    2.54x    84%    0.69
-9gmo_density           1536442    229      25.70   11.90   12.04    36.70    3.05x    80%    2.32
+ch4_8k_splited            8001     60       4.21    1.46    1.48     1.46    0.99x    52%    0.01
+1aki_density             25846     62       4.61    1.63    1.66     1.80    1.09x    36%    0.05
+pt_water_17k_density     21180     67       4.32    1.59    1.62     1.70    1.05x    35%    0.05
+dppc_membrane_28k        28160     56       4.47    1.63    1.66     1.86    1.12x    42%    0.06
+2rik_density            112727     73       5.31    2.26    2.29     3.72    1.62x    53%    0.19
+ch4_128k_splited        127998    151       5.57    2.40    2.43     3.97    1.64x    81%    0.10
+ch4_512k_splited        512001    240       9.10    4.41    4.45    11.87    2.67x    88%    0.38
+9gmo_512k_solvated      511998    283       9.15    4.45    4.50    11.42    2.54x    84%    0.69
+9gmo_density           1536442    229      25.37   13.81   13.92    36.60    2.63x    80%    2.32
 ```
 
 **Topology matters as much as N**
@@ -85,15 +86,17 @@ ch4_512k_splited        512001    240       8.99    4.40    4.45     9.53    2.1
 - Small dense systems (1aki, pt_water, dppc at 20–28k) sit at speedup ≈ 1×:
   the fixed `all_reduce(degrees)` + SFC partition cost dominates at low N
   regardless of topology.
-- The largest system, **9gmo_density (1.54M), reaches 3.05×** at just 2.32 GB/rank —
-  the best distributed payoff, on par with the ch4 1M point (2.97×).
+- The largest system, **9gmo_density (1.54M), reaches 2.63×** at just 2.32 GB/rank.
+  The regular ch4 1M lattice does better (2.97×): irregular solvated packing caps
+  interior% at 80% and makes Mode B costlier per edge, so the dense 1.5M box lands
+  below the uniform 1M lattice despite its larger N.
 
 ---
 
 ## 3. Takeaways
 
 1. **v5 distributed build_graph pays off at scale, not at small N.** The
-   crossover is ~16k for uniform ch4 and higher for dense proteins. Below that,
+   crossover is ~32k for uniform ch4 and higher for dense proteins. Below that,
    the per-refresh collective + partition overhead exceeds the work saved by
    splitting.
 2. **interior% is the single best predictor of distributed efficiency** — it

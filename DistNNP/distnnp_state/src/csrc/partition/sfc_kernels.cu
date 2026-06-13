@@ -1,4 +1,4 @@
-// sfc_cuda.cu — CUDA kernels for SFC (Space-Filling Curve) partitioning.
+// sfc_kernels.cu — CUDA kernels for SFC (Space-Filling Curve) partitioning.
 //
 // Kernels:
 //   K1: compute_morton_keys_kernel   — normalize + 21-bit quantize + bit-spread interleave
@@ -147,7 +147,7 @@ __global__ void assign_partition_unweighted_kernel(
 // identical inputs but the float scan combined partial sums differently),
 // so a boundary atom was claimed by two ranks (duplicate edges) or none
 // (missing edges). int64 addition is exact and associative → bit-identical on
-// every rank → a single, consistent owner. See dist_build_graph_v5 step 5.
+// every rank → a single, consistent owner. See dist_graph_builder step 5.
 // ---------------------------------------------------------------------------
 __global__ void assign_partition_weighted_kernel(
     const int64_t* __restrict__ perm,      // [N] sort permutation

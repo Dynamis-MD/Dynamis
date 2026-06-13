@@ -1,4 +1,4 @@
-// dist_graph_ops.cu — CUDA hot-path ops for DistGraphBuilderV5 Mode A.
+// dist_graph_ops_kernels.cu — CUDA hot-path ops for DistGraphBuilder Mode A.
 
 #include "distnnp_state/dist_graph_ops.hpp"
 

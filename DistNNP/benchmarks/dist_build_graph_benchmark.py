@@ -1,4 +1,4 @@
-"""Unified tool for v5 distributed build_graph (DistGraphBuilderV5).
+"""Unified tool for v5 distributed build_graph (DistGraphBuilder).
 
 One script, four modes (--mode), sharing the dataset loader and a launcher-aware
 distributed init:
@@ -37,8 +37,8 @@ import torch
 import torch.distributed as dist
 
 import distnnp_state.distnnp_state_impl as _impl
-from distnnp_state.dist_build_graph_v5 import (
-    DistGraphBuilderV5,
+from distnnp_state.dist_graph_builder import (
+    DistGraphBuilder,
     _cell_block_partition,
     _all_reduce_degrees,
     _compute_sfc_weighted_partition,
@@ -200,7 +200,7 @@ def _timing_one(name, rank, world, local, device):
     env = make_env(rank, world, local)
 
     def mk():
-        return DistGraphBuilderV5(cell, pbc, CUTOFF, GHOST, env, refresh_interval=100)
+        return DistGraphBuilder(cell, pbc, CUTOFF, GHOST, env, refresh_interval=100)
 
     t_a = time_dist(lambda: mk().build(pos), device, warmup=2, iters=3)
     b = mk(); b.build(pos)
@@ -295,7 +295,7 @@ def _verify_one(name, rank, world, local, device):
     pos, cell, N = load_and_broadcast(name, rank, device)
     pbc = torch.tensor([True, True, True])
     env = make_env(rank, world, local)
-    res = DistGraphBuilderV5(cell, pbc, CUTOFF, GHOST, env, refresh_interval=100).build(pos)
+    res = DistGraphBuilder(cell, pbc, CUTOFF, GHOST, env, refresh_interval=100).build(pos)
     e = res.edges_outer
     local_rows = torch.stack([e[0].to(torch.int64), e[1].to(torch.int64)], dim=1)
     allp = gather_rows(local_rows, world, device)
@@ -435,7 +435,7 @@ def mode_diag(system, rank, world, local, device):
     pos, cell, N = load_and_broadcast(system, rank, device)
     pbc = torch.tensor([True, True, True])
     env = make_env(rank, world, local)
-    res = DistGraphBuilderV5(cell, pbc, CUTOFF, GHOST, env, refresh_interval=100).build(pos)
+    res = DistGraphBuilder(cell, pbc, CUTOFF, GHOST, env, refresh_interval=100).build(pos)
     e = res.edges_outer
     local_rows = torch.stack([e[0].to(torch.int64), e[1].to(torch.int64)], dim=1)
     allp = gather_rows(local_rows, world, device)

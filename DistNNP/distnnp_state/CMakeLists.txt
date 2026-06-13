@@ -54,19 +54,16 @@ python_add_library(distnnp_state_impl
     src/distnnp_state_bindings.cpp
     src/csrc/partition/simple_spatial_partitioner.cpp
     src/csrc/partition/kdtree_partitioner.cpp
-    src/csrc/partition/kdtree_cuda_.cpp
-    src/csrc/partition/kdtree_cuda.cu
+    src/csrc/partition/kdtree.cpp
+    src/csrc/partition/kdtree_kernels.cu
     src/csrc/partition/sfc_partitioner.cpp
-    src/csrc/partition/sfc_cuda_.cpp
-    src/csrc/partition/sfc_cuda.cu
-    src/csrc/partition/build_halo_maps.cpp
-    src/csrc/radius_pbc/radius_pbc_.cpp
-    src/csrc/radius_pbc/radius_pbc.cu
-    src/csrc/distributed/dist_partition.cpp
-    src/csrc/distributed/dist_build_graph.cpp
-    src/csrc/distributed/dist_build_halo_map.cpp
-    src/csrc/dist_graph/dist_graph_ops.cu
-    src/csrc/dist_graph/dist_graph_ops_.cpp
+    src/csrc/partition/sfc.cpp
+    src/csrc/partition/sfc_kernels.cu
+    src/csrc/build_halo_maps.cpp
+    src/csrc/graph/radius_graph.cpp
+    src/csrc/graph/radius_graph_kernels.cu
+    src/csrc/graph/dist_graph_ops.cpp
+    src/csrc/graph/dist_graph_ops_kernels.cu
     src/csrc/trajectory_writer.cpp
 )
 

@@ -1,6 +1,6 @@
-// radius_pbc_.cpp — C++ entry point with input validation
+// radius_graph.cpp — C++ entry point with input validation
 
-#include "distnnp_state/radius_pbc.hpp"
+#include "distnnp_state/radius_graph.hpp"
 #include <stdexcept>
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor>

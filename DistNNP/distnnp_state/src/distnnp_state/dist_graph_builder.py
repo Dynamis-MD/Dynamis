@@ -1,4 +1,4 @@
-"""Phase 5 v5: Distributed build_graph with graph-aware halo.
+"""Phase 5: Distributed build_graph with graph-aware halo.
 
 Aligns send/recv/interior semantics with `main` branch's
 `build_halo_maps.cpp` while doing the work per-rank (each rank only
@@ -41,7 +41,7 @@ class BuildMode(Enum):
 
 
 @dataclass
-class DistBuildGraphResultV5:
+class DistBuildGraphResult:
     """Per-step output. `halo_info` matches `main::build_halo_maps` semantics."""
     edges_outer: torch.Tensor             # [2, E_local] global ids, dst ∈ my_outer
     cell_shifts_outer: torch.Tensor       # [E_local, 3] float
@@ -213,8 +213,8 @@ def _filter_edges_to_radius(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class DistGraphBuilderV5:
-    """Distributed graph builder with graph-aware halo (v5).
+class DistGraphBuilder:
+    """Distributed graph builder with graph-aware halo.
 
     Output `halo_info` matches `main::build_halo_maps`'s
     `PartitionMessagePassingInfo` semantics — see docs §10 + §10.8.
@@ -310,7 +310,7 @@ class DistGraphBuilderV5:
 
     # ── Mode A ──────────────────────────────────────────────────────────────
 
-    def _mode_a(self, pos: torch.Tensor) -> DistBuildGraphResultV5:
+    def _mode_a(self, pos: torch.Tensor) -> DistBuildGraphResult:
         env = self.env
         R = int(env.global_rank)
         W = int(env.world_size)
@@ -375,7 +375,7 @@ class DistGraphBuilderV5:
         self._pos_w_at_refresh = pos_w.detach().clone()
         self._steps_since_refresh = 0
 
-        return DistBuildGraphResultV5(
+        return DistBuildGraphResult(
             edges_outer=edges_outer,
             cell_shifts_outer=cell_shifts_outer,
             pid_outer=pid_outer,
@@ -389,7 +389,7 @@ class DistGraphBuilderV5:
 
     # ── Mode B ──────────────────────────────────────────────────────────────
 
-    def _mode_b(self, pos: torch.Tensor) -> DistBuildGraphResultV5:
+    def _mode_b(self, pos: torch.Tensor) -> DistBuildGraphResult:
         env = self.env
         device = pos.device
         pbc = self.pbc.to(device)
@@ -423,7 +423,7 @@ class DistGraphBuilderV5:
 
         self._steps_since_refresh += 1
 
-        return DistBuildGraphResultV5(
+        return DistBuildGraphResult(
             edges_outer=edges_global,
             cell_shifts_outer=cell_shifts,
             pid_outer=self._pid_outer,
@@ -437,7 +437,7 @@ class DistGraphBuilderV5:
 
     # ── Public entry ────────────────────────────────────────────────────────
 
-    def build(self, pos: torch.Tensor) -> DistBuildGraphResultV5:
+    def build(self, pos: torch.Tensor) -> DistBuildGraphResult:
         if self.next_is_refresh or self._halo_info is None:
             return self._mode_a(pos)
         return self._mode_b(pos)

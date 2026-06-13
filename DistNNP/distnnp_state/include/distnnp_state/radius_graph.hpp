@@ -4,7 +4,7 @@
 #include <c10/util/Optional.h>
 #include <tuple>
 
-// ===== CUDA implementations (defined in radius_pbc.cu) =====
+// ===== CUDA implementations (defined in radius_graph_kernels.cu) =====
 
 // Legacy 3-tuple impl. All atoms are both sources and targets.
 // Forwards to _ex with target_indices=nullopt; back-compat for existing callers.
@@ -39,7 +39,7 @@ radius_graph_pbc_cuda_impl_ex(
     bool counts_only = false
 );
 
-// ===== C++ entry points with input validation (defined in radius_pbc_.cpp) =====
+// ===== C++ entry points with input validation (defined in radius_graph.cpp) =====
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor>
 radius_graph_pbc(

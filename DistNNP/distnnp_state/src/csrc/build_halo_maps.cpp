@@ -10,7 +10,7 @@
 // radius_graph_pbc requires CUDA input tensors.
 
 #include "distnnp_state/partitioner.hpp"
-#include "distnnp_state/radius_pbc.hpp"
+#include "distnnp_state/radius_graph.hpp"
 
 namespace distnnp_state
 {

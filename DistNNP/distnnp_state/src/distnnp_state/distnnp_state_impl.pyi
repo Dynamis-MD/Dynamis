@@ -1,40 +1,14 @@
 from __future__ import annotations
-import collections.abc
 import torch
 import typing
-__all__: list[str] = ['DistEnvironment', 'DistNNPState', 'KDTreePartitioner', 'MolecularInfo', 'PartitionMessagePassingInfo', 'SFCCurveType', 'SFCPartitioner', 'SimpleSpatialPartitioner', 'SimulationConfig', 'TrajectoryWriter', 'radius_graph_pbc']
+__all__: list[str] = ['DistEnvironment', 'DistNNPState', 'KDTreePartitioner', 'MolecularInfo', 'PartitionMessagePassingInfo', 'SFCCurveType', 'SFCPartitioner', 'SimpleSpatialPartitioner', 'SimulationConfig', 'TrajectoryWriter', 'extract_halo_info', 'filter_edges_to_radius', 'radius_graph_pbc', 'radius_graph_pbc_counts_ex', 'radius_graph_pbc_ex']
 class DistEnvironment:
+    global_rank: int
+    gpus_per_node: int
+    local_rank: int
+    num_nodes: int
+    world_size: int
     def __init__(self) -> None:
-        ...
-    @property
-    def global_rank(self) -> int:
-        ...
-    @global_rank.setter
-    def global_rank(self, arg0: typing.SupportsInt) -> None:
-        ...
-    @property
-    def gpus_per_node(self) -> int:
-        ...
-    @gpus_per_node.setter
-    def gpus_per_node(self, arg0: typing.SupportsInt) -> None:
-        ...
-    @property
-    def local_rank(self) -> int:
-        ...
-    @local_rank.setter
-    def local_rank(self, arg0: typing.SupportsInt) -> None:
-        ...
-    @property
-    def num_nodes(self) -> int:
-        ...
-    @num_nodes.setter
-    def num_nodes(self, arg0: typing.SupportsInt) -> None:
-        ...
-    @property
-    def world_size(self) -> int:
-        ...
-    @world_size.setter
-    def world_size(self, arg0: typing.SupportsInt) -> None:
         ...
 class DistNNPState:
     dist_env: DistEnvironment
@@ -66,13 +40,8 @@ class MolecularInfo:
     atom_velocities: torch.Tensor
     atom_vertex_numbers: torch.Tensor
     edge_counts: torch.Tensor
+    num_atoms: int
     def __init__(self) -> None:
-        ...
-    @property
-    def num_atoms(self) -> int:
-        ...
-    @num_atoms.setter
-    def num_atoms(self, arg0: typing.SupportsInt) -> None:
         ...
 class PartitionMessagePassingInfo:
     edge_index: torch.Tensor
@@ -106,7 +75,7 @@ class SFCCurveType:
         ...
     def __index__(self) -> int:
         ...
-    def __init__(self, value: typing.SupportsInt) -> None:
+    def __init__(self, value: int) -> None:
         ...
     def __int__(self) -> int:
         ...
@@ -114,7 +83,7 @@ class SFCCurveType:
         ...
     def __repr__(self) -> str:
         ...
-    def __setstate__(self, state: typing.SupportsInt) -> None:
+    def __setstate__(self, state: int) -> None:
         ...
     def __str__(self) -> str:
         ...
@@ -148,37 +117,51 @@ class SimpleSpatialPartitioner:
         ...
 class SimulationConfig:
     cell: torch.Tensor
+    cutoff: float
+    ghost_cutoff_buffer: float
     pbc: torch.Tensor
     def __init__(self) -> None:
         ...
-    @property
-    def cutoff(self) -> float:
-        ...
-    @cutoff.setter
-    def cutoff(self, arg0: typing.SupportsFloat) -> None:
-        ...
-    @property
-    def ghost_cutoff_buffer(self) -> float:
-        ...
-    @ghost_cutoff_buffer.setter
-    def ghost_cutoff_buffer(self, arg0: typing.SupportsFloat) -> None:
-        ...
 class TrajectoryWriter:
-    def __init__(self, global_rank: typing.SupportsInt, run_id: bytes, author: str, output_dir: str = './trajectory') -> None:
+    def __enter__(self) -> TrajectoryWriter:
         ...
-    def initialize(self, xyz_file_name: str, time_per_step: typing.SupportsFloat, steps_per_write: typing.SupportsInt) -> MolecularInfo:
+    def __exit__(self, *args) -> None:
+        ...
+    def __init__(self, global_rank: int, run_id: bytes, author: str, output_dir: str = './trajectory') -> None:
+        ...
+    def initialize(self, input_file_name: str, time_per_step: float, steps_per_write: int) -> MolecularInfo:
         """
         Writes front matter and initializes environment from an xyz file
         """
-    def update_atom_counts(self, counts: collections.abc.Sequence[typing.SupportsInt]) -> None:
+    def update_atom_counts(self, counts: list[int]) -> None:
         """
         Update the rank offsets. Should be called after every repartition
         """
-    def write_frame(self, frame_idx: typing.SupportsInt, indices: torch.Tensor, positions: torch.Tensor, velocities: torch.Tensor) -> None:
+    def write_frame(self, frame_idx: int, indices: torch.Tensor, positions: torch.Tensor, velocities: torch.Tensor) -> None:
         """
         Writes the frame to the binary file
         """
-def radius_graph_pbc(pos: torch.Tensor, cell: torch.Tensor, pbc: torch.Tensor, radius: typing.SupportsFloat, max_num_neighbors: typing.SupportsInt, enforce_max_strictly: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def write_to_xyz(self, state: MolecularInfo, file_name: str) -> None:
+        """
+        Writes state to an xyz file
+        """
+def extract_halo_info(edges: torch.Tensor, pid_outer: torch.Tensor, my_outer_atoms: torch.Tensor, my_rank: int, world_size: int, N: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Derive halo send/recv CSR + interior mask from per-rank edges (dst in my_outer) via graph symmetry, grouped by peer and sorted by global atom id within each peer (no NCCL). Returns (send_offsets, send_local_indices, recv_offsets, recv_ghost_indices, interior_mask, recv_atom_global). step 7.
+    """
+def filter_edges_to_radius(edges: torch.Tensor, cell_shifts: torch.Tensor, pos: torch.Tensor, cell: torch.Tensor, radius: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Filter edges built at r+skin down to true cutoff r: keep edge iff ||pos[src] + cell_shift @ cell - pos[dst]||^2 <= r^2. Order-preserving. Fused CUDA kernel + compaction; replaces the ATen recompute (step 8).
+    """
+def radius_graph_pbc(pos: torch.Tensor, cell: torch.Tensor, pbc: torch.Tensor, radius: float, max_num_neighbors: int, enforce_max_strictly: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     CUDA cell-list radius graph with selective PBC tiling
+    """
+def radius_graph_pbc_counts_ex(pos: torch.Tensor, cell: torch.Tensor, pbc: torch.Tensor, radius: float, target_indices: torch.Tensor | None = None) -> torch.Tensor:
+    """
+    Count-only variant: returns just neighbor_counts[N_target] int32. Skips edge buffer + prefix-sum + B4 write kernel (~50% faster).
+    """
+def radius_graph_pbc_ex(pos: torch.Tensor, cell: torch.Tensor, pbc: torch.Tensor, radius: float, max_num_neighbors: int, enforce_max_strictly: bool, target_indices: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Extended radius graph: accepts optional target_indices subset, returns (edge_index, cell_shifts, num_neighbors_image, neighbor_counts).
     """

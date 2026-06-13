@@ -4,10 +4,10 @@
 #include <tuple>
 
 // Distributed build_graph helper ops (v5), implemented in CUDA and exposed to
-// Python. These replace the ATen-heavy hot-path steps of DistGraphBuilderV5
+// Python. These replace the ATen-heavy hot-path steps of DistGraphBuilder
 // Mode A: edge filtering (step 8) and halo-info extraction (step 7).
 
-// ===== CUDA implementations (dist_graph_ops.cu) =====
+// ===== CUDA implementations (dist_graph_ops_kernels.cu) =====
 
 // Filter edges built at r+skin down to the true cutoff r. For each edge
 // (src -> dst) the integer PBC cell_shift is applied to src; the edge is kept
@@ -44,7 +44,7 @@ extract_halo_info_cuda_impl(
     int64_t world_size,
     int64_t N);
 
-// ===== C++ entry points with input validation (dist_graph_ops_.cpp) =====
+// ===== C++ entry points with input validation (dist_graph_ops.cpp) =====
 
 std::tuple<at::Tensor, at::Tensor>
 filter_edges_to_radius(

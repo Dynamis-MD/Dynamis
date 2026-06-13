@@ -7,8 +7,8 @@
 //      → builds graph at cutoff, computes edge_counts, stores edge_index
 
 #include "distnnp_state/partitioner.hpp"
-#include "distnnp_state/sfc_cuda.hpp"
-#include "distnnp_state/radius_pbc.hpp"
+#include "distnnp_state/sfc.hpp"
+#include "distnnp_state/radius_graph.hpp"
 
 namespace distnnp_state
 {
