@@ -304,29 +304,12 @@ class TestSelectiveReplication:
 
 
 class TestMaxNeighbors:
-    """Test max_num_neighbors threshold enforcement."""
+    """Test max_num_neighbors behavior.
 
-    def test_max_neighbors_strict(self, device):
-        """Enforce strict max neighbors."""
-        torch.manual_seed(42)
-        n = 50
-        data = make_cubic_system(n, 12.0, device)
-        radius = 5.0
-        max_neighbors = 10
-
-        cuda_ei, cuda_co, _ = _impl.radius_graph_pbc(
-            data.pos, data.cell[0], torch.tensor([True, True, True]),
-            radius, max_neighbors, True  # strict
-        )
-
-        if cuda_ei.size(1) > 0:
-            # Count neighbors per target atom
-            tgt = cuda_ei[1]
-            counts = torch.zeros(n, dtype=torch.long, device=device)
-            counts.scatter_add_(0, tgt, torch.ones_like(tgt))
-            assert counts.max() <= max_neighbors, (
-                f"Max neighbors exceeded: {counts.max()} > {max_neighbors}"
-            )
+    Note: strict truncation (max_num_neighbors > 0) is not implemented — every
+    current caller passes 0 (no limit). The former test_max_neighbors_strict was
+    removed together with the unused sort/truncation kernel.
+    """
 
     def test_max_neighbors_no_limit(self, device):
         """max_num_neighbors=0 means no limit."""
