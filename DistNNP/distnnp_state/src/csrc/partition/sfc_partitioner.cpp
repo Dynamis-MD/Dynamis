@@ -168,6 +168,7 @@ static PartitionMessagePassingInfo do_partition(
     auto my_indices = torch::nonzero(my_mask).squeeze(-1);
     int64_t num_local = my_indices.size(0);
 
+    info.atom_counts           = torch::bincount(labels, /*weights=*/{}, /*minlength=*/env.world_size);
     info.partition_indices     = state.atom_vertex_numbers.index_select(0, my_indices);
 
     info.global_send_recv_matrix = torch::zeros({W, W}, long_opts);

@@ -115,7 +115,7 @@ class Simulator:
         self.dist_environment = dist_environment
         self.device = device
         # TODO figure out what author should be
-        self.writer: TrajectoryWriter = TrajectoryWriter(dist_environment.global_rank, uuid.uuid4(), "author", config.output_dir)
+        self.writer: TrajectoryWriter = TrajectoryWriter(dist_environment.global_rank, uuid.uuid4().bytes, "author", config.output_dir)
 
     def _get_partitioner(self) -> POSSIBLE_PARTITIONERS_TYPES:
         partition_algorithm = self.config.partition_algorithm
@@ -165,7 +165,7 @@ class Simulator:
             self.state.parition_info, device=device if device else self.device
         )
 
-    def setup(input_file: str) -> None:
+    def setup(self, input_file: str) -> None:
         # (0) Initialize distributed if not already done.
         # Single-GPU / single-process runs skip init_process_group entirely —
         # torchrun sets RANK; SLURM sets SLURM_PROCID. If neither is present we
@@ -176,22 +176,18 @@ class Simulator:
         config = self._get_simulation_config()
 
         # (1) initialize from file
-        global_mol_info = writer.initialize(input_file, config.timestep_fs, config.traj_interval)
+        global_mol_info = self.writer.initialize(input_file, config.timestep_fs, config.traj_interval)
 
         # (2) Partition atoms and build halo communication maps.
-        partitioner = self._get_partitioner()
-        partition_info = partitioner.partition(global_mol_info, dist_env, config)
-        partitioner.build_halo_maps(partition_info, global_mol_info, dist_env, config)
+        self.sync_and_repartition(device=self.device)
 
-        # TODO update writer with atom counts for each rank
-        # TODO out dir setup
         # TODO if velocities are all 0, initialize from Maxwell-Boltzmann dist
 
         self.state = SimState(
-            molecular_system=molecular_system,
+            molecular_system=self.state.local_state,
             partitioner=self._get_partitioner(),
             simulation_config=self.config,
-            distributed_environment=self.dist_env,
+            distributed_environment=dist_env,
             device=self.device,
         )
         self.model.initialize_buffers(
@@ -204,7 +200,7 @@ class Simulator:
         self.model.initialize_buffers(
             self.state.parition_info, device=device if device else self.device
         )
-        # TODO update writer with atom counts for each rank
+        self.writer.update_atom_counts(self.state.local_partition_info.atom_counts)
 
     def _set_state(self, state: SimState):
         self.state = state
@@ -226,15 +222,15 @@ class Simulator:
             return True
         return False
 
-    def run() -> None:
+    def run(self) -> None:
         total_done = 0
         while total_done < self.config.total_steps:
-            if should_rebalance(total_done):
-                sync_and__repartition()
-            energy = step()
+            if self.should_rebalance(total_done):
+                self.sync_and_repartition()
+            energy = self.step(self.config.timestep_fs)
             # if should_log(total_done):
                 # _log_energy(total_done, energy)
-            if should_write_traj(total_done):
-                writer.submit(total_done, state)
+            if self.should_write_traj(total_done):
+                self.writer.submit(total_done, self.state)
             total_done += 1
-        writer.flush()
+        self.writer.flush()

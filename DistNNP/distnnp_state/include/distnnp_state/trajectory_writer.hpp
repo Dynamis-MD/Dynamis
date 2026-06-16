@@ -17,8 +17,9 @@ public:
     void submit(uint32_t step, MolecularInfo state);
     void flush();
 
-    void update_atom_counts(std::vector<uint32_t> counts) {
-        rank_atom_counts = std::move(counts);
+    void update_atom_counts(torch::Tensor counts) {
+        uint32_t* data_ptr = counts.to(torch::kCPU).contiguous().data_ptr<uint32_t>();
+        rank_atom_counts = std::vector<uint32_t>(data_ptr, data_ptr + counts.numel());
     }
 
     void write_to_xyz(const MolecularInfo& state, const std::string& file_name = "output.xyz");
