@@ -9,7 +9,7 @@ from distnnp_state import (
     DistEnvironment, 
     MolecularInfo, 
     SimulationConfig,
-    SimpleSpatialPartitioner,
+    KDTreePartitioner,
     radius_graph_pbc_cuda
 )
 
@@ -25,13 +25,13 @@ def setup_distributed():
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     nnodes = int(os.environ.get("SLURM_NNODES", 1))
-    
+
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
-        
+
     if world_size > 1 and not dist.is_initialized():
         dist.init_process_group("nccl", rank=rank, world_size=world_size)
-        
+
     return rank, local_rank, world_size, nnodes
 
 @pytest.mark.skipif(not HAS_FAIRCHEM, reason="fairchem-core is not installed")
@@ -39,18 +39,18 @@ def test_uma_distributed_parity():
     rank, local_rank, world_size, nnodes = setup_distributed()
     if world_size < 2:
         pytest.skip("Parity test requires at least 2 GPUs. Run with torchrun or mpirun.")
-    
+
     # device = f"cuda:{local_rank}"
     device = "cuda"
-    
+
     predictor = pretrained_mlip.get_predict_unit("uma-s-1p2", device=device)
     standard_calc = FAIRChemCalculator(predictor, task_name="omol")
-    dist_model = UMAModel("uma-s-1p2", device=device, rank=rank)
+    dist_model = UMAModel("uma-s-1p2", device=device)
 
     # ==========================================
     # 2. Setup Global Data (Ground Truth)
     # ==========================================
-    total_atoms = 16
+    total_atoms = 4
 
     # Use a fixed seed on all ranks so they generate the same global structure
     torch.manual_seed(42)
@@ -93,9 +93,14 @@ def test_uma_distributed_parity():
     sim_config.cutoff = cutoff
     sim_config.ghost_cutoff_buffer = 0.5
     
-    partitioner = SimpleSpatialPartitioner()
+    partitioner = KDTreePartitioner()
     partition_info = partitioner.partition(global_mol, env)
     partitioner.build_halo_maps(partition_info, global_mol, env, sim_config)
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        dist.all_reduce(
+            partition_info.global_send_recv_matrix, 
+            op=dist.ReduceOp.SUM
+        )
 
     local_mol = MolecularInfo()
     local_mol.atom_positions = global_mol.atom_positions[
@@ -120,9 +125,17 @@ def test_uma_distributed_parity():
     state.local_partition_info = partition_info
     state.sim_config = sim_config
 
+    #######################
+    n_local = state.local_molecular_info.num_atoms
+    # Number of ghost atoms this rank is supposed to receive
+    n_ghosts = state.local_partition_info.recv_ghost_indices.shape[0]
+    max_allowed_index = (n_local + n_ghosts) - 1
+
+    edge_index = state.local_partition_info.edge_index_halo
+
+
     dist_model.initialize_buffers(partition_info, device)
 
-    print(f"[rank {rank}] world_size={world_size}, n_local={n_local}, n_ghosts={partition_info.recv_ghost_indices.shape[0]}")
     # ==========================================
     # 4. Forward & Backward Pass: STANDARD MODEL
     # ==========================================
@@ -170,7 +183,7 @@ def test_uma_distributed_parity():
     # ==========================================
     
     # A. Check Energy Parity (Sum of local energies == global energy)
-    local_energy_sum = local_energy.clone()
+    local_energy_sum = torch.tensor([local_energy], device=device)
     dist.all_reduce(local_energy_sum, op=dist.ReduceOp.SUM)
     
     if rank == 0:

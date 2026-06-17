@@ -85,6 +85,7 @@ class PartitionMessagePassingInfo:
     recv_offsets: torch.Tensor
     send_local_indices: torch.Tensor
     send_offsets: torch.Tensor
+    cell_shifts_halo: torch.Tensor
     def __init__(self) -> None:
         ...
 class SFCCurveType:

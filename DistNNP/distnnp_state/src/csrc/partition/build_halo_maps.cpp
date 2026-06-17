@@ -41,6 +41,7 @@ void AbstractPartitioner::build_halo_maps(
         pos.to(torch::kFloat), cell, pbc, ghost_cutoff,
         HALO_MAX_NUM_NEIGHBORS, /*enforce_max_strictly=*/false);
     auto edge_index = std::get<0>(graph_result);  // [2, E]
+    auto cell_shift = std::get<1>(graph_result);  // [E, 3]
     auto src = edge_index[0];  // [E]
     auto dst = edge_index[1];  // [E]
 
@@ -147,6 +148,7 @@ void AbstractPartitioner::build_halo_maps(
 
     // Store halo graph for downstream NNP model use
     info.edge_index_halo = edge_index;
+    info.cell_shifts_halo = cell_shift;
 
     // Update send_recv_matrix with halo counts (vectorized, no CPU sync)
     auto send_counts_per_rank = send_offsets_t.slice(0, 1, W + 1) - send_offsets_t.slice(0, 0, W);

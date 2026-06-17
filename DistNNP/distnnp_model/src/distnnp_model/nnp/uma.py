@@ -1,4 +1,22 @@
-import sys
+import torch
+import torch.distributed as dist
+import numpy as np
+import os
+from torch.profiler import record_function
+from typing import Dict, List, Tuple, Literal
+from fairchem.core import pretrained_mlip, FAIRChemCalculator
+from fairchem.core.models.uma.escn_moe import eSCNMDMoeBackbone
+from fairchem.core.common.registry import registry
+from fairchem.core.models.uma.nn.mole_utils import (
+    model_search_and_replace,
+    recursive_replace_so2_MOLE,
+    replace_MOLE_with_linear,
+)
+from fairchem.core.datasets.atomic_data import AtomicData
+from fairchem.core.units.mlip_unit import (
+    InferenceSettings,
+    guess_inference_settings,
+)
 from distnnp_model.potential import DistNNPModel
 from distnnp_model.comm.exchanger import Exchanger, GPUDirectExchanger
 from distnnp_model.comm.feature_push import FeaturePushToExchange
@@ -8,103 +26,1916 @@ from distnnp_state import (
     radius_graph_pbc_cuda,
 )
 
-from fairchem.core.common import gp_utils
-from fairchem.core.models.uma.outputs import (
-    compute_energy,
-    compute_forces_and_stress,
-    compute_forces,
-    compute_hessian,
-)
-from fairchem.core import pretrained_mlip
-from fairchem.core.datasets.atomic_data import AtomicData
-from fairchem.core.units.mlip_unit import (
-    InferenceSettings,
-    guess_inference_settings,
-)
+class _DifferentiableGather(torch.autograd.Function):
+    """
+    Custom autograd Function that wraps NCCL intra-node all_gather.
 
-from fairchem.core.models.uma.nn.mole_utils import (
-    model_search_and_replace,
-    recursive_replace_so2_MOLE,
-    replace_MOLE_with_linear,
-)
-from fairchem.core.models.uma import escn_moe
+    Forward: standard NCCL all_gather (collects features from all GPUs in node).
+    Backward: extracts this GPU's gradient slice from the gathered gradient.
 
-import torch
-import torch.distributed as dist
-from typing import Literal, Optional, List
+    This is needed because NCCL operations don't participate in autograd.
+    Without this, the intra-node gather after the last message passing layer
+    breaks the gradient path from positions → energy, causing autograd.grad
+    to fail in the force computation (escn_md.py output head).
 
-# original_balance = escn_moe.balance_channels_batched
+    The partial gradient (only this GPU's slice) is correct because each GPU's
+    contribution to the gathered tensor is independent. The distributed calculator
+    sums partial forces via intra-node all-reduce.
+    """
 
-def balance_channels_batched(
-    emb: torch.Tensor,
-    target: torch.Tensor,
-    natoms: torch.Tensor,
-    batch: torch.Tensor,
-    start_idx: int,
-    end_idx: int,
-    target_offset: float = 0.0,
-    n_local_atoms: int = None,
-) -> torch.Tensor:
-    out_emb = emb.clone()
-    num_systems = len(natoms)
-    n_channels = end_idx - start_idx
+    @staticmethod
+    def forward(ctx, x_local_flat, exchanger, feature_dim):
+        ctx.my_start = exchanger.my_start_in_node
+        ctx.my_count = exchanger.num_local_on_gpu
+        return exchanger.gather_node_features(x_local_flat, feature_dim)
 
-    # Extract all channels (local + ghosts)
-    channels_to_balance = emb[:, 0, start_idx:end_idx]
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_local = grad_output[ctx.my_start:ctx.my_start + ctx.my_count].contiguous()
+        return grad_local, None, None
 
-    system_sums = torch.zeros(
-        num_systems, n_channels, device=emb.device, dtype=emb.dtype
-    )
+
+class FeatureExchanger:
+    """
+    Handles the exchange of node features between ranks.
+    """
+    def __init__(self, rank: int, world_size: int):
+        self.rank = rank
+        self.world_size = world_size
+        # Maps: rank -> tensor of indices
+        self.send_map: Dict[int, torch.Tensor] = {}
+        self.recv_map: Dict[int, torch.Tensor] = {}
+        self.recv_ghost_indices: Dict[int, torch.Tensor] = {} # Indices in local x_message to update
+        self.profiler = None  # Optional profiler for detailed timing
+        self._measure_bw = False
+        self.bw_log = []
+
+    def update_maps(self, send_map: Dict[int, torch.Tensor], recv_map: Dict[int, torch.Tensor], recv_ghost_indices: Dict[int, torch.Tensor]):
+        """
+        Update communication maps.
+        send_map: rank -> indices of local atoms to send
+        recv_map: rank -> indices of remote atoms to receive (not used directly for indexing, but for sizing)
+        recv_ghost_indices: rank -> indices in local tensor where received data should go
+        """
+        self.send_map = send_map
+        self.recv_map = recv_map
+        self.recv_ghost_indices = recv_ghost_indices
+        
+        # === Area 1: Pre-compute cached indices for O(1) gather/scatter ===
+        # Concatenate all send indices into a single tensor + compute split sizes
+        send_indices_list = []
+        send_splits = []
+        for r in range(self.world_size):
+            if r in send_map and send_map[r].numel() > 0:
+                send_indices_list.append(send_map[r])
+                send_splits.append(send_map[r].size(0))
+            else:
+                send_splits.append(0)
+        if send_indices_list:
+            self._cached_send_indices = torch.cat(send_indices_list)
+        else:
+            self._cached_send_indices = None
+        self._cached_send_splits = send_splits
+        
+        # Pre-compute recv splits and batched recv indices
+        recv_splits = [0] * self.world_size
+        recv_indices_list = []
+        for r in range(self.world_size):
+            if r in recv_ghost_indices and recv_ghost_indices[r].numel() > 0:
+                recv_splits[r] = recv_ghost_indices[r].size(0)
+                recv_indices_list.append(recv_ghost_indices[r])
+        self._cached_recv_splits = recv_splits
+        if recv_indices_list:
+            self._batched_recv_indices = torch.cat(recv_indices_list)
+        else:
+            self._batched_recv_indices = torch.empty(0, dtype=torch.long)
+        self._batched_recv_version = id(recv_ghost_indices)
+
+        # Log communication matrix when BW measurement is enabled
+        if self._measure_bw:
+            self._log_comm_matrix(send_splits, recv_splits)
+
+    def _log_comm_matrix(self, send_splits, recv_splits):
+        """Gather and print the full NxN communication matrix (atoms per pair)."""
+        import torch.distributed as dist
+        if not dist.is_initialized():
+            return
+        rank = self.rank
+        world_size = self.world_size
+        # Gather all send_splits to rank 0
+        local_sends = torch.tensor(send_splits, dtype=torch.long, device='cuda')
+        if rank == 0:
+            all_sends = [torch.zeros(world_size, dtype=torch.long, device='cuda') for _ in range(world_size)]
+        else:
+            all_sends = None
+        dist.gather(local_sends, gather_list=all_sends, dst=0)
+        if rank == 0:
+            feat_dim = 1152  # UMA-s-1p1: (Lmax+1)^2 * Nchannel = 9 * 128
+            elem_size = 4   # float32
+            bytes_per_atom = feat_dim * elem_size  # 4608 bytes
+            print(f"\n[Feature Exchange Communication Matrix] ({world_size} ranks)")
+            print(f"  Feature dim={feat_dim}, elem_size={elem_size}, bytes/atom={bytes_per_atom}")
+            # Print header
+            header = "Send\\Recv"
+            for j in range(world_size):
+                header += f"  {j:>5}"
+            header += "   Total   NonZero"
+            print(header)
+            print("-" * len(header))
+            total_msgs = 0
+            total_nonzero = 0
+            total_atoms = 0
+            for i in range(world_size):
+                row = all_sends[i].cpu().tolist()
+                line = f"  R{i:<5}"
+                nz = 0
+                for j in range(world_size):
+                    if i == j:
+                        line += f"  {'--':>5}"
+                    elif row[j] == 0:
+                        line += f"  {'0':>5}"
+                    else:
+                        line += f"  {row[j]:>5}"
+                        nz += 1
+                row_total = sum(row)
+                total_atoms += row_total
+                total_nonzero += nz
+                total_msgs += world_size - 1  # excluding self
+                line += f"  {row_total:>6}  {nz:>5}/{world_size-1}"
+                print(line)
+            print(f"\n  Total atom transfers: {total_atoms}")
+            print(f"  Total messages: {total_msgs} (non-zero: {total_nonzero}, "
+                  f"zero: {total_msgs - total_nonzero}, sparsity: {(total_msgs - total_nonzero)/total_msgs*100:.1f}%)")
+            print(f"  Total data volume: {total_atoms * bytes_per_atom / 1e6:.2f} MB")
+            print(f"  Avg non-zero msg size: {total_atoms * bytes_per_atom / max(total_nonzero, 1) / 1024:.1f} KB")
+            print()
+
+    def exchange(self, x, num_local):
+        """
+        Exchange features with neighbors.
+        x: (num_local + num_ghosts, ...) - input features (ghosts might be stale)
+        num_local: int - number of local atoms
+        Returns: (num_local + num_ghosts, ...) - updated features with synced ghosts
+        """
+        # Skip exchange if single process or no ghost indices needed.
+        # Safe because halo maps are computed consistently across ranks:
+        # if rank A has no ghost indices, no other rank sends to A either.
+        if self.world_size <= 1 or not self.recv_ghost_indices:
+            return x
+            
+        # Handle arbitrary shapes (e.g. 3D tensors for spherical harmonics)
+        original_shape = x.shape
+        if x.dim() > 2:
+            x_flat = x.reshape(original_shape[0], -1)
+        else:
+            x_flat = x
+            
+        # 1. Prepare send buffer using pre-computed cached indices (Area 1)
+        if self._cached_send_indices is not None:
+            send_tensor = x_flat[self._cached_send_indices]
+        else:
+            send_tensor = torch.empty((0, x_flat.size(1)), device=x.device, dtype=x.dtype)
+        
+        if not send_tensor.is_contiguous():
+            send_tensor = send_tensor.contiguous()
+
+        # 2. Exchange using Autograd Function with pre-computed splits
+        _do_bw = self._measure_bw and not torch.compiler.is_compiling()
+        if _do_bw:
+            torch.cuda.synchronize()
+            dist.barrier()
+            _bw_start = torch.cuda.Event(enable_timing=True)
+            _bw_end = torch.cuda.Event(enable_timing=True)
+            _bw_start.record()
+        recv_tensor = FeatureExchangeFunction.apply(send_tensor, self._cached_recv_splits, self._cached_send_splits)
+        if _do_bw:
+            _bw_end.record()
+            torch.cuda.synchronize()
+            elapsed_ms = _bw_start.elapsed_time(_bw_end)
+            send_bytes = send_tensor.nelement() * send_tensor.element_size()
+            recv_bytes = recv_tensor.nelement() * recv_tensor.element_size()
+            total_bytes = max(send_bytes, recv_bytes)
+            bw_GBs = total_bytes / (elapsed_ms * 1e-3) / 1e9 if elapsed_ms > 0 else 0
+            self.bw_log.append({
+                'label': 'feature_exchange', 'elapsed_ms': elapsed_ms,
+                'send_bytes': send_bytes, 'recv_bytes': recv_bytes, 'bw_GBs': bw_GBs
+            })
+        
+        # 3. Scatter received features to ghost positions using pre-computed indices
+        x_with_ghosts = x_flat  # No clone - update ghost slots in-place
+        
+        if self._batched_recv_indices.numel() > 0 and recv_tensor.shape[0] > 0:
+            recv_idx = self._batched_recv_indices
+            if recv_idx.device != x.device:
+                recv_idx = recv_idx.to(x.device)
+            x_with_ghosts.index_copy_(0, recv_idx, recv_tensor)
+        
+        # Reshape back
+        if x.dim() > 2:
+            x_with_ghosts = x_with_ghosts.reshape(original_shape[0], *original_shape[1:])
+        
+        return x_with_ghosts
+
+    def differentiable_exchange(self, x, num_local):
+        """Differentiable synchronous exchange with backward gradient propagation.
+
+        Uses DifferentiableExchange autograd.Function so that backward pass
+        automatically performs a reverse all_to_all to send ghost gradients
+        back to their owners.
+        """
+        if self.world_size <= 1 or not self.recv_ghost_indices:
+            return x
+
+        original_shape = x.shape
+        if x.dim() > 2:
+            x_flat = x.reshape(original_shape[0], -1)
+        else:
+            x_flat = x
+
+        # Ensure indices are on the correct device
+        send_indices = self._cached_send_indices
+        if send_indices is not None and send_indices.device != x.device:
+            send_indices = send_indices.to(x.device)
+            self._cached_send_indices = send_indices
+
+        recv_indices = self._batched_recv_indices
+        if recv_indices.device != x.device:
+            recv_indices = recv_indices.to(x.device)
+            self._batched_recv_indices = recv_indices
+
+        if send_indices is None:
+            send_indices = torch.empty(0, dtype=torch.long, device=x.device)
+
+        _do_bw = self._measure_bw and not torch.compiler.is_compiling()
+        if _do_bw:
+            torch.cuda.synchronize()
+            dist.barrier()
+            _bw_start = torch.cuda.Event(enable_timing=True)
+            _bw_end = torch.cuda.Event(enable_timing=True)
+            _bw_start.record()
+
+        x_out = DifferentiableExchange.apply(
+            x_flat, send_indices, recv_indices,
+            self._cached_recv_splits, self._cached_send_splits
+        )
+
+        if _do_bw:
+            _bw_end.record()
+            torch.cuda.synchronize()
+            elapsed_ms = _bw_start.elapsed_time(_bw_end)
+            send_bytes = (send_indices.numel() * x_flat.size(1) * x_flat.element_size()) if send_indices.numel() > 0 else 0
+            recv_bytes = (recv_indices.numel() * x_flat.size(1) * x_flat.element_size()) if recv_indices.numel() > 0 else 0
+            total_bytes = max(send_bytes, recv_bytes)
+            bw_GBs = total_bytes / (elapsed_ms * 1e-3) / 1e9 if elapsed_ms > 0 else 0
+            self.bw_log.append({
+                'label': 'feature_exchange', 'elapsed_ms': elapsed_ms,
+                'send_bytes': send_bytes, 'recv_bytes': recv_bytes, 'bw_GBs': bw_GBs
+            })
+
+        if x.dim() > 2:
+            x_out = x_out.reshape(original_shape)
+        return x_out
+
+    def bw_report(self):
+        """Print bandwidth measurement summary for feature exchange."""
+        if not self.bw_log:
+            return
+        from collections import defaultdict
+        stats = defaultdict(list)
+        for entry in self.bw_log:
+            stats[entry['label']].append(entry)
+        print(f"\n[Rank {self.rank}] === Feature Exchange Bandwidth Report ===")
+        print(f"{'Operation':<25} {'Count':>6} {'Avg ms':>8} {'Min ms':>8} {'Max ms':>8} "
+              f"{'Avg Send':>12} {'Avg Recv':>12} {'Avg BW GB/s':>12}")
+        print("-" * 103)
+        for label, entries in sorted(stats.items()):
+            times = [e['elapsed_ms'] for e in entries]
+            sends = [e['send_bytes'] for e in entries]
+            recvs = [e['recv_bytes'] for e in entries]
+            bws = [e['bw_GBs'] for e in entries]
+            def fmt_bytes(b):
+                if b > 1e6: return f"{b/1e6:.2f} MB"
+                if b > 1e3: return f"{b/1e3:.1f} KB"
+                return f"{b:.0f} B"
+            print(f"{label:<25} {len(entries):>6} {sum(times)/len(times):>8.3f} "
+                  f"{min(times):>8.3f} {max(times):>8.3f} "
+                  f"{fmt_bytes(sum(sends)/len(sends)):>12} "
+                  f"{fmt_bytes(sum(recvs)/len(recvs)):>12} "
+                  f"{sum(bws)/len(bws):>12.3f}")
+        print()
+
+    def async_exchange_start(self, x, num_local):
+        """
+        Start non-blocking exchange. Returns a handle to wait on.
+        
+        Args:
+            x: (num_local + num_ghosts, F) - input features
+            num_local: int - number of local atoms
+        
+        Returns:
+            handle: tuple (work_handle, recv_tensor, recv_splits, original_shape)
+        """
+        # Skip exchange if single process or no ghost indices needed.
+        # Safe because halo maps are computed consistently across ranks:
+        # if rank A has no ghost indices, no other rank sends to A either.
+        if self.world_size <= 1 or not self.recv_ghost_indices:
+            return None
+        
+        # Handle arbitrary shapes (e.g. 3D tensors for spherical harmonics)
+        original_shape = x.shape
+        if x.dim() > 2:
+            x_flat = x.reshape(original_shape[0], -1)
+        else:
+            x_flat = x
+        
+        # 1. Prepare send buffer using pre-computed cached indices (Area 1)
+        if self.profiler:
+            self.profiler.start("exchange_prepare_send")
+        if self._cached_send_indices is not None:
+            send_indices = self._cached_send_indices
+            if send_indices.device != x.device:
+                send_indices = send_indices.to(x.device)
+                self._cached_send_indices = send_indices
+            send_tensor = x_flat[send_indices]
+        else:
+            send_tensor = torch.empty((0, x_flat.size(1)), device=x.device, dtype=x.dtype)
+        if not send_tensor.is_contiguous():
+            send_tensor = send_tensor.contiguous()
+        if self.profiler:
+            self.profiler.stop("exchange_prepare_send")
+        
+        # 2. Prepare recv buffer using pre-computed splits
+        if self.profiler:
+            self.profiler.start("exchange_prepare_recv")
+        total_recv = sum(self._cached_recv_splits)
+        recv_tensor = torch.empty((total_recv, x_flat.size(1)), device=x.device, dtype=x.dtype)
+        if self.profiler:
+            self.profiler.stop("exchange_prepare_recv")
+        
+        # 3. Start async all-to-all
+        if self.profiler:
+            self.profiler.start("exchange_async_a2a")
+
+        # BW measurement: barrier + CUDA event before async all_to_all
+        _do_bw = self._measure_bw and not torch.compiler.is_compiling()
+        if _do_bw:
+            torch.cuda.synchronize()
+            dist.barrier()
+            _bw_start = torch.cuda.Event(enable_timing=True)
+            _bw_end = torch.cuda.Event(enable_timing=True)
+            _bw_start.record()
+        else:
+            _bw_start = _bw_end = None
+
+        work = dist.all_to_all_single(
+            recv_tensor,
+            send_tensor,
+            output_split_sizes=self._cached_recv_splits,
+            input_split_sizes=self._cached_send_splits,
+            async_op=True
+        )
+        if self.profiler:
+            self.profiler.stop("exchange_async_a2a")
+
+        return (work, recv_tensor, self._cached_recv_splits, self._cached_send_splits, original_shape, x_flat.size(1),
+                send_tensor.nelement() * send_tensor.element_size(),
+                recv_tensor.nelement() * recv_tensor.element_size(),
+                _bw_start, _bw_end)
+
+    def async_exchange_wait(self, handle, x):
+        """
+        Wait for async exchange to complete and update ghost features.
+        
+        Args:
+            handle: tuple from async_exchange_start
+            x: original tensor to update in-place
+        
+        Returns:
+            x with ghost features updated
+        """
+        if handle is None:
+            return x
+
+        work, recv_tensor, recv_splits, send_splits, original_shape, feature_dim, \
+            send_bytes, recv_bytes, _bw_start, _bw_end = handle
+
+        # Wait for communication to complete
+        work.wait()
+
+        # BW measurement: record end event and compute bandwidth
+        if self._measure_bw and _bw_start is not None:
+            _bw_end.record()
+            torch.cuda.synchronize()
+            elapsed_ms = _bw_start.elapsed_time(_bw_end)
+            total_bytes = max(send_bytes, recv_bytes)
+            bw_GBs = total_bytes / (elapsed_ms * 1e-3) / 1e9 if elapsed_ms > 0 else 0
+            self.bw_log.append({
+                'label': 'feature_exchange', 'elapsed_ms': elapsed_ms,
+                'send_bytes': send_bytes, 'recv_bytes': recv_bytes, 'bw_GBs': bw_GBs
+            })
+        
+        # Handle shape
+        if x.dim() > 2:
+            x_flat = x.reshape(original_shape[0], -1)
+        else:
+            x_flat = x
+        
+        # Scatter received features to ghost positions using pre-computed indices
+        if self._batched_recv_indices.numel() > 0 and recv_tensor.shape[0] > 0:
+            recv_idx = self._batched_recv_indices
+            if recv_idx.device != x.device:
+                recv_idx = recv_idx.to(x.device)
+                self._batched_recv_indices = recv_idx
+            x_flat.index_copy_(0, recv_idx, recv_tensor)
+        
+        # Reshape back if needed
+        if x.dim() > 2:
+            return x_flat.reshape(original_shape[0], *original_shape[1:])
+        
+        return x_flat
+
+class FeatureExchangeFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, send_tensor, recv_splits, send_splits):
+        ctx.recv_splits = recv_splits
+        ctx.send_splits = send_splits
+        
+        # Allocate output buffer
+        total_recv = sum(recv_splits)
+        # Handle arbitrary dimensions by flattening in caller, 
+        # but here we expect [total_atoms, feature_dim]
+        # In caller (exchange), we flatten to 2D.
+        
+        recv_tensor = torch.empty(
+            (total_recv, send_tensor.size(1)), 
+            dtype=send_tensor.dtype, 
+            device=send_tensor.device
+        )
+        
+        # Exchange
+        # Ensure send_tensor is contiguous
+        if not send_tensor.is_contiguous():
+            send_tensor = send_tensor.contiguous()
+
+        dist.all_to_all_single(
+            recv_tensor, 
+            send_tensor, 
+            output_split_sizes=recv_splits, 
+            input_split_sizes=send_splits
+        )
+        return recv_tensor
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        recv_splits = ctx.recv_splits
+        send_splits = ctx.send_splits
+        
+        # Enable Gradient Exchange
+        # We need to send the gradients on ghost nodes (grad_output) back to their owners.
+        # This is the reverse of forward: 
+        #   forward: send_tensor (Local) -> recv_tensor (Ghost)
+        #   backward: grad_output (Ghost) -> grad_input (Local)
+        
+        # Ensure contiguous
+        if not grad_output.is_contiguous():
+            grad_output = grad_output.contiguous()
+            
+        total_send = sum(send_splits)
+        grad_input = torch.empty(
+            (total_send, grad_output.size(1)), 
+            dtype=grad_output.dtype, 
+            device=grad_output.device
+        )
+        
+        if dist.is_initialized():
+
+            dist.all_to_all_single(
+                grad_input,
+                grad_output,
+                output_split_sizes=send_splits,
+                input_split_sizes=recv_splits
+            )
+        else:
+            # Fallback for single process debugging: no exchange needed, pass through
+            grad_input.copy_(grad_output)
+
+        return grad_input, None, None
+
+
+class DifferentiableExchange(torch.autograd.Function):
+    """Full differentiable feature exchange: gather → all_to_all → scatter.
+
+    Forward:
+        1. Gather local features at send_indices → send_tensor
+        2. all_to_all_single: send_tensor → recv_tensor
+        3. Clone x_flat, scatter recv_tensor to ghost slots (recv_indices)
+
+    Backward:
+        1. Extract ghost gradients at recv_indices
+        2. Reverse all_to_all: ghost grads → owner grads
+        3. Return: grad_output (local slots) + accumulated owner grads at send_indices;
+           ghost slots zeroed (overwritten in forward, no gradient to original).
+    """
+    @staticmethod
+    def forward(ctx, x_flat, send_indices, recv_indices, recv_splits, send_splits):
+        ctx.save_for_backward(send_indices, recv_indices)
+        ctx.recv_splits = recv_splits
+        ctx.send_splits = send_splits
+
+        # 1. Prepare send buffer
+        if send_indices is not None and send_indices.numel() > 0:
+            send_tensor = x_flat[send_indices].contiguous()
+        else:
+            send_tensor = torch.empty((0, x_flat.size(1)), dtype=x_flat.dtype, device=x_flat.device)
+
+        # 2. All-to-all
+        total_recv = sum(recv_splits)
+        recv_tensor = torch.empty((total_recv, x_flat.size(1)), dtype=x_flat.dtype, device=x_flat.device)
+        dist.all_to_all_single(
+            recv_tensor, send_tensor,
+            output_split_sizes=recv_splits,
+            input_split_sizes=send_splits
+        )
+
+        # 3. Clone and scatter (avoids in-place version-counter issues)
+        x_out = x_flat.clone()
+        if recv_indices.numel() > 0 and recv_tensor.shape[0] > 0:
+            x_out[recv_indices] = recv_tensor
+
+        return x_out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        send_indices, recv_indices = ctx.saved_tensors
+        recv_splits = ctx.recv_splits
+        send_splits = ctx.send_splits
+
+        # 1. Extract ghost gradients
+        if recv_indices.numel() > 0:
+            grad_ghost = grad_output[recv_indices].contiguous()
+        else:
+            grad_ghost = torch.empty((0, grad_output.size(1)),
+                                     dtype=grad_output.dtype, device=grad_output.device)
+
+        # 2. Reverse all_to_all: ghost grads → owner grads
+        total_send = sum(send_splits)
+        grad_send = torch.empty((total_send, grad_output.size(1)),
+                                dtype=grad_output.dtype, device=grad_output.device)
+        dist.all_to_all_single(
+            grad_send, grad_ghost,
+            output_split_sizes=send_splits,
+            input_split_sizes=recv_splits
+        )
+
+        # 3. Assemble gradient:
+        #    - local slots: pass through from grad_output
+        #    - ghost slots: zero (overwritten in forward, no gradient to original input)
+        #    - send_indices: accumulate received owner grads
+        grad_input = grad_output.clone()
+        if recv_indices.numel() > 0:
+            grad_input[recv_indices] = 0
+        if send_indices is not None and send_indices.numel() > 0 and grad_send.shape[0] > 0:
+            grad_input.index_add_(0, send_indices, grad_send)
+
+        return grad_input, None, None, None, None
+
+
+class NodeFeatureExchanger:
+    """
+    Per-node partitioning feature exchanger (Strategy B).
     
-    # --- CRITICAL FIX: NUMERATOR ---
-    # Only sum the local atoms to prevent double-counting ghosts across ranks
-    if n_local_atoms is not None:
-        local_batch = batch[:n_local_atoms]
-        local_channels = channels_to_balance[:n_local_atoms]
-        system_sums.index_add_(0, local_batch, local_channels)
-    else:
-        system_sums.index_add_(0, batch, channels_to_balance)
-
-    # Reduce partial sums across all ranks so every rank has the exact global sum
-    if dist.is_initialized():
-        dist.all_reduce(system_sums, op=dist.ReduceOp.SUM)
-        # Note: If you want to use Fairchem's graph-parallel backend instead of raw NCCL:
-        # if gp_utils.initialized():
-        #     system_sums = gp_utils.all_reduce_with_grad(system_sums, group=gp_utils.get_gp_group())
-
-    target_sums = (target - target_offset).unsqueeze(1).expand(-1, n_channels)
+    Two-level communication per MP layer:
+    1. Intra-node all_gather: collect features from all GPUs in node → full node features
+       (via NVLink-backed NCCL, ~0.1ms for ~50MB)
+    2. Inter-node all_to_all: exchange only cross-node boundary ghost features
     
-    # --- CRITICAL FIX: DENOMINATOR ---
-    # 'natoms' here is n_global_atoms, ensuring the per-atom correction scales correctly
-    corrections = (system_sums - target_sums) / natoms.unsqueeze(1)
-
-    # Apply the correction to ALL atoms in the rank (local + ghosts)
-    out_emb[:, 0, start_idx:end_idx] = channels_to_balance - corrections[batch]
+    x_message layout:
+      Before all_gather: [my_gpu_atoms | inter_node_ghosts]
+      After all_gather:  [all_node_atoms | inter_node_ghosts]  ← used for edge_wise
+    """
     
-    return out_emb
+    def __init__(self, rank: int, world_size: int):
+        self.rank = rank
+        self.world_size = world_size
+        self.profiler = None
+
+        # Per-node params (set via set_node_params)
+        self.intra_group = None
+        self.gpus_per_node = 4
+        self.local_gpu_id = 0
+        self.node_id = 0
+        self.num_nodes = 1  # Number of nodes (set via set_node_params)
+        self.node_atom_counts = []  # [N_gpu0, N_gpu1, N_gpu2, N_gpu3]
+        self.num_node_atoms_total = 0  # sum of node_atom_counts
+        self.my_start_in_node = 0  # offset of my atoms within node feature tensor
+        self.num_local_on_gpu = 0
+
+        # Inter-node exchange maps (same format as FeatureExchanger)
+        self._cached_send_indices = None
+        self._cached_send_splits = []
+        self._cached_recv_splits = []
+        self._batched_recv_indices = torch.empty(0, dtype=torch.long)
+    
+    def set_node_params(self, intra_group, local_gpu_id, gpus_per_node,
+                        node_atom_counts, node_id, num_nodes=None):
+        self.intra_group = intra_group
+        self.local_gpu_id = local_gpu_id
+        self.gpus_per_node = gpus_per_node
+        self.node_id = node_id
+        self.node_atom_counts = node_atom_counts
+        self.num_node_atoms_total = sum(node_atom_counts)
+        # Compute num_nodes from world_size if not provided
+        self.num_nodes = num_nodes if num_nodes is not None else (self.world_size // gpus_per_node)
+
+        # Compute my offset within node feature tensor after all_gather
+        self.my_start_in_node = sum(node_atom_counts[:local_gpu_id])
+        self.num_local_on_gpu = node_atom_counts[local_gpu_id]
+    
+    def update_maps(self, send_map: Dict[int, torch.Tensor], recv_map: Dict[int, torch.Tensor],
+                    recv_ghost_indices: Dict[int, torch.Tensor]):
+        """
+        Update inter-node communication maps.
+        send_map/recv_ghost_indices should only contain inter-node entries.
+        
+        IMPORTANT: ghost indices are relative to the per-GPU layout:
+          [my_gpu_atoms | inter_node_ghosts]
+        After all_gather, we need to remap them to:
+          [all_node_atoms | inter_node_ghosts]
+        """
+        self.send_map = send_map
+        self.recv_ghost_indices = recv_ghost_indices
+        
+        # Build cached send indices for inter-node exchange
+        send_indices_list = []
+        send_splits = []
+        for r in range(self.world_size):
+            if r in send_map and send_map[r].numel() > 0:
+                send_indices_list.append(send_map[r])
+                send_splits.append(send_map[r].size(0))
+            else:
+                send_splits.append(0)
+        if send_indices_list:
+            self._cached_send_indices = torch.cat(send_indices_list)
+        else:
+            self._cached_send_indices = None
+        self._cached_send_splits = send_splits
+        
+        # Build recv splits and indices
+        # Ghost indices from the calculator are already in the post-all_gather layout:
+        #   [all_node_atoms | inter_node_ghosts]
+        # Ghost slots start at num_node_atoms_total. No remapping needed.
+        recv_splits = [0] * self.world_size
+        recv_indices_list = []
+        for r in range(self.world_size):
+            if r in recv_ghost_indices and recv_ghost_indices[r].numel() > 0:
+                recv_splits[r] = recv_ghost_indices[r].size(0)
+                recv_indices_list.append(recv_ghost_indices[r])
+        self._cached_recv_splits = recv_splits
+        if recv_indices_list:
+            self._batched_recv_indices = torch.cat(recv_indices_list)
+        else:
+            self._batched_recv_indices = torch.empty(0, dtype=torch.long)
+    
+    def gather_node_features(self, x_local, feature_dim):
+        """
+        Intra-node all_gather: collect features from all GPUs in node.
+
+        Args:
+            x_local: [num_local_on_gpu, feature_dim] - this GPU's atom features
+            feature_dim: total feature dimension (flattened)
+
+        Returns:
+            x_node: [num_node_atoms_total, feature_dim] - all node atoms' features
+        """
+        if self.intra_group is None:
+            return x_local
+
+        # all_gather requires all tensors to have the same size, so we need to pad
+        max_atoms = max(self.node_atom_counts)
+        N_local = x_local.size(0)
+
+        # Pad x_local to max_atoms
+        if N_local < max_atoms:
+            pad = torch.zeros(max_atoms - N_local, feature_dim,
+                              device=x_local.device, dtype=x_local.dtype)
+            x_local_padded = torch.cat([x_local, pad], dim=0)
+        else:
+            x_local_padded = x_local
+
+        # Prepare recv buffers (all same size = max_atoms)
+        recv_list = [
+            torch.zeros(max_atoms, feature_dim,
+                        device=x_local.device, dtype=x_local.dtype)
+            for _ in range(self.gpus_per_node)
+        ]
+
+        dist.all_gather(recv_list, x_local_padded.contiguous(), group=self.intra_group)
+
+        # Unpad and concatenate
+        result_list = [recv_list[i][:self.node_atom_counts[i]] for i in range(self.gpus_per_node)]
+        return torch.cat(result_list, dim=0)  # [num_node_atoms_total, feature_dim]
+    
+    def async_exchange_start(self, x_message, num_local_on_gpu):
+        """
+        Start two-level feature exchange with overlapped intra/inter-node comms.
+
+        Optimized flow (Scheme 2):
+          1. Extract send features from LOCAL atoms (no all_gather needed)
+          2. Start inter-node all_to_all (async, on NCCL global stream)
+          3. Intra-node all_gather (sync on intra NCCL stream, overlaps with step 2)
+          4. Build x_node_full from gathered features
+
+        The all_to_all and all_gather use different NCCL communicators (global vs
+        intra_group) with independent CUDA streams, so they execute concurrently.
+        This hides the all_gather latency (~0.9ms/layer) behind the inter-node
+        exchange.
+
+        Args:
+            x_message: [num_node_atoms_total + num_inter_node_ghosts, ...] features
+            num_local_on_gpu: number of local atoms on this GPU
+
+        Returns:
+            handle: (work, x_node_full, original_shape, feature_dim, recv_tensor)
+                    or None in single-node case (no exchange needed)
+        """
+        if self.world_size <= 1:
+            return None
+
+        # Single-node per-node mode: x_message already contains ALL node atoms
+        # from the initial all_gather in _prepare_combined_atoms_per_node.
+        # No intra-node gather or inter-node exchange is needed.
+        if self.num_nodes == 1:
+            return None
+
+        original_shape = x_message.shape
+        if x_message.dim() > 2:
+            x_flat = x_message.reshape(original_shape[0], -1)
+        else:
+            x_flat = x_message
+        feature_dim = x_flat.size(1)
+
+        # Extract this GPU's local features
+        x_local = x_flat[self.my_start_in_node:self.my_start_in_node + num_local_on_gpu]
+
+        # Step 1: Gather send features from LOCAL atoms (before all_gather)
+        # Send indices are relative to local GPU atoms [0, num_local_on_gpu),
+        # so we can index directly into x_local — no need for all_gather first.
+        if self._cached_send_indices is not None:
+            send_tensor = x_local[self._cached_send_indices.to(x_flat.device)]
+        else:
+            send_tensor = torch.empty((0, feature_dim), device=x_flat.device, dtype=x_flat.dtype)
+
+        if not send_tensor.is_contiguous():
+            send_tensor = send_tensor.contiguous()
+
+        total_recv = sum(self._cached_recv_splits)
+        recv_tensor = torch.empty((total_recv, feature_dim), device=x_flat.device, dtype=x_flat.dtype)
+
+        # Step 2: Start inter-node all_to_all FIRST (async)
+        work = dist.all_to_all_single(
+            recv_tensor,
+            send_tensor,
+            output_split_sizes=self._cached_recv_splits,
+            input_split_sizes=self._cached_send_splits,
+            async_op=True
+        )
+
+        # Step 3: Intra-node all_gather (sync, on intra_group's NCCL stream)
+        # Overlaps with the inter-node all_to_all since they use independent
+        # NCCL communicators/streams. NVLink (intra) and NIC (inter) are
+        # separate physical paths — no contention.
+        x_node = self.gather_node_features(x_local, feature_dim)
+
+        # Step 4: Build full tensor with gathered node features
+        num_inter_ghosts = x_flat.size(0) - self.num_node_atoms_total
+        num_total = self.num_node_atoms_total + num_inter_ghosts
+        x_node_full = torch.zeros(num_total, feature_dim, device=x_flat.device, dtype=x_flat.dtype)
+        x_node_full[:self.num_node_atoms_total] = x_node
+
+        return (work, x_node_full, original_shape, feature_dim, recv_tensor)
+    
+    def async_exchange_wait(self, handle, x_message):
+        """
+        Wait for inter-node exchange, scatter ghosts, return full tensor.
+
+        Returns:
+            x_full: [num_node_atoms_total + num_inter_node_ghosts, ...]
+                    with node features and inter-node ghosts populated
+        """
+        if handle is None:
+            return x_message
+
+        work, x_node_full, original_shape, feature_dim, recv_tensor = handle
+
+        # Wait for inter-node all_to_all to complete
+        if work is not None:
+            work.wait()
+        
+        # Scatter received ghost features to their slots
+        if self._batched_recv_indices.numel() > 0 and recv_tensor.shape[0] > 0:
+            recv_idx = self._batched_recv_indices.to(x_node_full.device)
+            x_node_full[recv_idx] = recv_tensor
+        
+        # Reshape back to original shape if needed
+        if len(original_shape) > 2:
+            shape = (x_node_full.size(0),) + original_shape[1:]
+            x_node_full = x_node_full.reshape(shape)
+        
+        return x_node_full
+    
+    def exchange(self, x, num_local):
+        """Synchronous exchange (for compatibility)."""
+        handle = self.async_exchange_start(x, num_local)
+        return self.async_exchange_wait(handle, x)
+
+
+class HierarchicalFeatureExchanger:
+    """
+    Hierarchical Feature Exchanger (Area 2 / PXN Aggregation).
+    
+    Reduces NIC contention on multi-GPU nodes sharing a single NIC by using
+    a 3-phase communication pattern:
+      Phase 1: Intra-node gather (NVLink) — all local ranks send to master via a2a
+      Phase 2: Inter-node all_to_all (Network) — only master ranks participate
+      Phase 3: Intra-node scatter (NVLink) — master distributes to local ranks via a2a
+    
+    Falls back to standard FeatureExchanger when world_size fits on one node.
+    """
+    
+    def __init__(self, rank: int, world_size: int):
+        self.rank = rank
+        self.world_size = world_size
+        self.send_map: Dict[int, torch.Tensor] = {}
+        self.recv_map: Dict[int, torch.Tensor] = {}
+        self.recv_ghost_indices: Dict[int, torch.Tensor] = {}
+        self.profiler = None
+        
+        # Hierarchical group info (set via set_groups)
+        self.intra_group = None
+        self.inter_group = None   # Only meaningful for master ranks
+        self.local_rank = 0
+        self.local_world_size = 1
+        self.is_master = False
+        self.num_nodes = 1
+        self.node_id = 0
+        
+        # Standard cached indices (same as FeatureExchanger)
+        self._cached_send_indices = None
+        self._cached_send_splits: List[int] = []
+        self._cached_recv_splits: List[int] = []
+        self._batched_recv_indices = torch.empty(0, dtype=torch.long)
+    
+    def set_groups(self, intra_group, inter_group, local_rank: int, local_world_size: int):
+        """Set process groups for hierarchical communication."""
+        self.intra_group = intra_group
+        self.inter_group = inter_group
+        self.local_rank = local_rank
+        self.local_world_size = local_world_size
+        self.is_master = (local_rank == local_world_size - 1)
+        self.num_nodes = self.world_size // local_world_size
+        self.node_id = self.rank // local_world_size
+    
+    def update_maps(self, send_map: Dict[int, torch.Tensor], recv_map: Dict[int, torch.Tensor], 
+                    recv_ghost_indices: Dict[int, torch.Tensor]):
+        """Update communication maps — same interface as FeatureExchanger."""
+        self.send_map = send_map
+        self.recv_map = recv_map
+        self.recv_ghost_indices = recv_ghost_indices
+        
+        # === Pre-compute cached indices (same as FeatureExchanger) ===
+        send_indices_list = []
+        send_splits = []
+        for r in range(self.world_size):
+            if r in send_map and send_map[r].numel() > 0:
+                send_indices_list.append(send_map[r])
+                send_splits.append(send_map[r].size(0))
+            else:
+                send_splits.append(0)
+        if send_indices_list:
+            self._cached_send_indices = torch.cat(send_indices_list)
+        else:
+            self._cached_send_indices = None
+        self._cached_send_splits = send_splits
+        
+        recv_splits = [0] * self.world_size
+        recv_indices_list = []
+        for r in range(self.world_size):
+            if r in recv_ghost_indices and recv_ghost_indices[r].numel() > 0:
+                recv_splits[r] = recv_ghost_indices[r].size(0)
+                recv_indices_list.append(recv_ghost_indices[r])
+        self._cached_recv_splits = recv_splits
+        if recv_indices_list:
+            self._batched_recv_indices = torch.cat(recv_indices_list)
+        else:
+            self._batched_recv_indices = torch.empty(0, dtype=torch.long)
+    
+    def exchange(self, x, num_local):
+        """Synchronous hierarchical exchange — delegates to async start + wait."""
+        if self.world_size <= 1 or not self.recv_ghost_indices:
+            return x
+        handle = self.async_exchange_start(x, num_local)
+        return self.async_exchange_wait(handle, x)
+    
+    def async_exchange_start(self, x, num_local):
+        """
+        Start hierarchical exchange. Returns handle for async_exchange_wait.
+        
+        Algorithm:
+          Phase 1: Each rank sends its send_tensor to master via intra-node a2a.
+          Phase 2: Master re-packs by destination node and does inter-node a2a (async).
+        """
+        if self.world_size <= 1 or not self.recv_ghost_indices:
+            return None
+        
+        original_shape = x.shape
+        x_flat = x.reshape(original_shape[0], -1) if x.dim() > 2 else x
+        feature_dim = x_flat.size(1)
+        lws = self.local_world_size
+        
+        # 1. Prepare send buffer using pre-computed indices
+        if self.profiler:
+            self.profiler.start("exchange_prepare_send")
+        if self._cached_send_indices is not None:
+            send_indices = self._cached_send_indices
+            if send_indices.device != x.device:
+                send_indices = send_indices.to(x.device)
+                self._cached_send_indices = send_indices
+            send_tensor = x_flat[send_indices].contiguous()
+        else:
+            send_tensor = torch.empty((0, feature_dim), device=x.device, dtype=x.dtype)
+        if self.profiler:
+            self.profiler.stop("exchange_prepare_send")
+        
+        if self.profiler:
+            self.profiler.start("exchange_async_a2a")
+        
+        # === PHASE 1: Intra-node gather to master ===
+        # Use intra-node all_to_all_single: each rank sends all its data to master,
+        # non-masters send nothing to each other.
+        # send_splits for intra a2a: [0, 0, ..., my_count] (only send to master=lws-1)
+        my_send_count = send_tensor.shape[0]
+        intra_gather_send_splits = [0] * lws
+        intra_gather_send_splits[lws - 1] = my_send_count  # send everything to master
+        
+        # Exchange counts so master knows how much to receive from each local rank
+        send_count_t = torch.tensor([my_send_count], dtype=torch.long, device=x.device)
+        all_counts = [torch.zeros(1, dtype=torch.long, device=x.device) for _ in range(lws)]
+
+        dist.all_gather(all_counts, send_count_t, group=self.intra_group)
+        local_counts = [c.item() for c in all_counts]
+        
+        # Master receives from all local ranks; non-masters receive nothing
+        if self.is_master:
+            intra_gather_recv_splits = local_counts  # receive from each local rank
+        else:
+            intra_gather_recv_splits = [0] * lws
+        
+        total_intra_recv = sum(intra_gather_recv_splits)
+        intra_recv_buf = torch.empty((total_intra_recv, feature_dim), device=x.device, dtype=x.dtype)
+        
+
+        dist.all_to_all_single(
+            intra_recv_buf, send_tensor,
+            output_split_sizes=intra_gather_recv_splits,
+            input_split_sizes=intra_gather_send_splits,
+            group=self.intra_group
+        )
+        
+        # Also gather each rank's per-dest send_splits so master can re-pack
+        my_splits_t = torch.tensor(self._cached_send_splits, dtype=torch.long, device=x.device)
+        all_splits = [torch.empty(self.world_size, dtype=torch.long, device=x.device) for _ in range(lws)]
+
+        dist.all_gather(all_splits, my_splits_t, group=self.intra_group)
+        # all_splits[lr][dest_rank] = count from local_rank lr to dest_rank
+        
+        # === PHASE 2: Inter-node all_to_all (master only) ===
+        if self.is_master:
+            # intra_recv_buf layout: [data_from_lr0, data_from_lr1, ..., data_from_lr(lws-1)]
+            # where data_from_lr_i has local_counts[i] atoms, ordered by dest_rank per all_splits[i]
+            
+            # Re-pack by destination NODE. 
+            # For each dest_node n, collect atoms from all local ranks destined for ranks on node n.
+            # Packing order within each node-bucket: for source_lr, for dest_rank_in_node
+            node_buckets = [[] for _ in range(self.num_nodes)]
+            node_bucket_sizes = [0] * self.num_nodes
+            
+            lr_offset = 0
+            for lr in range(lws):
+                lr_splits = all_splits[lr].tolist()
+                lr_data = intra_recv_buf[lr_offset : lr_offset + local_counts[lr]]
+                atom_offset = 0
+                for dest_rank in range(self.world_size):
+                    count = int(lr_splits[dest_rank])
+                    if count > 0:
+                        dest_node = dest_rank // lws
+                        node_buckets[dest_node].append(lr_data[atom_offset:atom_offset+count])
+                        node_bucket_sizes[dest_node] += count
+                    atom_offset += count
+                lr_offset += local_counts[lr]
+            
+            # Concatenate per-node buckets
+            inter_send_parts = []
+            for n in range(self.num_nodes):
+                if node_buckets[n]:
+                    inter_send_parts.append(torch.cat(node_buckets[n], dim=0))
+            inter_send_tensor = torch.cat(inter_send_parts, dim=0).contiguous() if inter_send_parts else \
+                torch.empty((0, feature_dim), device=x.device, dtype=x.dtype)
+            inter_send_splits = node_bucket_sizes
+            
+            # Exchange sizes with other masters
+            inter_send_splits_t = torch.tensor(inter_send_splits, dtype=torch.long, device=x.device)
+            inter_recv_splits_t = torch.empty(self.num_nodes, dtype=torch.long, device=x.device)
+
+            dist.all_to_all_single(inter_recv_splits_t, inter_send_splits_t, group=self.inter_group)
+            inter_recv_splits = [int(s) for s in inter_recv_splits_t.tolist()]
+            
+            # Also exchange the detail matrix: for each dest_node, 
+            # the (source_lr, dest_rank_within_node) breakdown
+            # detail[source_lr * lws + dest_lr_within_node] = count
+            detail_per_node = []
+            for dest_node in range(self.num_nodes):
+                detail = []
+                for source_lr in range(lws):
+                    for dest_lr in range(lws):
+                        dest_rank = dest_node * lws + dest_lr
+                        detail.append(int(all_splits[source_lr][dest_rank].item()))
+                detail_per_node.append(torch.tensor(detail, dtype=torch.long, device=x.device))
+            detail_send = torch.cat(detail_per_node)
+            detail_recv = torch.empty(self.num_nodes * lws * lws, dtype=torch.long, device=x.device)
+
+            dist.all_to_all_single(
+                detail_recv, detail_send,
+                output_split_sizes=[lws * lws] * self.num_nodes,
+                input_split_sizes=[lws * lws] * self.num_nodes,
+                group=self.inter_group
+            )
+            detail_matrix = detail_recv.reshape(self.num_nodes, lws, lws)
+            # detail_matrix[src_node, src_lr, dst_lr] = atom count
+            
+            # Do the actual inter-node data exchange (async)
+            total_inter_recv = sum(inter_recv_splits)
+            inter_recv_tensor = torch.empty((total_inter_recv, feature_dim), device=x.device, dtype=x.dtype)
+            
+
+            work = dist.all_to_all_single(
+                inter_recv_tensor, inter_send_tensor,
+                output_split_sizes=inter_recv_splits,
+                input_split_sizes=inter_send_splits,
+                group=self.inter_group,
+                async_op=True
+            )
+            
+            if self.profiler:
+                self.profiler.stop("exchange_async_a2a")
+            
+            return ('master', work, inter_recv_tensor, inter_recv_splits,
+                    detail_matrix, all_splits, local_counts,
+                    original_shape, feature_dim, x_flat)
+        else:
+            # Non-master: Phase 2 is a no-op for us
+            if self.profiler:
+                self.profiler.stop("exchange_async_a2a")
+            
+            return ('worker', all_splits, local_counts,
+                    original_shape, feature_dim, x_flat)
+    
+    def async_exchange_wait(self, handle, x):
+        """
+        Wait for hierarchical exchange to complete and update ghost features.
+        
+        Phase 3: Master unpacks inter-node data into per-local-rank portions
+                  and scatters via intra-node all_to_all.
+        """
+        if handle is None:
+            return x
+        
+        role = handle[0]
+        lws = self.local_world_size
+        
+        if role == 'master':
+            (_, work, inter_recv_tensor, inter_recv_splits,
+             detail_matrix, all_splits, local_counts,
+             original_shape, feature_dim, x_flat) = handle
+            
+            # Wait for inter-node all_to_all
+            work.wait()
+            
+            # Unpack inter_recv_tensor into per-local-rank portions.
+            # inter_recv_tensor is ordered by source_node, and within each source_node
+            # chunk, the packing order is: for src_lr: for dst_rank: atoms
+            # detail_matrix[src_node, src_lr, dst_lr] gives the count.
+            per_lr_data = [[] for _ in range(lws)]
+            
+            offset = 0
+            for src_node in range(self.num_nodes):
+                for src_lr in range(lws):
+                    for dst_lr in range(lws):
+                        count = int(detail_matrix[src_node, src_lr, dst_lr].item())
+                        if count > 0:
+                            per_lr_data[dst_lr].append(inter_recv_tensor[offset:offset+count])
+                        offset += count
+            
+            # Concatenate per-local-rank data
+            scatter_bufs = []
+            scatter_sizes = []
+            for lr in range(lws):
+                if per_lr_data[lr]:
+                    buf = torch.cat(per_lr_data[lr], dim=0)
+                else:
+                    buf = torch.empty((0, feature_dim), device=x.device, dtype=x.dtype)
+                scatter_bufs.append(buf)
+                scatter_sizes.append(buf.shape[0])
+            
+            # Phase 3: scatter via intra-node all_to_all
+            intra_scatter_send = torch.cat(scatter_bufs, dim=0).contiguous()
+            intra_scatter_send_splits = scatter_sizes  # master sends different amounts to each lr
+            
+        else:  # worker
+            (_, all_splits, local_counts,
+             original_shape, feature_dim, x_flat) = handle
+            
+            # Workers have nothing to send in scatter phase
+            intra_scatter_send = torch.empty((0, feature_dim), device=x.device, dtype=x.dtype)
+            intra_scatter_send_splits = [0] * lws
+        
+        # All ranks need to know how much they'll RECEIVE from master in the scatter.
+        # Workers receive from master only; master also receives from itself.
+        # Exchange sizes via all_gather.
+        # Master knows scatter_sizes, workers need their specific size.
+        
+        if role == 'master':
+            my_scatter_size_t = torch.tensor(scatter_sizes, dtype=torch.long, device=x.device)
+        else:
+            my_scatter_size_t = torch.tensor([0] * lws, dtype=torch.long, device=x.device)
+        
+        # Gather sizes from all local ranks (only master's is meaningful)
+        all_scatter_sizes = [torch.empty(lws, dtype=torch.long, device=x.device) for _ in range(lws)]
+
+        dist.all_gather(all_scatter_sizes, my_scatter_size_t, group=self.intra_group)
+        # all_scatter_sizes[master_lr][lr] = how much master sends to lr
+        master_scatter_sizes = all_scatter_sizes[lws - 1].tolist()
+        
+        # Each rank receives only from master
+        intra_scatter_recv_splits = [0] * lws
+        my_recv_count = int(master_scatter_sizes[self.local_rank])
+        intra_scatter_recv_splits[lws - 1] = my_recv_count
+        
+        intra_scatter_recv = torch.empty((my_recv_count, feature_dim), device=x.device, dtype=x.dtype)
+        
+        dist.all_to_all_single(
+            intra_scatter_recv, intra_scatter_send,
+            output_split_sizes=intra_scatter_recv_splits,
+            input_split_sizes=intra_scatter_send_splits,
+            group=self.intra_group
+        )
+        
+        recv_tensor = intra_scatter_recv
+        
+        # Update ghost positions with received data
+        if x.dim() > 2:
+            x_flat = x.reshape(original_shape[0], -1)
+        else:
+            x_flat = x
+        
+        if self._batched_recv_indices.numel() > 0 and recv_tensor.shape[0] > 0:
+            recv_idx = self._batched_recv_indices
+            if recv_idx.device != x.device:
+                recv_idx = recv_idx.to(x.device)
+                self._batched_recv_indices = recv_idx
+            x_flat.index_copy_(0, recv_idx, recv_tensor)
+        
+        if x.dim() > 2:
+            return x_flat.reshape(original_shape[0], *original_shape[1:])
+        
+        return x_flat
+
+
+@registry.register_model("distributed_escnmd_backbone")
+class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Initialize exchanger with dummy values, will be updated later
+        self.exchanger = FeatureExchanger(rank=0, world_size=1)
+        self.num_local = 0
+        self.profiler = None  # CUDAEventProfiler for detailed timing
+        self._cached_mole_coefficients = None  # MOLE cache for first-call pattern
+        self.per_node_partition = False  # Per-node partitioning mode
+        self.differentiable_exchange = False  # Differentiable feature exchange for correct force gradients
+    
+    def set_profiler(self, profiler):
+        """Set profiler for detailed model timing."""
+        self.profiler = profiler
+        # Also pass to exchanger for communication timing
+        self.exchanger.profiler = profiler
+
+    def set_comm_maps(self, send_map, recv_ghost_indices, rank, world_size, interior_mask=None, enable_overlap=False, hierarchical_params=None, per_node_params=None):
+        # Switch to NVSHMEMNodeFeatureExchanger or NodeFeatureExchanger if per-node partitioning
+        if per_node_params is not None and not isinstance(self.exchanger, NodeFeatureExchanger):
+            use_nvshmem = per_node_params.get('use_nvshmem', False)
+            if use_nvshmem:
+                from baseline.nvshmem_ext.nvshmem_exchanger import NVSHMEMNodeFeatureExchanger
+                self.exchanger = NVSHMEMNodeFeatureExchanger(rank, world_size)
+            else:
+                self.exchanger = NodeFeatureExchanger(rank, world_size)
+            self.exchanger.set_node_params(
+                per_node_params['intra_group'],
+                per_node_params['local_gpu_id'],
+                per_node_params['gpus_per_node'],
+                per_node_params['node_atom_counts'],
+                per_node_params['node_id'],
+                num_nodes=per_node_params.get('num_nodes', None)
+            )
+            self.per_node_partition = True
+        elif per_node_params is not None and isinstance(self.exchanger, NodeFeatureExchanger):
+            # Update node params (atom counts may change after repartition)
+            self.exchanger.set_node_params(
+                per_node_params['intra_group'],
+                per_node_params['local_gpu_id'],
+                per_node_params['gpus_per_node'],
+                per_node_params['node_atom_counts'],
+                per_node_params['node_id'],
+                num_nodes=per_node_params.get('num_nodes', None)
+            )
+            self.per_node_partition = True
+        # Switch to HierarchicalFeatureExchanger if requested and not already using one
+        elif hierarchical_params is not None and not isinstance(self.exchanger, HierarchicalFeatureExchanger):
+            self.exchanger = HierarchicalFeatureExchanger(rank, world_size)
+            self.exchanger.set_groups(
+                hierarchical_params['intra_group'],
+                hierarchical_params['inter_group'],
+                hierarchical_params['local_rank'],
+                hierarchical_params['local_world_size']
+            )
+        
+        self.exchanger.rank = rank
+        self.exchanger.world_size = world_size
+        self.exchanger.update_maps(send_map, {}, recv_ghost_indices)
+
+        # Initialize NVSHMEM buffers after maps are set (needs _cached_recv/send_splits)
+        # Only run on first call or after repartition (when recv_buf is None or maps changed)
+        if per_node_params is not None and per_node_params.get('use_nvshmem', False):
+            from baseline.nvshmem_ext.nvshmem_exchanger import NVSHMEMNodeFeatureExchanger
+            if isinstance(self.exchanger, NVSHMEMNodeFeatureExchanger):
+                if not self.exchanger._nvshmem_initialized:
+                    self.exchanger.init_nvshmem()
+                if self.exchanger.recv_buf is None:
+                    # First time: allocate symmetric buffers
+                    max_feature_dim = self.sph_feature_size * self.sphere_channels
+                    self.exchanger.setup_buffers(max_feature_dim)
+
+        # Store interior mask and overlap flag for optimization
+        self.interior_mask = interior_mask
+        self.enable_overlap = enable_overlap
+
+    def set_MOLE_coefficients(self, atomic_numbers_full, batch_full, csd_mixed_emb):
+        _rank = getattr(self.exchanger, 'rank', -1)
+        if self.num_experts == 0:
+            # # print(f"[DEBUG] Rank {_rank}: set_MOLE_coefficients: num_experts=0, skipping", flush=True)
+            return
+        
+        # OPTIMIZATION: Cache MOLE coefficients - compute once on first call, reuse forever.
+        # In MD simulations with merge_mole=True, composition is static.
+        # Check if we can use cache
+        # Use getattr because __init__ might be bypassed during pickle loading (torch.load)
+        cached = getattr(self, "_cached_mole_coefficients", None)
+        if cached is not None:
+            # # print(f"[DEBUG] Rank {_rank}: set_MOLE_coefficients: CACHE HIT, reusing coefficients", flush=True)
+            self.global_mole_tensors.expert_mixing_coefficients = cached
+            return
+        
+        # # print(f"[DEBUG] Rank {_rank}: set_MOLE_coefficients: CACHE MISS, computing coefficients", flush=True)
+        
+        # Ensure inputs are on correct device
+        if self.use_composition_embedding:
+             device = self.composition_embedding.weight.device
+             atomic_numbers_full = atomic_numbers_full.to(device)
+             batch_full = batch_full.to(device)
+
+        with torch.autocast(device_type=atomic_numbers_full.device.type, enabled=False):
+            embeddings = []
+            if self.use_composition_embedding:
+                # Distributed Logic: Compute Global Mean Composition
+                if dist.is_initialized():
+                    # Use num_local to identify unique atoms
+                    num_local = self.num_local
+                    if num_local is None:
+                        num_local = atomic_numbers_full.shape[0] # Fallback if not set
+                    
+                    if num_local > atomic_numbers_full.shape[0]:
+                         num_local = atomic_numbers_full.shape[0]
+
+                    local_an = atomic_numbers_full[:num_local]
+                    local_comp = self.composition_embedding(local_an)
+                    local_sum = local_comp.sum(0)
+                    local_count = torch.tensor([num_local], device=device, dtype=local_sum.dtype)
+                    
+                    # Handle CPU tensors with NCCL backend (which doesn't support CPU all_reduce)
+                    is_cpu = local_sum.device.type == "cpu"
+                    if is_cpu and dist.get_backend() == "nccl":
+                        # Move to current cuda device
+                        # Assuming torch.cuda.set_device has been called appropriately by launcher/script
+                        # We use .cuda() which maps to current device
+                        local_sum_cuda = local_sum.cuda()
+                        local_count_cuda = local_count.cuda()
+                        
+                        # # print(f"[DEBUG] Rank {_rank}: set_MOLE: calling all_reduce (CPU->CUDA path)...", flush=True)
+                        dist.all_reduce(local_sum_cuda)
+                        dist.all_reduce(local_count_cuda)
+                        # # print(f"[DEBUG] Rank {_rank}: set_MOLE: all_reduce done (CPU->CUDA path)", flush=True)
+                        
+                        local_sum = local_sum_cuda.cpu()
+                        local_count = local_count_cuda.cpu()
+                    else:
+                        # # print(f"[DEBUG] Rank {_rank}: set_MOLE: calling all_reduce (direct path)...", flush=True)
+                        dist.all_reduce(local_sum)
+                        dist.all_reduce(local_count)
+                        # # print(f"[DEBUG] Rank {_rank}: set_MOLE: all_reduce done (direct path)", flush=True)
+                    
+                    # Match eSCNMDMoeBackbone behavior for include_self
+                    # Default version 1.0 uses include_self=True
+                    if np.isclose(self.model_version, 1.0).item():
+                        local_count = local_count + 1.0 # Denominator adds 1 (implicit 0-vector self)
+                        # Numerator adds 0 (self value) -> no change
+                        
+                    global_mean = local_sum / local_count
+                    
+                    # Assume 1 system for MD inference usually
+                    # If multiple systems, this logic needs batch-awareness?
+                    # For now, replicate to match csd_mixed_emb shape [B, C]
+                    # But index_reduce reduces to unique batch indices.
+                    # In MD inference, batch is usually all 0s.
+                    composition = global_mean.unsqueeze(0) 
+                    
+                else:
+                    # Fallback to local calculation (Serial or Single Rank)
+                    composition_by_atom = self.composition_embedding(atomic_numbers_full)
+                    composition = composition_by_atom.new_zeros(
+                        csd_mixed_emb.shape[0],
+                        self.sphere_channels,
+                    ).index_reduce_(
+                        0,
+                        batch_full,
+                        composition_by_atom,
+                        reduce="mean",
+                        include_self=np.isclose(self.model_version, 1.0).item(),
+                    )
+                embeddings.append(composition.unsqueeze(0))
+            embeddings.append(csd_mixed_emb[None])
+
+            expert_mixing_coefficients_before_norm = self.routing_mlp(
+                torch.vstack(embeddings)
+                .transpose(0, 1)
+                .reshape(csd_mixed_emb.shape[0], -1)
+            )
+            coefficients = self.mole_expert_coefficient_norm(
+                self.mole_dropout(expert_mixing_coefficients_before_norm)
+            )
+            
+            # Store in cache
+            self._cached_mole_coefficients = coefficients
+            
+            self.global_mole_tensors.expert_mixing_coefficients = coefficients
+
+    def forward(self, data_dict):
+        # DEBUG: Track forward pass entry
+        _rank = self.exchanger.rank
+        # # print(f"[DEBUG] Rank {_rank}: forward() START", flush=True)
+        
+        # We need to inject self.exchanger.exchange(x_message) before each block.
+        
+        # Pre-computation (same as original)
+        data_dict["atomic_numbers"] = data_dict["atomic_numbers"].long()
+        data_dict["atomic_numbers_full"] = data_dict["atomic_numbers"]
+        data_dict["batch_full"] = data_dict["batch"]
+
+        csd_mixed_emb = self.csd_embedding(
+            charge=data_dict["charge"],
+            spin=data_dict["spin"],
+            dataset=data_dict.get("dataset", default=None),
+        )
+
+        # # print(f"[DEBUG] Rank {_rank}: calling set_MOLE_coefficients()...", flush=True)
+        self.set_MOLE_coefficients(
+            atomic_numbers_full=data_dict["atomic_numbers_full"],
+            batch_full=data_dict["batch_full"],
+            csd_mixed_emb=csd_mixed_emb,
+        )
+        # # print(f"[DEBUG] Rank {_rank}: set_MOLE_coefficients() done", flush=True)
+
+        if not self.regress_config.direct_forces:
+            if self.regress_config.forces or self.regress_config.stress:
+                data_dict["pos"].requires_grad_(True)
+            if self.regress_config.stress:
+                data_dict["cell"].requires_grad_(True)
+
+        # Profile: generate_graph
+        if self.profiler:
+            self.profiler.start("generate_graph")
+        with record_function("generate_graph"):
+            graph_dict = self._generate_graph(data_dict)
+            # if "node_offset" not in graph_dict:
+            #      node_offset = data_dict["natoms"].cumsum(dim=0).roll(1)
+            #      node_offset[0] = 0
+            #      graph_dict["node_offset"] = node_offset
+        if self.profiler:
+            self.profiler.stop("generate_graph")
+            
+        # DISTNNP OPTIMIZATION: Filter redundant edges early
+        # This logic was originally in eSCNMD.forward but is REPLICATED here because
+        # DistributedESCNMDBackbone overrides forward() without calling super().
+        
+        # 1. Extract num_local
+        num_local = None
+        if "num_local" in data_dict:
+             num_local = data_dict["num_local"]
+             # If it's a tensor, get item
+             if isinstance(num_local, torch.Tensor):
+                 if num_local.numel() == 1:
+                     num_local = num_local.item()
+                 else:
+                     pass # Batched? default to None for now or handle
+        
+        # 2. Keep reference to original edges for MOLE stats
+        original_edge_index = graph_dict["edge_index"]
+        
+        # 3. Filter if num_local is valid
+        if num_local is not None and isinstance(num_local, int) and num_local < data_dict["pos"].shape[0]:
+            # Update self.num_local for later usage in forward loop if needed
+            self.num_local = num_local
+            
+            pre_edges = graph_dict["edge_index"].shape[1]
+            # Filter edges: only keep edges where target < num_local
+            mask = graph_dict["edge_index"][1] < num_local
+            
+            # Apply filter to all edge tensors
+            graph_dict["edge_index"] = graph_dict["edge_index"][:, mask]
+            
+            if "edge_distance" in graph_dict:
+                 graph_dict["edge_distance"] = graph_dict["edge_distance"][mask]
+                 
+            if "edge_distance_vec" in graph_dict:
+                graph_dict["edge_distance_vec"] = graph_dict["edge_distance_vec"][mask]
+
+            if "cell_offset" in graph_dict:
+                graph_dict["cell_offset"] = graph_dict["cell_offset"][mask]
+
+        if graph_dict["edge_index"].numel() == 0:
+             raise ValueError(
+                f"No edges found. Check cutoff {self.cutoff}."
+            )
+
+        # Profile: wigner matrix computation
+        if self.profiler:
+            self.profiler.start("wigner")
+        with record_function("obtain wigner"):
+            wigner, wigner_inv = self._get_rotmat_and_wigner(
+                graph_dict["edge_distance_vec"],
+            )
+            coefficient_index = (
+                self.coefficient_index if self.mmax != self.lmax else None
+            )
+            wigner, wigner_inv = self.backend.prepare_wigner(
+                wigner,
+                wigner_inv,
+                self.mappingReduced,
+                coefficient_index,
+            )
+        if self.profiler:
+            self.profiler.stop("wigner")
+
+        # Initialize node embeddings
+        # Profile: atom_embedding
+        if self.profiler:
+            self.profiler.start("atom_embedding")
+        with record_function("atom embedding"):
+            x_message = torch.zeros(
+                data_dict["atomic_numbers"].shape[0],
+                self.sph_feature_size,
+                self.sphere_channels,
+                device=data_dict["pos"].device,
+                dtype=data_dict["pos"].dtype,
+            )
+            x_message[:, 0, :] = self.sphere_embedding(data_dict["atomic_numbers"])
+        if self.profiler:
+            self.profiler.stop("atom_embedding")
+
+        sys_node_embedding = csd_mixed_emb[data_dict["batch"]]
+        x_message[:, 0, :] = x_message[:, 0, :] + sys_node_embedding
+
+        self.set_MOLE_sizes(
+            nsystems=csd_mixed_emb.shape[0],
+            batch_full=data_dict["batch_full"],
+            edge_index=original_edge_index,
+        )
+        self.log_MOLE_stats()
+
+        # edge degree embedding
+        # Profile: edge_embedding
+        if self.profiler:
+            self.profiler.start("edge_embedding")
+        with record_function("edge embedding"):
+            dist_scaled = graph_dict["edge_distance"] / self.cutoff
+            edge_envelope = self.envelope(dist_scaled).reshape(-1, 1, 1)
+            edge_distance_embedding = self.distance_expansion(
+                graph_dict["edge_distance"]
+            )
+            source_embedding = self.source_embedding(
+                data_dict["atomic_numbers_full"][graph_dict["edge_index"][0]]
+            )
+            target_embedding = self.target_embedding(
+                data_dict["atomic_numbers_full"][graph_dict["edge_index"][1]]
+            )
+            x_edge = torch.cat(
+                (edge_distance_embedding, source_embedding, target_embedding), dim=1
+            )
+            
+            # Exchange before edge_degree_embedding? 
+            # edge_degree_embedding uses neighbors. If neighbors are ghosts, we need their features.
+            # But x_message is just initialized from atomic numbers. 
+            # Atomic numbers of ghosts are already known (exchanged in structural halo).
+            # So x_message for ghosts is locally computable at this stage!
+            # No exchange needed yet.
+            
+            wigner_inv_envelope = wigner_inv * edge_envelope
+
+            x_message = self.edge_degree_embedding(
+                x_message,
+                x_edge,
+                graph_dict["edge_index"],
+                wigner_inv_envelope,
+                data_dict["gp_node_offset"],
+            )
+        if self.profiler:
+            self.profiler.stop("edge_embedding")
+
+        # Update spherical node embeddings (Message Passing Layers)
+        # Prepare local_edge_index for efficient message passing
+        # We only need to aggregate messages INTO local atoms.
+        # Edges where destination (edge_index[1]) is a ghost atom can be skipped.
+
+        # Handle single-rank case: if num_local is 0 or not set, use all atoms
+        # In per_node mode, effective_num_local is the total node atoms (not per-GPU count)
+        if self.per_node_partition:
+            effective_num_local = self.exchanger.num_node_atoms_total
+        else:
+            effective_num_local = self.num_local if self.num_local > 0 else data_dict["pos"].shape[0]
+
+        # Per-node partitioning: filter edges to only target my OWNED atoms (Strategy B)
+        # Even though effective_num_local covers the whole node, I only compute for my slice.
+        if self.per_node_partition:
+            my_start = self.exchanger.my_start_in_node
+            my_end = my_start + self.exchanger.num_local_on_gpu
+            # Keep edges where dst is in [my_start, my_end)
+            local_dest_mask = (graph_dict["edge_index"][1] >= my_start) & (graph_dict["edge_index"][1] < my_end)
+        else:
+            local_dest_mask = graph_dict["edge_index"][1] < effective_num_local
+
+        local_edge_index = graph_dict["edge_index"][:, local_dest_mask]
+        
+        # We also need to filter edge attributes accordingly
+        local_edge_distance = graph_dict["edge_distance"][local_dest_mask]
+        
+        # === OVERLAP OPTIMIZATION (Area 3) ===
+        # Check config flag first to avoid any overhead when disabled
+        use_overlap = getattr(self, 'enable_overlap', False)
+
+        with record_function("layer_radial_emb"):
+            x_edge_per_layer = self.backend.get_layer_radial_emb(x_edge, self)
+        
+        if use_overlap:
+            # Only compute overlap-related tensors when enabled
+            if self.per_node_partition:
+                _could_use_overlap = (hasattr(self, 'interior_mask') and
+                                      self.interior_mask is not None and
+                                      self.interior_mask.numel() > 0 and
+                                      self.exchanger.num_nodes > 1)
+            else:
+                _could_use_overlap = (hasattr(self, 'interior_mask') and
+                                      self.interior_mask is not None and
+                                      self.interior_mask.numel() > 0 and
+                                      self.exchanger.world_size > 1)
+            
+            if not _could_use_overlap:
+                use_overlap = False
+            else:
+                # Filter x_edge for overlap path
+                local_x_edge_per_layer = [x_edge_per_layer[i][local_dest_mask] for i in range(self.num_layers)]
+                
+                # Build masks for interior edges (dst is interior atom) 
+                # and boundary edges (dst is boundary atom)
+                interior_atom_mask = self.interior_mask.to(local_edge_index.device)
+                
+                # Edge goes to interior atom if dst is marked as interior
+                if self.per_node_partition:
+                    # In per_node mode, local_edge_index[1] values are in [my_start, my_end)
+                    # but interior_atom_mask has per-GPU length. Offset to per-GPU indices.
+                    offset_dst = local_edge_index[1] - self.exchanger.my_start_in_node
+                    interior_edge_mask = interior_atom_mask[offset_dst]
+                else:
+                    interior_edge_mask = interior_atom_mask[local_edge_index[1]]
+                boundary_edge_mask = ~interior_edge_mask
+                
+                # Pre-filter edges for interior and boundary
+                interior_edge_index = local_edge_index[:, interior_edge_mask]
+                boundary_edge_index = local_edge_index[:, boundary_edge_mask]
+                
+                interior_edge_distance = local_edge_distance[interior_edge_mask]
+                boundary_edge_distance = local_edge_distance[boundary_edge_mask]
+                
+                # Filter x_edge for interior and boundary
+                interior_x_edge_per_layer = [local_x_edge_per_layer[i][interior_edge_mask] for i in range(self.num_layers)]
+                boundary_x_edge_per_layer = [local_x_edge_per_layer[i][boundary_edge_mask] for i in range(self.num_layers)]
+                
+                # === Area 3 Fix: Pre-compute interior atom indices for efficient merge ===
+                if self.per_node_partition:
+                    # interior_atom_mask is per-GPU length; indices need node-wide offset
+                    interior_indices = (torch.where(interior_atom_mask[:self.exchanger.num_local_on_gpu])[0]
+                                        + self.exchanger.my_start_in_node)
+                else:
+                    interior_indices = torch.where(interior_atom_mask[:self.num_local])[0]
+                
+                # === Area 3 Fix: Pre-compute Wigner filtered tensors ONCE (not per-layer) ===
+                def _filter_wigner_once(wigner_dict, mask, full_mask):
+                    """Filter wigner dict by edge mask, relative to local_dest_mask"""
+                    if wigner_dict is None:
+                        return None
+                    if isinstance(wigner_dict, dict):
+                        filtered = {}
+                        for k, v in wigner_dict.items():
+                            if isinstance(v, torch.Tensor) and v.shape[0] == graph_dict["edge_index"].shape[1]:
+                                filtered[k] = v[full_mask][mask]
+                            else:
+                                filtered[k] = v
+                        return filtered
+                    elif isinstance(wigner_dict, torch.Tensor):
+                        return wigner_dict[full_mask][mask]
+                    return wigner_dict
+                
+                interior_wigner = _filter_wigner_once(wigner, interior_edge_mask, local_dest_mask)
+                interior_wigner_inv = _filter_wigner_once(wigner_inv, interior_edge_mask, local_dest_mask)
+                interior_envelope = edge_envelope[local_dest_mask][interior_edge_mask] if edge_envelope is not None else None
+                interior_wigner_inv_envelope = interior_wigner_inv * interior_envelope
+                
+                boundary_wigner = _filter_wigner_once(wigner, boundary_edge_mask, local_dest_mask)
+                boundary_wigner_inv = _filter_wigner_once(wigner_inv, boundary_edge_mask, local_dest_mask)
+                boundary_envelope = edge_envelope[local_dest_mask][boundary_edge_mask] if edge_envelope is not None else None
+                boundary_wigner_inv_envelope = boundary_wigner_inv * boundary_envelope
+                
+                # Log overlap stats once (skip under torch.compile to avoid dynamo errors)
+                if not hasattr(self, '_logged_overlap_stats') and not torch.compiler.is_compiling():
+                    interior_count = interior_atom_mask.sum().item()
+                    total_local = self.exchanger.num_local_on_gpu if self.per_node_partition else self.num_local
+                    interior_edges = interior_edge_index.shape[1]
+                    boundary_edges = boundary_edge_index.shape[1]
+                    if self.exchanger.rank == 0:
+                        print(f"Overlap enabled: {interior_count}/{total_local} interior atoms ({100*interior_count/total_local:.1f}%)")
+                        print(f"  Interior edges: {interior_edges}, Boundary edges: {boundary_edges}")
+                    self._logged_overlap_stats = True
+        
+        # Compute correct local count for exchange calls
+        if self.per_node_partition:
+            _local_count_for_exchange = self.exchanger.num_local_on_gpu
+        else:
+            _local_count_for_exchange = self.num_local
+
+        # Update spherical node embeddings (Message Passing Layers)
+        for i in range(self.num_layers):
+            if use_overlap and not self.per_node_partition:
+                # === MODE C: Per-rank overlap ===
+                if self.profiler:
+                    self.profiler.start(f"feature_exchange_{i}")
+                with record_function(f"async_exchange_start {i}"):
+                    exchange_handle = self.exchanger.async_exchange_start(x_message, _local_count_for_exchange)
+
+                with record_function(f"interior_compute {i}"):
+                    # Compute interior atoms while exchange is in progress
+                    # Interior atoms only have local neighbors, don't need ghost features
+                    if interior_edge_index.shape[1] > 0:
+                        x_interior_result = self.blocks[i](
+                            x_message,
+                            interior_x_edge_per_layer[i],
+                            interior_edge_index,
+                            interior_wigner,
+                            interior_wigner_inv_envelope,
+                            total_atoms_across_gp_ranks=data_dict["atomic_numbers_full"].shape[0],
+                            sys_node_embedding=sys_node_embedding,
+                            node_offset=data_dict["gp_node_offset"],
+                        )
+
+                with record_function(f"async_exchange_wait {i}"):
+                    x_message = self.exchanger.async_exchange_wait(exchange_handle, x_message)
+                if self.profiler:
+                    self.profiler.stop(f"feature_exchange_{i}")
+
+                with record_function(f"boundary_compute {i}"):
+                    if boundary_edge_index.shape[1] > 0:
+                        x_boundary_result = self.blocks[i](
+                            x_message,
+                            boundary_x_edge_per_layer[i],
+                            boundary_edge_index,
+                            boundary_wigner,
+                            boundary_wigner_inv_envelope,
+                            total_atoms_across_gp_ranks=data_dict["atomic_numbers_full"].shape[0],
+                            sys_node_embedding=sys_node_embedding,
+                            node_offset=data_dict["gp_node_offset"],
+                        )
+                        x_message = x_boundary_result
+                    else:
+                        x_message = x_interior_result if interior_edge_index.shape[1] > 0 else x_message
+
+                    if interior_edge_index.shape[1] > 0 and interior_indices.numel() > 0:
+                        x_message[interior_indices] = x_interior_result[interior_indices]
+
+            else:
+                # === Wigner filtering: first iteration only (results reused) ===
+                if i == 0:
+                    with record_function("wigner_filter"):
+                        local_wigner = wigner
+                        if isinstance(wigner, dict):
+                            local_wigner = {}
+                            for k, v in wigner.items():
+                                if isinstance(v, torch.Tensor) and v.shape[0] == graph_dict["edge_index"].shape[1]:
+                                     local_wigner[k] = v[local_dest_mask]
+                                else:
+                                     local_wigner[k] = v
+                        elif isinstance(wigner, torch.Tensor):
+                             local_wigner = wigner[local_dest_mask]
+
+                        local_wigner_inv = wigner_inv
+                        if wigner_inv is not None:
+                             if isinstance(wigner_inv, dict):
+                                 assert False, "wigner_inv should be torch.Tensor"
+                                 local_wigner_inv = {}
+                                 for k, v in wigner_inv.items():
+                                    if isinstance(v, torch.Tensor) and v.shape[0] == graph_dict["edge_index"].shape[1]:
+                                         local_wigner_inv[k] = v[local_dest_mask]
+                                    else:
+                                         local_wigner_inv[k] = v
+                             elif isinstance(wigner_inv, torch.Tensor):
+                                 local_wigner_inv = wigner_inv[local_dest_mask]
+
+                        local_edge_envelope = edge_envelope[local_dest_mask] if edge_envelope is not None else None
+                        local_wigner_inv_envelope = local_wigner_inv * local_edge_envelope
+                        local_x_edge_per_layer = [x_edge_per_layer[i][local_dest_mask] for i in range(self.num_layers)]
+
+                # === Feature exchange ===
+                if self.profiler:
+                    self.profiler.start(f"feature_exchange_{i}")
+                if self.differentiable_exchange and hasattr(self.exchanger, 'differentiable_exchange'):
+                    # Differentiable synchronous exchange: backward auto-sends ghost grads
+                    with record_function(f"diff_exchange {i}"):
+                        x_message = self.exchanger.differentiable_exchange(x_message, _local_count_for_exchange)
+                else:
+                    # Original async exchange (non-differentiable, allows overlap)
+                    with record_function(f"async_exchange_start {i}"):
+                        exchange_handle = self.exchanger.async_exchange_start(x_message, _local_count_for_exchange)
+                    with record_function(f"async_exchange_wait {i}"):
+                        x_message = self.exchanger.async_exchange_wait(exchange_handle, x_message)
+                if self.profiler:
+                    self.profiler.stop(f"feature_exchange_{i}")
+
+                # Now run the block with updated ghost features
+                # Profile: mp_block
+                if self.profiler:
+                    self.profiler.start(f"mp_block_{i}")
+                with record_function(f"message passing {i}"):
+                    x_message = self.blocks[i](
+                        x_message,
+                        local_x_edge_per_layer[i],
+                        local_edge_index,
+                        local_wigner,
+                        local_wigner_inv_envelope,
+                        total_atoms_across_gp_ranks=data_dict["atomic_numbers_full"].shape[0],
+                        sys_node_embedding=sys_node_embedding,
+                        node_offset=data_dict["gp_node_offset"],
+                    )
+                if self.profiler:
+                    self.profiler.stop(f"mp_block_{i}")
+
+            # Per-node Strategy B: Sync node features after each layer
+            # Added here to run for both use_overlap=True and False
+            if self.per_node_partition:
+                if self.profiler:
+                    self.profiler.start(f"intra_node_gather_{i}")
+
+                # Gather valid slice from my GPU
+                my_start = self.exchanger.my_start_in_node
+                my_end = my_start + self.exchanger.num_local_on_gpu
+                x_valid_slice = x_message[my_start:my_end]
+
+                feat_shape = x_valid_slice.shape[1:]
+                feat_dim = x_valid_slice[0].numel()
+                x_flat_slice = x_valid_slice.reshape(x_valid_slice.shape[0], -1)
+
+                is_last_layer = (i == self.num_layers - 1)
+
+                if is_last_layer:
+                    # Last layer: use differentiable gather to preserve autograd
+                    # for force computation (autograd.grad needs pos → energy path).
+                    # Each GPU gets partial gradients; calculator sums via all-reduce.
+                    x_node_full = _DifferentiableGather.apply(x_flat_slice, self.exchanger, feat_dim)
+                else:
+                    # Non-last layers: standard NCCL gather (gradient recomputed by next block)
+                    x_node_full = self.exchanger.gather_node_features(x_flat_slice, feat_dim)
+                x_node_full = x_node_full.reshape((x_node_full.shape[0],) + feat_shape)
+
+                if is_last_layer:
+                    # Non-in-place: create new tensor to preserve autograd graph
+                    ghosts = x_message[effective_num_local:]
+                    x_message = torch.cat([x_node_full, ghosts], dim=0)
+                else:
+                    x_message[:effective_num_local] = x_node_full
+
+                if self.profiler:
+                    self.profiler.stop(f"intra_node_gather_{i}")
+            # # print(f"[DEBUG] Rank {_rank}: MP layer {i} END", flush=True)
+
+        # Final layer norm
+        # # print(f"[DEBUG] Rank {_rank}: MP layers done, applying final norm", flush=True)
+        x_message = self.norm(x_message)
+        
+        out = {
+            "node_embedding": x_message,
+            "batch": data_dict["batch"],
+        }
+        # # print(f"[DEBUG] Rank {_rank}: forward() END", flush=True)
+        return out
+
+    def merge_MOLE_model(self, data):
+        if self.num_experts == 0:
+            return self
+            
+        # Extract num_local for distributed composition calculation
+        if "num_local" in data:
+            nl = data["num_local"]
+            if isinstance(nl, torch.Tensor):
+                self.num_local = int(nl.item())
+            else:
+                self.num_local = int(nl)
+                
+        csd_mixed_emb = self.csd_embedding(
+            charge=data["charge"],
+            spin=data["spin"],
+            dataset=data.get("dataset", default=None),
+        )
+        self.set_MOLE_coefficients(
+            atomic_numbers_full=data["atomic_numbers"],
+            batch_full=data["batch"],
+            csd_mixed_emb=csd_mixed_emb,
+        )
+        if self.mole_type != "so2":
+            raise ValueError("Only mole_type=so2 supported for merging")
+
+        model_search_and_replace(
+            self, recursive_replace_so2_MOLE, replace_MOLE_with_linear
+        )
+
+        # drop moe parameters from merged model
+        self.routing_mlp = None
+        self.composition_embedding = None
+        self.num_experts = 0
+
+        # create a new non moe model and load weights into there
+        # CRITICAL: Use DistributedESCNMDBackbone to preserve our custom class logic!
+        # We must disable experts in the new instance so it matches the merged (dense) weights.
+        new_kwargs = self.parent_kwargs.copy()
+        new_kwargs["num_experts"] = 0
+        new_kwargs["use_composition_embedding"] = False # Merged model doesn't use this routing embedding
+        
+        new_model = DistributedESCNMDBackbone(**new_kwargs)
+        new_model.load_state_dict(self.state_dict())
+        
+        # Preserve distributed components
+        new_model.exchanger = self.exchanger
+        new_model.per_node_partition = self.per_node_partition
+        new_model.enable_overlap = getattr(self, 'enable_overlap', False)
+        new_model.differentiable_exchange = getattr(self, 'differentiable_exchange', False)
+        new_model.interior_mask = getattr(self, 'interior_mask', None)
+        if hasattr(self, "num_local"):
+             new_model.num_local = self.num_local
+        
+        new_model.eval()
+        return new_model
 
 class UMAModel(DistNNPModel):
     def __init__(
-        self, 
+        self,
         model_name: str,
         inference_settings: InferenceSettings | str = "default", #"turbo",
         overrides: dict | None = None,
         device: Literal["cuda", "cpu"] | None = None,
-        exchanger: Optional[Exchanger] = None,
-        merge_mole_experts: bool = False,
-        rank: int = 0,
+        exchanger: Exchanger | None = None,
     ):
-        DistNNPModel.__init__(self)
-        self.log = open(f"/p/lustre1/smolenski1/rank_{rank}.log", "w", buffering=1)
-        self.log.write(f"rank {rank} start\n")
         inference_settings = guess_inference_settings(inference_settings)
-        inference_settings.merge_mole = False # we do it manually, don't have fairchem try too
-        self.predict_unit = pretrained_mlip.get_predict_unit(model_name, inference_settings, overrides, device)
-        self.merge_mole_experts = merge_mole_experts
-        self._experts_merged = False
+        if overrides is None:
+            overrides = {"backbone": {"model": "distributed_escnmd_backbone"}}
+        elif "backbone" not in overrides:
+            overrides["backbone"] = {"model": "distributed_escnmd_backbone"}
+        else:
+            overrides["backbone"]["model"] = "distributed_escnmd_backbone"
+        self.predictor = pretrained_mlip.get_predict_unit(model_name, inference_settings, overrides, device)
 
-        main_model = self.predict_unit.model.module if hasattr(self.predict_unit.model, "module") else self.predict_unit.model
-        backbone = main_model.backbone
+        self.num_layers = self.predictor.model.module.backbone.num_layers
         self.position_exchanger = (
             GPUDirectExchanger() if exchanger is None else exchanger
         )
@@ -113,10 +1944,12 @@ class UMAModel(DistNNPModel):
         )
         self.feature_exchangers = [(
             GPUDirectExchanger() if exchanger is None else exchanger
-        ) for i in range(backbone.num_layers)]
+        ) for i in range(self.num_layers)]
 
     def initialize_buffers(
-        self, partition_info: PartitionMessagePassingInfo, device
+        self,
+        partition_info: PartitionMessagePassingInfo,
+        device: Literal["cuda", "cpu"],
     ) -> None:
         self.position_exchanger.setup_exchanger(
             feature_dim=3, partition_info=partition_info, device=device
@@ -125,46 +1958,12 @@ class UMAModel(DistNNPModel):
             feature_dim=1, partition_info=partition_info, device=device
         )
 
-        backbone = self.predict_unit.model.module.backbone if hasattr(self.predict_unit.model, "module") else self.predict_unit.model.backbone
+        backbone = self.predictor.model.module.backbone if hasattr(self.predictor.model, "module") else self.predictor.model.backbone
         total_feature_dim = backbone.sph_feature_size * backbone.sphere_channels
         for feature_exchanger in self.feature_exchangers:
             feature_exchanger.setup_exchanger(
                 feature_dim=total_feature_dim, partition_info=partition_info, device=device
             )
-
-    def balance_channels(
-        self,
-        x_message_prime: torch.Tensor,
-        charge: torch.Tensor,
-        spin: torch.Tensor,
-        natoms: torch.Tensor,
-        batch: torch.Tensor,
-        n_local_atoms: int,
-    ) -> torch.Tensor:
-        backbone = self.predict_unit.model.module.backbone if hasattr(self.predict_unit.model, "module") else self.predict_unit.model.backbone
-        if backbone.charge_channel_end > backbone.charge_channel_start:
-            x_message_prime = balance_channels_batched(
-                emb=x_message_prime,
-                target=charge,
-                natoms=natoms,
-                batch=batch,
-                start_idx=backbone.charge_channel_start,
-                end_idx=backbone.charge_channel_end,
-                target_offset=0.0,
-                n_local_atoms=n_local_atoms,
-            )
-        if backbone.spin_channel_end > backbone.spin_channel_start:
-            x_message_prime = balance_channels_batched(
-                emb=x_message_prime,
-                target=spin,
-                natoms=natoms,
-                batch=batch,
-                start_idx=backbone.spin_channel_start,
-                end_idx=backbone.spin_channel_end,
-                target_offset=1.0,
-                n_local_atoms=n_local_atoms,
-            )
-        return x_message_prime
 
     def __call__(
         self,
@@ -178,50 +1977,36 @@ class UMAModel(DistNNPModel):
     ):
         if isinstance(datasets, str):
             datasets = [datasets]
+        num_systems = int(batch.max().item()) + 1 
+        if charge is None:
+            charge = torch.zeros(num_systems, dtype=torch.long, device=device)
+        if spin is None:
+            spin = torch.ones(num_systems, dtype=torch.long, device=device)
 
-        #ESCN FORWARD
         local_mol_info = distributed_state.local_molecular_info
-        global_mol_info = distributed_state.global_molecular_info
         sim_config = distributed_state.sim_config
-        partition_info = distributed_state.local_partition_info
-
-        prev_local_positions = local_mol_info.atom_positions
-        local_positions = prev_local_positions.clone().requires_grad_(True)
-        local_atom_types = local_mol_info.atom_types
-        global n_local_atoms
-        n_local_atoms = local_mol_info.num_atoms
-        n_global_atoms = global_mol_info.num_atoms
-        global_atom_types = global_mol_info.atom_types
-        global_positions = global_mol_info.atom_positions
-
-        device = prev_local_positions.device if device is None else device
-        self.predict_unit.model.to(device)
-        main_model = self.predict_unit.model.module if hasattr(self.predict_unit.model, "module") else self.predict_unit.model
-        backbone = main_model.backbone
 
         positions = FeaturePushToExchange.apply(
-            local_positions, distributed_state, self.position_exchanger
+            local_mol_info.atom_positions, distributed_state, self.position_exchanger
         )
 
         atom_types = FeaturePushToExchange.apply(
-            local_atom_types.float().unsqueeze(-1), distributed_state, self.atom_type_exchanger
+            local_mol_info.atom_types.float().unsqueeze(-1), distributed_state, self.atom_type_exchanger
         ).squeeze(-1).long()
 
-        n_atoms = positions.shape[0]
+        num_atoms = positions.shape[0]
+        num_local = local_mol_info.num_atoms
         pbc = sim_config.pbc.unsqueeze(0)
-
-        cell = sim_config.cell
+        cell = sim_config.cell.unsqueeze(0)
         with torch.no_grad():
             edge_index, cell_offsets, _ = radius_graph_pbc_cuda(
                 data=type(
                     "Data",
                     (object,),
                     {
-                        # "pos": positions,
-                        "pos": global_positions,
-                        "cell": cell.unsqueeze(0),
-                        # "natoms": torch.tensor([n_atoms], dtype=torch.long, device=device),
-                        "natoms": torch.tensor([n_global_atoms], dtype=torch.long, device=device),
+                        "pos": positions,
+                        "cell": cell,  # [1, 3, 3]
+                        "natoms": [num_atoms],
                         "pbc": pbc,
                     },
                 )(),
@@ -230,289 +2015,28 @@ class UMAModel(DistNNPModel):
                 enforce_max_neighbors_strictly=False,
             )
 
-        local_global_indices = partition_info.partition_indices[:n_local_atoms]  # [n_local]
-        ghost_positions = positions[n_local_atoms:]
-        ghost_global_indices = torch.cdist(
-            ghost_positions.float(), 
-            global_mol_info.atom_positions.float()
-        ).argmin(dim=1)
-        all_global_indices = torch.cat([local_global_indices, ghost_global_indices])  # [n_local+n_ghosts]
-        print(f"[rank {distributed_state.dist_env.global_rank}] "
-              f"local_global_indices: {local_global_indices}, "
-              f"ghost_global_indices: {ghost_global_indices}",
-              f"all_global_indices: {all_global_indices}",
-              file=self.log)
-
-        # Invert: global_idx -> local position index (-1 if not present on this rank)
-        global_to_local = torch.full((n_global_atoms,), -1, dtype=torch.long, device=device)
-        global_to_local[all_global_indices] = torch.arange(
-            all_global_indices.shape[0], dtype=torch.long, device=device
-        )
-
-        # Keep only edges where both src and tgt are present on this rank
-        global_src, global_tgt = edge_index[0], edge_index[1]
-        src_local = global_to_local[global_src]
-        tgt_local = global_to_local[global_tgt]
-        edge_mask = (src_local >= 0) & (tgt_local >= 0)
-
-        edge_index = torch.stack([src_local[edge_mask], tgt_local[edge_mask]], dim=0)
-        cell_offsets = cell_offsets[edge_mask]
-
-        print(f"edge_mask.sum(): {edge_mask.sum()}",
-              f"edge_index.shape: {edge_index.shape}",
-              file=self.log)
-
-        print(f"FROM DISTUMA: edge_index: {edge_index}", file=self.log)
-
-        src, tgt = edge_index[0], edge_index[1]
-        edge_distance_vec = positions[tgt] - positions[src] + torch.einsum("ni,nij->nj", cell_offsets, cell.unsqueeze(0))
-        edge_distance = torch.norm(edge_distance_vec, p=2, dim=-1)
-
-        num_systems = int(batch.max().item()) + 1 
-        if charge is None:
-            charge = torch.zeros(num_systems, dtype=torch.long, device=device)
-        if spin is None:
-            spin = torch.ones(num_systems, dtype=torch.long, device=device)
-
-        n_edges = edge_index.shape[1]
         data = AtomicData(
             positions,
             atom_types,
-            cell.unsqueeze(0),
+            cell,
             pbc,
-            torch.tensor([n_atoms], dtype=torch.long, device=device),
+            torch.tensor([num_atoms], dtype=torch.long, device=device),
             edge_index,
-            cell_offsets,
-            torch.tensor([n_edges], dtype=torch.long, device=device),
+            -cell_offsets,
+            torch.tensor([edge_index.shape[1]], dtype=torch.long, device=device),
             charge,
             spin,
-            torch.zeros(n_atoms, dtype=torch.long, device=device),
-            torch.zeros(n_atoms, dtype=torch.long, device=device),
-        )
-        if hasattr(self.predict_unit.model, "module"):
-            self.predict_unit.model.module.prepare_for_inference(
-                data, self.predict_unit.inference_settings
-            )
-        else:
-            self.predict_unit.model.prepare_for_inference(
-                data, self.predict_unit.inference_settings
-            )
-
-        csd_mixed_emb = backbone.csd_embedding(
-            charge=charge,
-            spin=spin,
+            torch.zeros(num_atoms, dtype=torch.long, device=device), # fixed
+            torch.zeros(num_atoms, dtype=torch.long, device=device), # tags
+            # batch=batch_full,
             dataset=datasets,
         )
-        print(f"FROM DISTUMA: csd_mixed_emb: {csd_mixed_emb}", file=self.log)
-        known_be_list = []
-        def routing_hook(module, inputs, output):
-            known_be_list.append(output.detach().clone())
+        data["num_local"] = num_local
+        pred = self.predictor.predict(data)
 
-        if getattr(backbone, "num_experts", 0) > 0:
-            hook_handle = None
-            if hasattr(backbone, "routing_mlp") and backbone.routing_mlp is not None:
-                hook_handle = backbone.routing_mlp.register_forward_hook(routing_hook)
-                
-            backbone.set_MOLE_coefficients(
-                atomic_numbers_full=global_atom_types,
-                batch_full=torch.zeros_like(global_atom_types),
-                csd_mixed_emb=csd_mixed_emb,
-            )
-            
-            if hook_handle is not None:
-                hook_handle.remove()
+        energy = pred["energy"].detach().cpu().item()
+        forces = pred["forces"].detach().cpu()
+        # stress = pred[calc_key].detach().cpu().numpy().reshape(3, 3)
+        # hessian = pred[calc_key].detach().cpu().numpy().squeeze()
 
-        known_be = known_be_list[0] if len(known_be_list) > 0 else None
-
-        if self.merge_mole_experts and not self._experts_merged:
-            model_search_and_replace(
-                backbone, recursive_replace_so2_MOLE, replace_MOLE_with_linear
-            )
-            
-            if hasattr(main_model, "output_heads"):
-                for head_key, head_wrapper in main_model.output_heads.items():
-                    actual_head = head_wrapper.head if hasattr(head_wrapper, "head") else head_wrapper
-                    if hasattr(actual_head, "merge_mole"):
-                        actual_head.merge_mole(data)
-                        
-            backbone.routing_mlp = None
-            backbone.composition_embedding = None
-            backbone.num_experts = 0
-            if hasattr(main_model, "num_experts"):
-                main_model.num_experts = 0
-            
-            if hasattr(backbone, "use_composition_embedding"):
-                backbone.use_composition_embedding = False
-                
-            self._experts_merged = True
-
-        wigner, wigner_inv = backbone._get_rotmat_and_wigner(
-            edge_distance_vecs = edge_distance_vec
-        )
-        coefficient_index = (
-            backbone.coefficient_index if backbone.mmax != backbone.lmax else None
-        )
-        wigner, wigner_inv = backbone.backend.prepare_wigner(
-            wigner,
-            wigner_inv,
-            backbone.mappingReduced,
-            coefficient_index,
-        )
-
-        x_message = torch.zeros(
-            n_atoms,
-            backbone.sph_feature_size,
-            backbone.sphere_channels,
-            device=device,
-            dtype=positions.dtype,
-        )
-        x_message[:, 0, :] = backbone.sphere_embedding(atom_types)
-
-        batch_full = torch.zeros(n_atoms, dtype=batch.dtype, device=batch.device)
-        sys_node_embedding = csd_mixed_emb[batch_full]
-        x_message[:, 0, :] = x_message[:, 0, :] + sys_node_embedding
-
-        if getattr(backbone, "num_experts", 0) > 0:
-            backbone.set_MOLE_sizes(
-                nsystems=csd_mixed_emb.shape[0],
-                batch_full=batch_full,
-                edge_index=edge_index,
-            )
-            backbone.log_MOLE_stats()
-
-        dist_scaled = edge_distance / backbone.cutoff
-        edge_envelope = backbone.envelope(dist_scaled).reshape(-1, 1, 1)
-        edge_distance_embedding = backbone.distance_expansion(
-            edge_distance
-        )
-        source_embedding = backbone.source_embedding(
-            atom_types.long()[edge_index[0]]
-        )
-        target_embedding = backbone.target_embedding(
-            atom_types.long()[edge_index[1]]
-        )
-        x_edge = torch.cat(
-            (edge_distance_embedding, source_embedding, target_embedding),
-            dim=1,
-        )
-
-        wigner_inv_envelope = wigner_inv * edge_envelope
-
-        local_tgt_mask = edge_index[1] < n_local_atoms
-        edge_index_local = edge_index[:, local_tgt_mask]
-        print(f"FROM DISTUMA: edge_index_local: {edge_index_local}", file=self.log)
-        x_edge_local = x_edge[local_tgt_mask]
-        wigner_inv_envelope_local = wigner_inv_envelope[local_tgt_mask]
-
-        x_message = backbone.edge_degree_embedding(
-            x_message,
-            x_edge_local,
-            edge_index_local,
-            wigner_inv_envelope_local,
-            node_offset=0,
-        )
-        print(f"FROM DISTUMA: x_message after edge_degree_embedding: {x_message}", file=self.log)
-
-        sph_size = x_message.shape[1]
-        channels = x_message.shape[2]
-
-        x_message_local_flat = x_message[:n_local_atoms].flatten(start_dim=1)
-        x_message_flat = FeaturePushToExchange.apply(
-            x_message_local_flat, distributed_state, self.feature_exchangers[0]
-        )
-        x_message = x_message_flat.view(x_message_flat.shape[0], sph_size, channels)
-
-        x_edge_per_layer = backbone.backend.get_layer_radial_emb(x_edge, backbone)
-
-        for i in range(backbone.num_layers):
-            print(f"FROM DISTUMA: layer {i} x_message[:n_local_atoms]: {x_message[:n_local_atoms]}", file=self.log)
-            print(f"FROM DISTUMA: layer {i} x_message[n_local_atoms:]: {x_message[n_local_atoms:]}", file=self.log)
-            sys.stdout.flush()
-            x_message = backbone.blocks[i](
-                x_message,
-                x_edge_per_layer[i],
-                edge_index,
-                wigner,
-                wigner_inv_envelope,
-                total_atoms_across_gp_ranks=n_global_atoms,
-                sys_node_embedding=sys_node_embedding,
-            )
-            x_message = self.balance_channels(
-                x_message,
-                charge=charge,
-                spin=spin,
-                natoms=torch.tensor([n_global_atoms], device=device), 
-                batch=batch_full,
-                n_local_atoms=n_local_atoms,
-            )
-
-            if i < backbone.num_layers - 1:
-                sph_size = x_message.shape[1]
-                channels = x_message.shape[2]
-
-                x_message_local_flat = x_message[:n_local_atoms].flatten(start_dim=1)
-                x_message_flat = FeaturePushToExchange.apply(
-                        x_message_local_flat, distributed_state, self.feature_exchangers[i + 1]
-                )
-                x_message = x_message_flat.view(x_message_flat.shape[0], sph_size, channels)
-
-        x_message = backbone.norm(x_message)
-
-        out = {
-            "node_embedding": x_message,
-            "batch": batch_full,
-        }
-
-        head_wrapper = main_model.output_heads["energyandforcehead"]
-        output_head = head_wrapper.head
-
-        energy_key = f"{output_head.prefix}_energy" if output_head.prefix else "energy"
-        forces_key = f"{output_head.prefix}_forces" if output_head.prefix else "forces"
-        stress_key = f"{output_head.prefix}_stress" if output_head.prefix else "stress"
-        hessian_key = f"{output_head.prefix}_hessian" if output_head.prefix else "hessian"
-
-        outputs = {}
-
-        local_out = {
-            "node_embedding": out["node_embedding"][:n_local_atoms],
-            "batch": batch,
-        }
-
-        expert_idx = head_wrapper.dataset_name_to_exp[backbone.dataset_mapping["omol"]]
-        head_wrapper.global_mole_tensors.expert_mixing_coefficients = torch.zeros(
-            1,
-            len(head_wrapper.dataset_name_to_exp),
-            dtype=positions.dtype,
-            device=device,
-        )
-        head_wrapper.global_mole_tensors.expert_mixing_coefficients[0, expert_idx] = 1.0
-        head_wrapper.global_mole_tensors.mole_sizes = torch.tensor(
-            [n_global_atoms], dtype=torch.long, device=device
-        )
-
-        energy, energy_part = compute_energy(
-            local_out,
-            output_head.energy_block,
-            batch,
-            num_systems=1,
-            natoms=n_local_atoms,
-            reduce=output_head.reduce,
-        )
-
-        outputs[energy_key] = {"energy": energy} if output_head.wrap_property else energy
-
-        if not gp_utils.initialized():
-            embeddings = out["node_embedding"].detach()
-            outputs["embeddings"] = (
-                {"embeddings": embeddings} if output_head.wrap_property else embeddings
-            )
-
-        energy_part.backward()
-        assert (
-            local_positions.grad is not None
-        ), "Gradient should not be None after backward()"
-        forces = -local_positions.grad
-
-        local_energy = energy.detach().clone()
-        local_forces = forces[:n_local_atoms]
-        return local_energy, local_forces
+        return energy, forces

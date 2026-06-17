@@ -53,6 +53,7 @@ namespace distnnp_state
         // --- Cached graphs (returned for downstream NNP model use) ---
         torch::Tensor edge_index;         // [2, E] graph at cutoff radius (from auto-weighted partition). Undefined if not built.
         torch::Tensor edge_index_halo;    // [2, E'] graph at cutoff + ghost_buffer radius (from build_halo_maps). Undefined if not built.
+        torch::Tensor cell_shifts_halo;   // [E, 3] cell shifts for PBC
     };
 
     struct DistNNPState
