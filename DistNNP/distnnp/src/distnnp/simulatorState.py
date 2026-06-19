@@ -43,7 +43,7 @@ class SimState:
         partitioner.build_halo_maps(
             partition_info, molecular_system, self.dist_env_obj, simulation_config
         )
-        self.parition_info = partition_info
+        self.partition_info = partition_info
 
         self.global_molecular_info = molecular_system
         self._local_molecular_info = self.setup_mass_and_forces(
@@ -167,9 +167,9 @@ class SimState:
                 [g is not None for g in gathered]
             ), "Gather failed: some ranks did not contribute data."
 
-            all_indices = torch.cat([g["indices"] for g in gathered])  # type: ignore # [N]
-            all_positions = torch.cat([g["positions"] for g in gathered])  # type: ignore  # [N, 3]
-            all_velocities = torch.cat([g["velocities"] for g in gathered])  # type: ignore  # [N, 3]
+            all_indices = torch.cat([g["indices"].to(self.device) for g in gathered])  # type: ignore # [N]
+            all_positions = torch.cat([g["positions"].to(self.device) for g in gathered])  # type: ignore  # [N, 3]
+            all_velocities = torch.cat([g["velocities"].to(self.device) for g in gathered])  # type: ignore  # [N, 3]
 
             # Restore canonical atom order (0 … N-1).
             sort_order = torch.argsort(all_indices)

@@ -7,7 +7,9 @@ from distnnp_state import (
     MolecularInfo,
     SimulationConfig,
     TrajectoryWriter,
+    TorchDistEnv,
 )
+from distnnp_state.masses import TORCH_ATOMIC_MASSES
 from distnnp_model import DistNNPModel
 from distnnp.simulatorState import SimState
 from distnnp_integrator import (
@@ -115,7 +117,13 @@ class Simulator:
         self.dist_environment = dist_environment
         self.device = device
         # TODO figure out what author should be
-        self.writer: TrajectoryWriter = TrajectoryWriter(dist_environment.global_rank, uuid.uuid4().bytes, "author", config.output_dir)
+        self.writer: TrajectoryWriter = TrajectoryWriter(
+            dist_environment.global_rank,
+            uuid.uuid4().bytes,
+            "author",
+            config.output_dir,
+            config.traj_file,
+        )
 
     def _get_partitioner(self) -> POSSIBLE_PARTITIONERS_TYPES:
         partition_algorithm = self.config.partition_algorithm
@@ -149,20 +157,40 @@ class Simulator:
 
         return sim_config
 
+    def _move_molecular_info_to_device(
+        self, molecular_system: MolecularInfo, device: torch.device
+    ) -> MolecularInfo:
+        for field in [
+            "atom_vertex_numbers",
+            "atom_types",
+            "atom_positions",
+            "atom_velocities",
+            "atom_forces",
+            "edge_counts",
+        ]:
+            if hasattr(molecular_system, field):
+                tensor = getattr(molecular_system, field)
+                if tensor is not None and tensor.numel() > 0:
+                    setattr(molecular_system, field, tensor.to(device))
+        return molecular_system
+
     def initialize_simulator_state(
         self, molecular_system: MolecularInfo, device: Optional[torch.device] = None
     ) -> None:
+        if device is None:
+            device = self.device
+        molecular_system = self._move_molecular_info_to_device(molecular_system, device)
         self.state = SimState(
             molecular_system=molecular_system,
             partitioner=self._get_partitioner(),
             simulation_config=self._get_simulation_config(),
             distributed_environment=self._get_dist_environment(),
-            device=device if device else self.device,
+            device=device,
         )
         # Once the state is initialized, we can initialize the model buffers based on the local partition info
 
         self.model.initialize_buffers(
-            self.state.parition_info, device=device if device else self.device
+            self.state.partition_info, device=device
         )
 
     def setup(self, input_file: str) -> None:
@@ -173,32 +201,35 @@ class Simulator:
         torch_dist_env = TorchDistEnv()
         dist_env = torch_dist_env.dist_env
 
-        config = self._get_simulation_config()
+        sim_config = self._get_simulation_config()
 
         # (1) initialize from file
-        global_mol_info = self.writer.initialize(input_file, config.timestep_fs, config.traj_interval)
+        global_mol_info = self.writer.initialize(input_file, self.config.timestep_fs, self.config.traj_interval)
 
-        # (2) Partition atoms and build halo communication maps.
+        # put tensors on device
+        global_mol_info.atom_vertex_numbers = global_mol_info.atom_vertex_numbers.to(device=self.device)
+        global_mol_info.atom_types = global_mol_info.atom_types.to(device=self.device)
+        global_mol_info.atom_positions = global_mol_info.atom_positions.to(
+            device=self.device
+        )
+        global_mol_info.atom_velocities = global_mol_info.atom_velocities.to(
+            device=self.device
+        )
+        global_mol_info.atom_forces = torch.zeros_like(global_mol_info.atom_positions)
+
+        # (2) initialize simulator state from the global system and partition it.
+        self.initialize_simulator_state(global_mol_info, device=self.device)
+
+        # (3) Repartition if needed and update writer atom-count metadata.
         self.sync_and_repartition(device=self.device)
 
         # TODO if velocities are all 0, initialize from Maxwell-Boltzmann dist
-
-        self.state = SimState(
-            molecular_system=self.state.local_state,
-            partitioner=self._get_partitioner(),
-            simulation_config=self.config,
-            distributed_environment=dist_env,
-            device=self.device,
-        )
-        self.model.initialize_buffers(
-            self.state.parition_info, device=self.device
-        )
 
     def sync_and_repartition(self, device: Optional[torch.device] = None) -> None:
         self.state.sync_and_repartition()
         # TODO: ADD appropriate barriers/synchronization if needed here
         self.model.initialize_buffers(
-            self.state.parition_info, device=device if device else self.device
+            self.state.partition_info, device=device if device else self.device
         )
         self.writer.update_atom_counts(self.state.local_partition_info.atom_counts)
 
@@ -231,6 +262,6 @@ class Simulator:
             # if should_log(total_done):
                 # _log_energy(total_done, energy)
             if self.should_write_traj(total_done):
-                self.writer.submit(total_done, self.state)
+                self.writer.submit(total_done, self.state.local_state)
             total_done += 1
         self.writer.flush()

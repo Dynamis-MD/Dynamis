@@ -16,17 +16,17 @@ device = torch_distributed_env.device
 
 sim_config = SimulatorConfig(
         timestep_fs=0.5,
-        total_steps=100,
+        total_steps=10,
         cutoff_angstrom=6.0,
         side_length_angstrom=20.0,
         ghost_buffer_angstrom=0.5,
         partition_algorithm="sfc_morton",
         edge_weighted_partition=True,
-        rebalance_interval=10,
+        rebalance_interval=2,
         output_dir="./results",
         traj_file="trajectory.traj",
-        traj_interval=5,
-        log_interval=10,
+        traj_interval=1,
+        log_interval=1,
         writer_buffer_size=10,
         backend="nccl",
     )

@@ -8,7 +8,7 @@ namespace distnnp_state {
 
 class TrajectoryWriter {
 public:
-    explicit TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, std::string output_dir = "./trajectory");
+    explicit TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, const std::string& output_dir = "./trajectory", const std::string& output_file = "trajectory.distnnp");
     ~TrajectoryWriter();
 
     // TODO eventually this can be initialize with the custom binary format as a file
@@ -25,6 +25,7 @@ public:
     void write_to_xyz(const MolecularInfo& state, const std::string& file_name = "output.xyz");
 
 private:
+    std::string output_file;
     MolecularInfo load_xyz_file(const std::string& xyz_file_name);
     MolecularInfo load_distnnp_file(const std::string& xyz_file_name);
     void write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state, uint32_t rank);

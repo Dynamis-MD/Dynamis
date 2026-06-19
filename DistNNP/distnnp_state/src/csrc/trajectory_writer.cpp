@@ -5,25 +5,39 @@
 #include <stdexcept>
 #include <string>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 namespace distnnp_state {
 
-TrajectoryWriter::TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, std::string output_dir)
+TrajectoryWriter::TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, const std::string& output_dir, const std::string& output_file)
     : rank(global_rank)
     , output_dir(output_dir)
-    // TODO validate both of these
+    , output_file(output_file)
     , run_id(run_id)
     , author(author)
 {
-    // currently just overwriting, TODO increment number over time
+    // Ensure output directory exists.
+    struct stat st;
+    if (stat(output_dir.c_str(), &st) != 0) {
+        if (mkdir(output_dir.c_str(), 0755) != 0) {
+            std::cerr << "Failed to create output directory: " << output_dir << std::endl;
+            exit(1);
+        }
+    } else if (!S_ISDIR(st.st_mode)) {
+        std::cerr << "Output path exists and is not a directory: " << output_dir << std::endl;
+        exit(1);
+    }
+
+    const std::string file_path = output_dir + "/" + output_file;
     if (global_rank == 0)
-        fd = open((output_dir + "/trajectory.distnnp").c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        fd = open(file_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
     else
-        fd = open((output_dir + "/trajectory.distnnp").c_str(), O_RDWR | O_CREAT, 0644);
+        fd = open(file_path.c_str(), O_RDWR | O_CREAT, 0644);
 
     if (fd < 0) {
-        std::cerr << "Failed to open " << output_dir << "/trajectory.distnnp" << std::endl;
+        std::cerr << "Failed to open " << file_path << std::endl;
         exit(1);
     }
 }
@@ -227,8 +241,8 @@ void TrajectoryWriter::submit(uint32_t step, MolecularInfo state) {
     }
 
     // doing sizeof here to be more explicit about the calculations
-    uint32_t indices_offset = offset + (atom_count * sizeof(uint64_t));
-    offset += total_atoms * sizeof(uint64_t);
+    uint32_t indices_offset = offset + (atom_count * sizeof(int64_t));
+    offset += total_atoms * sizeof(int64_t);
     uint32_t positions_offset = offset + (atom_count * 3 * sizeof(float));
     offset += total_atoms * 3 * sizeof(float);
     uint32_t velocities_offset = offset + (atom_count * 3 * sizeof(float));
@@ -236,17 +250,17 @@ void TrajectoryWriter::submit(uint32_t step, MolecularInfo state) {
 
 
     auto write_tensor = [&](torch::Tensor t, uint32_t off) {
-        size_t tensor_bytes = t.numel() * t.element_size();
-        ssize_t written = pwrite(fd, t.data_ptr(), tensor_bytes, off);
+        torch::Tensor cpu_tensor = t.to(torch::kCPU).contiguous();
+        size_t tensor_bytes = cpu_tensor.numel() * cpu_tensor.element_size();
+        ssize_t written = pwrite(fd, cpu_tensor.data_ptr(), tensor_bytes, off);
 
-        // TODO might have to make this a loop if cant write the entire tensor at once
         if (written < 0) throw std::runtime_error("pwrite failed: " + std::string(strerror(errno)));
         if (static_cast<size_t>(written) != tensor_bytes) throw std::runtime_error("partial write");
     };
 
-    write_tensor(state.atom_vertex_numbers.contiguous(), indices_offset); // TODO make sure on CPU
-    write_tensor(state.atom_positions.contiguous(), positions_offset); // TODO make sure on CPU
-    write_tensor(state.atom_velocities.contiguous(), velocities_offset); // TODO make sure on CPU
+    write_tensor(state.atom_vertex_numbers, indices_offset);
+    write_tensor(state.atom_positions, positions_offset);
+    write_tensor(state.atom_velocities, velocities_offset);
 }
 
 MolecularInfo TrajectoryWriter::load_distnnp_file(const std::string& distnnp_file_name) {
@@ -306,13 +320,13 @@ MolecularInfo TrajectoryWriter::load_distnnp_file(const std::string& distnnp_fil
 
     // ids
     
-    uint32_t block_size = atoms.num_atoms * sizeof(uint64_t);
+    uint32_t block_size = atoms.num_atoms * sizeof(int64_t);
     // offset is the start of the frame
-    std::vector<uint64_t> ids(atoms.num_atoms);
+    std::vector<int64_t> ids(atoms.num_atoms);
     n = pread(dist_fd, ids.data(), block_size, loc);
     if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
     if (n != block_size) throw std::runtime_error("unexpected end of file");
-    atoms.atom_vertex_numbers = torch::from_blob(ids.data(), {atoms.num_atoms}, torch::kUInt64).clone();
+    atoms.atom_vertex_numbers = torch::from_blob(ids.data(), {atoms.num_atoms}, torch::kInt64).clone();
 
     loc += block_size; // new loc is at the end of this chunk of data
 
@@ -420,7 +434,7 @@ MolecularInfo TrajectoryWriter::load_xyz_file(const std::string& xyz_file_name) 
 
     // tensor setup
     atoms.num_atoms = num_atoms;
-    atoms.atom_vertex_numbers = torch::arange(0, num_atoms, 1).to(torch::kUInt64);
+    atoms.atom_vertex_numbers = torch::arange(0, num_atoms, 1).to(torch::kInt64);
     atoms.atom_types = torch::from_blob(types.data(), {num_atoms}, torch::kUInt8).clone();
     atoms.atom_positions = torch::from_blob(positions.data(), {num_atoms, 3}).clone();
 

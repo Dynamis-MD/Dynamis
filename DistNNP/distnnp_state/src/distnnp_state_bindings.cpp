@@ -14,6 +14,7 @@ PYBIND11_MODULE(distnnp_state_impl, m)
         .def_readwrite("atom_positions", &distnnp_state::MolecularInfo::atom_positions)
         .def_readwrite("atom_velocities", &distnnp_state::MolecularInfo::atom_velocities)
         .def_readwrite("atom_forces", &distnnp_state::MolecularInfo::atom_forces)
+        .def_readwrite("atom_masses", &distnnp_state::MolecularInfo::atom_masses)
         .def_readwrite("edge_counts", &distnnp_state::MolecularInfo::edge_counts);
 
     py::class_<distnnp_state::DistEnvironment>(m, "DistEnvironment")
@@ -94,11 +95,12 @@ PYBIND11_MODULE(distnnp_state_impl, m)
         .def("build_halo_maps", &distnnp_state::SFCPartitioner::build_halo_maps);
 
     py::class_<distnnp_state::TrajectoryWriter>(m, "TrajectoryWriter")
-        .def(py::init<uint32_t, py::bytes, const std::string &, std::string>(),
+        .def(py::init<uint32_t, py::bytes, const std::string &, const std::string &, const std::string &>(),
              py::arg("global_rank"),
              py::arg("run_id"),
              py::arg("author"),
-             py::arg("output_dir") = "./trajectory")
+             py::arg("output_dir") = "./trajectory",
+             py::arg("output_file") = "trajectory.distnnp")
         .def("initialize", &distnnp_state::TrajectoryWriter::initialize,
              "Writes front matter and initializes environment from an xyz file",
              py::arg("input_file_name"),

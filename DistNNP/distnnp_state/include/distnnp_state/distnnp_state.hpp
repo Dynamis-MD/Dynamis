@@ -12,6 +12,7 @@ namespace distnnp_state
         torch::Tensor atom_positions;     // Tensor of shape [num_atoms, 3] containing atomic positions
         torch::Tensor atom_velocities;    // Tensor of shape [num_atoms, 3] containing atomic velocities
         torch::Tensor atom_forces;        // Tensor of shape [num_atoms, 3] containing atomic forces
+        torch::Tensor atom_masses;        // Tensor of shape [num_atoms, 3] containing atomic forces
         torch::Tensor edge_counts; // [num_atoms], optional per-atom edge cost for weighted partitioning. Undefined = unweighted.
     };
 
