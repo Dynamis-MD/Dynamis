@@ -157,29 +157,11 @@ class Simulator:
 
         return sim_config
 
-    def _move_molecular_info_to_device(
-        self, molecular_system: MolecularInfo, device: torch.device
-    ) -> MolecularInfo:
-        for field in [
-            "atom_vertex_numbers",
-            "atom_types",
-            "atom_positions",
-            "atom_velocities",
-            "atom_forces",
-            "edge_counts",
-        ]:
-            if hasattr(molecular_system, field):
-                tensor = getattr(molecular_system, field)
-                if tensor is not None and tensor.numel() > 0:
-                    setattr(molecular_system, field, tensor.to(device))
-        return molecular_system
-
     def initialize_simulator_state(
         self, molecular_system: MolecularInfo, device: Optional[torch.device] = None
     ) -> None:
         if device is None:
             device = self.device
-        molecular_system = self._move_molecular_info_to_device(molecular_system, device)
         self.state = SimState(
             molecular_system=molecular_system,
             partitioner=self._get_partitioner(),
@@ -216,6 +198,8 @@ class Simulator:
             device=self.device
         )
         global_mol_info.atom_forces = torch.zeros_like(global_mol_info.atom_positions)
+        atom_masses_on_device = TORCH_ATOMIC_MASSES.to(self.device)
+        global_mol_info.atom_masses = atom_masses_on_device[global_mol_info.atom_types.to(torch.long)].to(self.device)
 
         # (2) initialize simulator state from the global system and partition it.
         self.initialize_simulator_state(global_mol_info, device=self.device)
@@ -231,7 +215,7 @@ class Simulator:
         self.model.initialize_buffers(
             self.state.partition_info, device=device if device else self.device
         )
-        self.writer.update_atom_counts(self.state.local_partition_info.atom_counts)
+        self.writer.update_atom_counts(self.state.local_partition_info.atom_counts.to(torch.uint32))
 
     def _set_state(self, state: SimState):
         self.state = state
@@ -262,6 +246,7 @@ class Simulator:
             # if should_log(total_done):
                 # _log_energy(total_done, energy)
             if self.should_write_traj(total_done):
+                self.state.local_state.atom_vertex_numbers = self.state.local_partition_info.partition_indices
                 self.writer.submit(total_done, self.state.local_state)
             total_done += 1
         self.writer.flush()
