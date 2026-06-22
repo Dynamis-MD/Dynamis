@@ -11,7 +11,6 @@ from distnnp_state import (
     TorchDistEnv,
 )
 
-from distnnp_state.masses import TORCH_ATOMIC_MASSES
 from distnnp import SimState
 
 import json
@@ -48,11 +47,9 @@ def generate_synthetic_dataset(
     mol_info.atom_velocities = (torch.randn(num_atoms, 3, generator=gen) * 0.1).to(
         device
     )
-    atom_masses_on_device = TORCH_ATOMIC_MASSES.to(device)
     mol_info.atom_types = torch.randint(
         1, 100, (num_atoms,), dtype=torch.long, device=device
     )
-    mol_info.atom_masses = atom_masses_on_device[mol_info.atom_types].to(device)
     mol_info.atom_forces = torch.zeros_like(mol_info.atom_positions)
 
     return mol_info
