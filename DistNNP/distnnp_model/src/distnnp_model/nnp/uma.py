@@ -715,9 +715,12 @@ class MaskedHeadWrapper(nn.Module):
                 correct_forces = -1 * torch.autograd.grad(
                     local_energy, 
                     data.pos, 
-                    create_graph=self.original_head.training, # Retain graph if training
-                    retain_graph=True
+                    # create_graph=self.training, # Retain graph if training
+                    # retain_graph=True
                 )[0]
+                ghost_forces = correct_forces[num_local:]
+                print(f"Ghost forces sum: {ghost_forces.abs().sum().item()}", file=log_file, flush=True)
+                print(f"Ghost forces == 0? {torch.all(ghost_forces == 0).item()}", file=log_file, flush=True)
                 outputs[forces_key] = correct_forces
         else:
             outputs = self.original_head(data, emb)
@@ -938,8 +941,6 @@ class UMAModel(DistNNPModel):
         data["num_global"] = torch.tensor([num_global], device=device)
         data.to(device)
 
-        # self.main_model.backbone.merge_MOLE_model(data)
-        # self.main_model.output_heads["energyandforcehead"].merge_MOLE_model(data)
         self.predictor.move_to_device()
         pred = self.predict(data)
 
@@ -947,21 +948,15 @@ class UMAModel(DistNNPModel):
         energy = pred[f"{datasets}_energy"]
         forces = pred[f"{datasets}_forces"]
 
-        # 2. Allocate a clean leaf node to capture the VJP
         dummy_local = torch.zeros((num_local, 3), device=device, requires_grad=True)
-
-        # 3. Re-create the communication graph topology
         dummy_full = FeaturePushToExchange.apply(
             dummy_local, distributed_state, self.position_exchanger
         )
-
-        # 4. Supply F_full as grad_output to trigger M^T * F_full
         dummy_full.backward(forces)
-
-        # 5. dummy_local.grad now contains the exact, mathematically correct F_local
         local_forces = dummy_local.grad
+        return energy.detach(), local_forces.detach()
 
         # stress = pred[calc_key].detach().cpu().numpy().reshape(3, 3)
         # hessian = pred[calc_key].detach().cpu().numpy().squeeze()
 
-        return energy.detach(), local_forces.detach()
+        return energy.detach(), forces.detach()

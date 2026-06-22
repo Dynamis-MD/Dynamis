@@ -51,7 +51,7 @@ def test_uma_distributed_parity():
     # ==========================================
     # 2. Setup Global Data (Ground Truth)
     # ==========================================
-    total_atoms = 4
+    total_atoms = 20
 
     # Use a fixed seed on all ranks so they generate the same global structure
     torch.manual_seed(42)
@@ -193,18 +193,24 @@ def test_uma_distributed_parity():
         print("Energy Parity Passed!")
 
     # B. Check Forces Parity (Local forces must exactly match their slice of global forces)
-    # The dist_model only computes grad for n_local atoms
     n_local = state.local_molecular_info.num_atoms
-    
-    # Each rank gathers back correctly to global
     local_indices = state.local_partition_info.partition_indices[:n_local].long().to(device)
+
+    # ghost_indices = state.local_partition_info.recv_ghost_indices.long().to(device)
+    # all_indices = torch.cat([local_indices, ghost_indices], dim=0)
+    # unreduced_forces = local_forces.to(device) # Shape: [n_local + n_ghost, 3]
+    # gathered_forces = [torch.zeros((total_atoms, 3), device=device) for _ in range(world_size)] if rank == 0 else None
+    # rank_force = torch.zeros((total_atoms, 3), device=device)
+    # rank_force.scatter_(0, all_indices.unsqueeze(-1).expand(-1, 3), unreduced_forces)
+    # if world_size > 1:
+    #     dist.gather(rank_force, gather_list=gathered_forces, dst=0)
+    # else:
+    #     gathered_forces = [rank_force]
+
     local_forces = local_forces.to(device)
-    
     gathered_forces = [torch.zeros((total_atoms, 3), device=device) for _ in range(world_size)] if rank == 0 else None
-    
     rank_force = torch.zeros((total_atoms, 3), device=device)
     rank_force.scatter_(0, local_indices.unsqueeze(-1).expand(-1, 3), local_forces[:n_local])
-
     if world_size > 1:
         dist.gather(rank_force, gather_list=gathered_forces, dst=0)
     else:
