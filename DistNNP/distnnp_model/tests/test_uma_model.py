@@ -14,8 +14,8 @@ from distnnp_state import (
 )
 
 try:
-    from fairchem.core import pretrained_mlip, FAIRChemCalculator
-    from ase import Atoms
+    from fairchem.core import pretrained_mlip
+    from fairchem.core.datasets.atomic_data import AtomicData
     HAS_FAIRCHEM = True
 except ImportError:
     HAS_FAIRCHEM = False
@@ -39,13 +39,14 @@ def test_uma_distributed_parity():
     rank, local_rank, world_size, nnodes = setup_distributed()
     if world_size < 2:
         pytest.skip("Parity test requires at least 2 GPUs. Run with torchrun or mpirun.")
+    log = open(f"/p/lustre1/smolenski1/rank_{rank}.log", "w")
 
     # device = f"cuda:{local_rank}"
     device = "cuda"
 
-    predictor = pretrained_mlip.get_predict_unit("uma-s-1p2", device=device)
-    standard_calc = FAIRChemCalculator(predictor, task_name="omol")
-    dist_model = UMAModel("uma-s-1p2", device=device)
+    if rank == 0:
+        predictor = pretrained_mlip.get_predict_unit("uma-s-1p2", device=device)
+    dist_model = UMAModel("uma-s-1p2", rank, device=device, log=log)
 
     # ==========================================
     # 2. Setup Global Data (Ground Truth)
@@ -57,17 +58,10 @@ def test_uma_distributed_parity():
     # Give enough spatial spread to ensure cutoffs divide the space reasonably
     global_positions = torch.rand((total_atoms, 3), device=device) * 10.0
     global_atomic_numbers = torch.randint(1, 10, (total_atoms,), device=device, dtype=torch.long)
+    print(f"global_positions: {global_positions}, global_atomic_numbers: {global_atomic_numbers}")
     global_cell = torch.eye(3, device=device) * 10.0
     global_pbc = torch.tensor([True, True, True], device=device)
     cutoff = 5.0
-
-    ase_system = Atoms(
-        numbers=global_atomic_numbers.cpu().clone().detach(),
-        positions=global_positions.cpu().clone().detach(),
-        cell=global_cell.cpu().clone().detach(),
-        pbc=global_pbc.cpu().clone().detach(),
-        info={"charge": 0, "spin": 1},
-    )
 
     # ==========================================
     # 3. Setup Distributed State (Partitioning)
@@ -94,6 +88,7 @@ def test_uma_distributed_parity():
     sim_config.ghost_cutoff_buffer = 0.5
     
     partitioner = KDTreePartitioner()
+    global_mol.atom_positions = global_mol.atom_positions
     partition_info = partitioner.partition(global_mol, env)
     partitioner.build_halo_maps(partition_info, global_mol, env, sim_config)
     if dist.is_initialized() and dist.get_world_size() > 1:
@@ -101,6 +96,7 @@ def test_uma_distributed_parity():
             partition_info.global_send_recv_matrix, 
             op=dist.ReduceOp.SUM
         )
+    global_mol.atom_positions = global_mol.atom_positions
 
     local_mol = MolecularInfo()
     local_mol.atom_positions = global_mol.atom_positions[
@@ -125,45 +121,47 @@ def test_uma_distributed_parity():
     state.local_partition_info = partition_info
     state.sim_config = sim_config
 
-    #######################
-    n_local = state.local_molecular_info.num_atoms
-    # Number of ghost atoms this rank is supposed to receive
-    n_ghosts = state.local_partition_info.recv_ghost_indices.shape[0]
-    max_allowed_index = (n_local + n_ghosts) - 1
-
-    edge_index = state.local_partition_info.edge_index_halo
-
-
     dist_model.initialize_buffers(partition_info, device)
 
     # ==========================================
     # 4. Forward & Backward Pass: STANDARD MODEL
     # ==========================================
-    data = type("Data", (object,), {
-        "pos": global_positions,
-        "atomic_numbers": global_atomic_numbers,
-        "cell": sim_config.cell.unsqueeze(0),
-        "natoms": torch.tensor([total_atoms], device=device),
-        "pbc": sim_config.pbc.unsqueeze(0),
-        "batch": torch.zeros(total_atoms, dtype=torch.long, device=device),
-        "tags": torch.zeros(total_atoms, dtype=torch.long, device=device),
-        # "edge_index": global_edge_index,
-    })()
-
-    # Build strict Graph for Fairchem if needed
-    with torch.no_grad():
-        global_edge_index, _, _ = radius_graph_pbc_cuda(
-            data,
-            radius=sim_config.cutoff,
-            max_num_neighbors_threshold=0,
-            enforce_max_neighbors_strictly=False,
-        )
-
-    data.edge_index = global_edge_index
     if rank == 0:
+        cell = sim_config.cell.unsqueeze(0)
+        pbc = sim_config.pbc.unsqueeze(0)
+        # Build strict Graph for Fairchem if needed
+        with torch.no_grad():
+            global_edge_index, cell_offsets, _ = radius_graph_pbc_cuda(
+                type("Data", (object,), {
+                    "pos": global_positions,
+                    "cell": cell,
+                    "natoms": torch.tensor([total_atoms], device=device),
+                    "pbc": pbc,
+                })(),
+                radius=sim_config.cutoff,
+                max_num_neighbors_threshold=0,
+                enforce_max_neighbors_strictly=False,
+            )
+        data = AtomicData(
+            global_positions,
+            global_atomic_numbers,
+            cell,
+            pbc,
+            torch.tensor([total_atoms], dtype=torch.long, device=device),
+            global_edge_index,
+            -cell_offsets,
+            torch.tensor([global_edge_index.shape[1]], dtype=torch.long, device=device),
+            torch.zeros(1, dtype=torch.long, device=device), # charge
+            torch.ones(1, dtype=torch.long, device=device), # spin
+            torch.zeros(total_atoms, dtype=torch.long, device=device), # fixed
+            torch.zeros(total_atoms, dtype=torch.long, device=device), # tags
+            dataset="omol",
+        )
+        data.to(device)
         # Fairchem Backbone Output
-        global_energy = standard_calc.get_potential_energy(ase_system)
-        global_forces = standard_calc.get_forces(ase_system)
+        predictor.move_to_device()
+        pred = predictor.predict(data)
+        global_energy, global_forces = pred["energy"], pred["forces"]
 
     # ==========================================
     # 5. Forward & Backward Pass: DISTRIBUTED MODEL
@@ -183,13 +181,12 @@ def test_uma_distributed_parity():
     # ==========================================
     
     # A. Check Energy Parity (Sum of local energies == global energy)
-    local_energy_sum = torch.tensor([local_energy], device=device)
-    dist.all_reduce(local_energy_sum, op=dist.ReduceOp.SUM)
+    dist.all_reduce(local_energy, op=dist.ReduceOp.SUM)
     
     if rank == 0:
-        print(f"Energy from distributed model: {local_energy_sum.item()}, global energy: {global_energy}")
+        print(f"Energy from distributed model: {local_energy.item()}, global energy: {global_energy}")
         torch.testing.assert_close(
-            local_energy_sum.item(), global_energy, 
+            local_energy.item(), global_energy.item(),
             rtol=1e-3, atol=1e-3, # Use generous tolerance for reduction ordering differences
             msg="Distributed total energy does not match Standard model energy!"
         )
@@ -200,7 +197,8 @@ def test_uma_distributed_parity():
     n_local = state.local_molecular_info.num_atoms
     
     # Each rank gathers back correctly to global
-    local_indices = state.local_partition_info.partition_indices[:n_local].long()
+    local_indices = state.local_partition_info.partition_indices[:n_local].long().to(device)
+    local_forces = local_forces.to(device)
     
     gathered_forces = [torch.zeros((total_atoms, 3), device=device) for _ in range(world_size)] if rank == 0 else None
     
@@ -214,8 +212,14 @@ def test_uma_distributed_parity():
         
     if rank == 0:
         reconstructed_global_forces = torch.sum(torch.stack(gathered_forces), dim=0)
+        global_forces_tensor = torch.tensor(global_forces, device=device)
+        print(f"Forces from distributed model: {reconstructed_global_forces}, global forces: {global_forces}")
+
+        max_diff = torch.max(torch.abs(reconstructed_global_forces - global_forces_tensor))
+        print(f"Maximum Force Difference: {max_diff.item():.6f}")
+
         torch.testing.assert_close(
-            reconstructed_global_forces, global_forces,
+            reconstructed_global_forces, global_forces_tensor,
             rtol=1e-3, atol=1e-3,
             msg="Distributed forces do not match Standard model forces!"
         )
