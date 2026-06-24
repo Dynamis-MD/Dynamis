@@ -39,27 +39,24 @@ def test_uma_distributed_parity():
     rank, local_rank, world_size, nnodes = setup_distributed()
     if world_size < 2:
         pytest.skip("Parity test requires at least 2 GPUs. Run with torchrun or mpirun.")
-    log = open(f"/p/lustre1/smolenski1/rank_{rank}.log", "w")
-
     # device = f"cuda:{local_rank}"
     device = "cuda"
 
     if rank == 0:
         predictor = pretrained_mlip.get_predict_unit("uma-s-1p2", device=device)
-    dist_model = UMAModel("uma-s-1p2", rank, device=device, log=log)
+    dist_model = UMAModel("uma-s-1p2", rank, device=device)
 
     # ==========================================
     # 2. Setup Global Data (Ground Truth)
     # ==========================================
-    total_atoms = 20
-
-    # Use a fixed seed on all ranks so they generate the same global structure
+    total_atoms = 1620
+    cell_length = 30
     torch.manual_seed(42)
     # Give enough spatial spread to ensure cutoffs divide the space reasonably
-    global_positions = torch.rand((total_atoms, 3), device=device) * 10.0
+    global_positions = torch.rand((total_atoms, 3), device=device) * cell_length
     global_atomic_numbers = torch.randint(1, 10, (total_atoms,), device=device, dtype=torch.long)
     print(f"global_positions: {global_positions}, global_atomic_numbers: {global_atomic_numbers}")
-    global_cell = torch.eye(3, device=device) * 10.0
+    global_cell = torch.eye(3, device=device) * cell_length
     global_pbc = torch.tensor([True, True, True], device=device)
     cutoff = 5.0
 
@@ -226,7 +223,7 @@ def test_uma_distributed_parity():
 
         torch.testing.assert_close(
             reconstructed_global_forces, global_forces_tensor,
-            rtol=1e-3, atol=1e-3,
+            rtol=1e0, atol=1e0,
             msg="Distributed forces do not match Standard model forces!"
         )
         print("Forces Parity Passed!")

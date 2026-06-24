@@ -41,8 +41,6 @@ from distnnp_state import (
     radius_graph_pbc_cuda,
 )
 
-log_file = None
-
 def balance_channels_batched(
     emb: torch.Tensor,
     target: torch.Tensor,
@@ -104,7 +102,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
     def set_MOLE_coefficients(self, atomic_numbers_full, batch_full, csd_mixed_emb):
         _rank = dist.get_rank() if dist.is_initialized() else -1
         if self.num_experts == 0:
-            # # print(f"[DEBUG] Rank {_rank}: set_MOLE_coefficients: num_experts=0, skipping", flush=True)
             return
         
         # OPTIMIZATION: Cache MOLE coefficients - compute once on first call, reuse forever.
@@ -113,11 +110,9 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         # Use getattr because __init__ might be bypassed during pickle loading (torch.load)
         cached = getattr(self, "_cached_mole_coefficients", None)
         if cached is not None:
-            # # print(f"[DEBUG] Rank {_rank}: set_MOLE_coefficients: CACHE HIT, reusing coefficients", flush=True)
             self.global_mole_tensors.expert_mixing_coefficients = cached
             return
         
-        # # print(f"[DEBUG] Rank {_rank}: set_MOLE_coefficients: CACHE MISS, computing coefficients", flush=True)
         
         # Ensure inputs are on correct device
         if self.use_composition_embedding:
@@ -152,18 +147,14 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                         local_sum_cuda = local_sum.cuda()
                         local_count_cuda = local_count.cuda()
                         
-                        # # print(f"[DEBUG] Rank {_rank}: set_MOLE: calling all_reduce (CPU->CUDA path)...", flush=True)
                         dist_nn.all_reduce(local_sum_cuda)
                         dist_nn.all_reduce(local_count_cuda)
-                        # # print(f"[DEBUG] Rank {_rank}: set_MOLE: all_reduce done (CPU->CUDA path)", flush=True)
                         
                         local_sum = local_sum_cuda.cpu()
                         local_count = local_count_cuda.cpu()
                     else:
-                        # # print(f"[DEBUG] Rank {_rank}: set_MOLE: calling all_reduce (direct path)...", flush=True)
                         dist_nn.all_reduce(local_sum)
                         dist_nn.all_reduce(local_count)
-                        # # print(f"[DEBUG] Rank {_rank}: set_MOLE: all_reduce done (direct path)", flush=True)
                     
                     # Match eSCNMDMoeBackbone behavior for include_self
                     # Default version 1.0 uses include_self=True
@@ -245,7 +236,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
     def forward(self, data_dict):
         # DEBUG: Track forward pass entry
         _rank = dist.get_rank() if dist.is_initialized() else 0
-        # # print(f"[DEBUG] Rank {_rank}: forward() START", flush=True)
         
         # We need to inject self.exchanger.exchange(x_message) before each block.
 
@@ -260,7 +250,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             dataset=data_dict.get("dataset", default=None),
         )
 
-        # # print(f"[DEBUG] Rank {_rank}: calling set_MOLE_coefficients()...", flush=True)
         num_local = None
         if "num_local" in data_dict:
              num_local = data_dict["num_local"]
@@ -273,7 +262,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             batch_full=data_dict["batch_full"],
             csd_mixed_emb=csd_mixed_emb,
         )
-        # # print(f"[DEBUG] Rank {_rank}: set_MOLE_coefficients() done", flush=True)
 
         if not self.regress_config.direct_forces:
             if self.regress_config.forces or self.regress_config.stress:
@@ -568,7 +556,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                     sys_node_embedding=sys_node_embedding,
                     node_offset=data_dict["gp_node_offset"],
                 )
-                print(f"x_message[:, :2, :2] {i}: {x_message[:, :2, :2]}", file=log_file, flush=True)
                 x_message = self.balance_channels(
                     x_message,
                     charge=data_dict["charge"],
@@ -576,7 +563,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                     natoms=data_dict["num_global"],
                     batch=data_dict["batch"],
                 )
-                print(f"x_message[:, :2, :2] (after balance_channels) {i}: {x_message[:, :2, :2]}", file=log_file, flush=True)
             if self.profiler:
                 self.profiler.stop(f"mp_block_{i}")
 
@@ -599,15 +585,12 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             if self.profiler:
                 self.profiler.stop(f"feature_exchange_{i}")
         # Final layer norm
-        # # print(f"[DEBUG] Rank {_rank}: MP layers done, applying final norm", flush=True)
-        print(f"DISTUMA: x_message: {x_message[:, 3, 3]}", file=log_file)
         x_message = self.norm(x_message)
         
         out = {
             "node_embedding": x_message,
             "batch": data_dict["batch"],
         }
-        # # print(f"[DEBUG] Rank {_rank}: forward() END", flush=True)
         return out
 
     def merge_MOLE_model(self, data):
@@ -694,14 +677,12 @@ class MaskedHeadWrapper(nn.Module):
             
             # Recompute the per-atom energies manually using the head's block
             node_energies = self.original_head.energy_block(scalar_embedding).view(-1)
-            print(f"node_energies: {node_energies}", file=log_file, flush=True)
             # Sum ONLY the local atoms
             local_energy = node_energies.sum().view(1)
 
             # Apply mean reduction if the underlying model is configured for it
             if getattr(self.original_head, "reduce", "sum") == "mean":
                 local_energy = local_energy / num_local
-            print(f"local_energy: {local_energy}", file=log_file, flush=True)
 
             # Safely overwrite the returned energy scalar in the outputs dictionary
             prefix = getattr(self.original_head, "prefix", None)
@@ -718,13 +699,9 @@ class MaskedHeadWrapper(nn.Module):
                     # create_graph=self.training, # Retain graph if training
                     # retain_graph=True
                 )[0]
-                ghost_forces = correct_forces[num_local:]
-                print(f"Ghost forces sum: {ghost_forces.abs().sum().item()}", file=log_file, flush=True)
-                print(f"Ghost forces == 0? {torch.all(ghost_forces == 0).item()}", file=log_file, flush=True)
                 outputs[forces_key] = correct_forces
         else:
             outputs = self.original_head(data, emb)
-        print(f"outputs: {outputs}", file=log_file, flush=True)
         return outputs
 
 class UMAModel(DistNNPModel):
@@ -736,11 +713,7 @@ class UMAModel(DistNNPModel):
         overrides: dict | None = None,
         device: Literal["cuda", "cpu"] | None = None,
         exchanger: Exchanger | None = None,
-        log = None,
     ):
-        global log_file
-        log_file = log
-
         self.device = device
         self.global_rank = global_rank
         inference_settings = guess_inference_settings(inference_settings)
@@ -847,14 +820,12 @@ class UMAModel(DistNNPModel):
             if task_name not in output:
                 continue
 
-            print(f"pred_output[{task_name}] pre-denorm: {output[task_name]}", file=log_file, flush=True)
             if self.global_rank == 0:
                 pred_output[task_name] = task.normalizer.denorm(
                     output[task_name][task.property]
                 )
             else:
                 pred_output[task_name] = task.normalizer.rmsd * output[task_name][task.property]
-            print(f"pred_output[{task_name}] post-denorm: {pred_output[task_name]}", file=log_file, flush=True)
             if self.predictor.assert_on_nans:
                 assert (
                     torch.isfinite(pred_output[task_name]).all()
@@ -866,7 +837,6 @@ class UMAModel(DistNNPModel):
                 ghost_z = data["atomic_numbers_full"][data["num_local"]:]
                 ghost_refs_energy = task.element_references.element_references[ghost_z].sum()
                 pred_output[task_name] = pred_output[task_name] - ghost_refs_energy
-            print(f"pred_output[{task_name}] post-undo_refs: {pred_output[task_name]}", file=log_file, flush=True)
         return pred_output
 
     def __call__(
@@ -944,7 +914,6 @@ class UMAModel(DistNNPModel):
         self.predictor.move_to_device()
         pred = self.predict(data)
 
-        print(f"pred: {pred}", file=log_file, flush=True)
         energy = pred[f"{datasets}_energy"]
         forces = pred[f"{datasets}_forces"]
 
