@@ -213,7 +213,7 @@ class Simulator:
         self.state.sync_and_repartition()
         # TODO: ADD appropriate barriers/synchronization if needed here
         self.model.initialize_buffers(
-            self.state.partition_info, device=device if device else self.device
+            self.state.local_partition_info, device=device if device else self.device
         )
         self.writer.update_atom_counts(self.state.local_partition_info.atom_counts.to(torch.uint32))
 

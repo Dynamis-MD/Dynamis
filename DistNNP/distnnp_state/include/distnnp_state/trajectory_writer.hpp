@@ -18,8 +18,16 @@ public:
     void flush();
 
     void update_atom_counts(torch::Tensor counts) {
-        uint32_t* data_ptr = counts.to(torch::kCPU).contiguous().data_ptr<uint32_t>();
-        rank_atom_counts = std::vector<uint32_t>(data_ptr, data_ptr + counts.numel());
+        // Must save to a named variable before calling data_ptr — the temporary
+        // from .to(kCPU).contiguous() would be destroyed at the semicolon,
+        // leaving a dangling pointer into freed storage.
+        torch::Tensor cpu_counts = counts.to(torch::kCPU).to(torch::kLong).contiguous();
+        int64_t* data = cpu_counts.data_ptr<int64_t>();
+        rank_atom_counts.clear();
+        rank_atom_counts.reserve(cpu_counts.numel());
+        for (int64_t i = 0; i < cpu_counts.numel(); i++) {
+            rank_atom_counts.push_back(static_cast<uint32_t>(data[i]));
+        }
     }
 
     void write_to_xyz(const MolecularInfo& state, const std::string& file_name = "output.xyz");

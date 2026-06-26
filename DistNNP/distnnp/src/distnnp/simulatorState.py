@@ -186,6 +186,8 @@ class SimState:
         self._state.local_partition_info = new_partition_info
         self._state.global_molecular_info = global_mol_info
 
-        self.setup_mass_and_forces(
+        new_local = self.setup_mass_and_forces(
             partition_info=new_partition_info, molecular_system=global_mol_info
         )
+        self._local_molecular_info = new_local
+        self._state.local_molecular_info = new_local

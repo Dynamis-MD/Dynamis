@@ -69,6 +69,10 @@ MolecularInfo TrajectoryWriter::initialize(const std::string& input_file_name, c
         return state;
     }
 
+    if (state.num_atoms == 0 || !state.atom_types.defined()) {
+        throw std::runtime_error("TrajectoryWriter::initialize: failed to load '" + input_file_name + "'");
+    }
+
     write_front_matter(time_per_step, steps_per_write, state, rank);
 
     return state;
@@ -239,6 +243,7 @@ void TrajectoryWriter::submit(uint32_t step, MolecularInfo state) {
     for (int i = 0; i < rank; i++) {
         atom_count += rank_atom_counts.at(i);
     }
+    std::cout << "Rank " << rank << " writing " << rank_atom_counts.at(rank) << " atoms at offset " << offset << std::endl;
 
     // doing sizeof here to be more explicit about the calculations
     uint32_t indices_offset = offset + (atom_count * sizeof(int64_t));
