@@ -209,18 +209,28 @@ class GPUDirectExchanger(Exchanger):
         world_size = dist.get_world_size()
         n_local = len(partition_info.partition_indices)
 
-        total_recv = int(partition_info.global_send_recv_matrix.sum(dim=0)[rank].item())
-        total_send = int(partition_info.global_send_recv_matrix.sum(dim=1)[rank].item())
-
         send_offsets = partition_info.send_offsets
         recv_offsets = partition_info.recv_offsets
 
+        # Buffer sizes must come from this rank's own CSR offsets, which
+        # build_halo_maps fills locally and correctly. The global_send_recv_matrix
+        # is only populated for this rank's own row (it is never all-reduced in the
+        # pipeline), so sum(dim=0)[rank] wrongly returns num_local instead of the
+        # true ghost-recv count — under-sizing the ghost region and causing IPC
+        # peers to overflow x_buffer (and, at W=1, appending num_local phantom
+        # rows that corrupt the graph).
+        total_recv = int(recv_offsets[-1].item())  # ghost atoms this rank receives
+        total_send = int(send_offsets[-1].item())  # atoms this rank sends to peers
+
         # --- Allocate IPC buffers ---
+        # cudaIpcGetMemHandle rejects a 0-byte allocation, so allocate at least
+        # one row for the handle; CSR offsets bound all real reads/writes, so the
+        # padding row is never touched (matters at W=1 where total_send == 0).
         x_buffer = FeatureExchanger.allocate_ipc_buffer(
-            n_local + total_recv, feature_dim, rank
+            max(1, n_local + total_recv), feature_dim, rank
         )
         grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(
-            total_send, feature_dim, rank
+            max(1, total_send), feature_dim, rank
         )
 
         # --- Exchange IPC handles via NCCL broadcast ---
@@ -248,7 +258,9 @@ class GPUDirectExchanger(Exchanger):
 
         # Gather recv_offsets and num_local from all ranks
 
-        send_local_indices = torch.zeros(total_send, dtype=torch.int64, device=device)
+        send_local_indices = partition_info.send_local_indices.to(
+            device=device, dtype=torch.int64
+        )
 
         all_recv_offsets_list = [
             torch.zeros(world_size + 1, dtype=torch.int64, device=device)
