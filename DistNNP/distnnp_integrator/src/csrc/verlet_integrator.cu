@@ -32,7 +32,7 @@ namespace
       velocities[idx] += 0.5f * (forces[idx] / masses[idx / 3]) * dt;
     }
   }
-} 
+}
 
 namespace distnnp_integrator
 {
@@ -72,9 +72,9 @@ namespace distnnp_integrator
   }
 
   void VerletIntegrator::halfstep2(
-          torch::Tensor &velocities, 
-          const torch::Tensor &forces, 
-          const torch::Tensor &masses, 
+          torch::Tensor &velocities,
+          const torch::Tensor &forces,
+          const torch::Tensor &masses,
           const float dt)
   {
     assert(velocities.is_contiguous() && velocities.is_cuda());
