@@ -15,8 +15,8 @@ world_size = torch_distributed_env.world_size
 device = torch_distributed_env.device
 
 sim_config = SimulatorConfig(
-        timestep_fs=0.1,
-        total_steps=10,
+        timestep_fs=0.5,
+        total_steps=100,
         cutoff_angstrom=6.0,
         side_length_angstrom=20.0,
         ghost_buffer_angstrom=0.5,
