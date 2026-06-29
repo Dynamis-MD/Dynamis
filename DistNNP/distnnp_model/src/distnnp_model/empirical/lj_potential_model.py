@@ -42,9 +42,12 @@ def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma, n
     dr = positions[idx_i] - positions[idx_j]
     distances = torch.linalg.norm(dr, dim=1).clamp(min=1e-6)  # Avoid division by zero
 
-    # Exclude bonded pairs: anything closer than 2.5 Å is covalently bonded
-    # and sits deep inside the LJ repulsive wall
-    nonbonded = distances > 2.5
+    # Exclude covalent bonds from the LJ sum. All heavy-atom bond lengths fall
+    # below 2.1 Å (longest: S-S disulfide ~2.05 Å); the nearest non-bonded
+    # heavy-atom contacts in folded proteins start above ~2.4 Å. A cutoff of
+    # 2.2 Å sits cleanly in that gap, catching every bond without reaching into
+    # genuine non-bonded territory.
+    nonbonded = distances > 2.2
     idx_i = idx_i[nonbonded]
     idx_j = idx_j[nonbonded]
     distances = distances[nonbonded]
@@ -93,8 +96,6 @@ class LennardJonesPotentialModel(DistNNPModel):
     def initialize_buffers(
         self, partition_info: PartitionMessagePassingInfo, device
     ) -> None:
-        # For this simple LJ model, we don't have any learnable parameters or buffers that depend on the partitioning
-        # However, if we wanted to, we could initialize any necessary buffers here based on the partition_info
         self.position_exchanger.setup_exchanger(
             feature_dim=3, partition_info=partition_info, device=device
         )

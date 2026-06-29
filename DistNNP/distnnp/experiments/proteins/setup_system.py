@@ -71,7 +71,15 @@ def load_capsid_from_xyz(xyz_path: str, device: torch.device) -> tuple:
     kT = 2.577e-4  # amu * Å^2 * fs^-2 at 310 K
     masses = TORCH_MASSES[atom_types]  # shape (N,)
     std = torch.sqrt(kT / masses)  # shape (N,)
-    mol_info.atom_velocities = (torch.randn(num_atoms, 3, dtype=torch.float32) * std.unsqueeze(1)).to(device)
+    velocities = torch.randn(num_atoms, 3, dtype=torch.float32) * std.unsqueeze(1)
+
+    # Remove centre-of-mass drift (flying-ice-cube prevention): subtract the
+    # mass-weighted mean velocity so the whole capsid has zero net momentum.
+    total_mass = masses.sum()
+    com_vel = (masses.unsqueeze(1) * velocities).sum(dim=0) / total_mass  # (3,)
+    velocities -= com_vel.unsqueeze(0)
+
+    mol_info.atom_velocities = velocities.to(device)
 
     print(f"Loaded {num_atoms:,} atoms | bounding box: {box_size:.1f} Å")
     return mol_info, box_size
