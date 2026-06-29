@@ -42,6 +42,13 @@ def lennard_jones_potential(atom_types, positions, edge_index, epsilon, sigma, n
     dr = positions[idx_i] - positions[idx_j]
     distances = torch.linalg.norm(dr, dim=1).clamp(min=1e-6)  # Avoid division by zero
 
+    # Exclude bonded pairs: anything closer than 2.5 Å is covalently bonded
+    # and sits deep inside the LJ repulsive wall
+    nonbonded = distances > 2.5
+    idx_i = idx_i[nonbonded]
+    idx_j = idx_j[nonbonded]
+    distances = distances[nonbonded]
+
     # 2. Retrieve atom types for each pair
     type_i = atom_types[idx_i]
     type_j = atom_types[idx_j]
