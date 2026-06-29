@@ -6,12 +6,12 @@
 namespace
 {
   __global__ void verlet_halfstep1_kernel(
-          float *positions, 
-          float *velocities, 
-          const float *forces, 
-          const float *masses, 
-          const float dt, 
-          const int num_atoms)
+          float *positions,
+          float *velocities,
+          const float *forces,
+          const float *masses,
+          const float dt,
+          const int num_floats)
   {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_floats) {
@@ -27,11 +27,11 @@ namespace
           const float *forces,
           const float *masses,
           const float dt,
-          const int num_atoms)
+          const int num_floats)
   {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < num_atoms) {
-      velocities[idx] += 0.5f * (forces[idx] / masses[idx]) * dt;
+    if (idx < num_floats) {
+      velocities[idx] += 0.5f * (forces[idx] / masses[idx / 3]) * dt;
     }
   }
 } 
@@ -54,10 +54,10 @@ namespace distnnp_integrator
     assert(positions.device() == forces.device());
     assert(positions.device() == masses.device());
 
-    int num_atoms = positions.size(0);
+    int num_floats = positions.numel();  // N*3 — every coordinate component
 
     int threads_per_block = 256;
-    int blocks = (num_atoms + threads_per_block - 1) / threads_per_block;
+    int blocks = (num_floats + threads_per_block - 1) / threads_per_block;
 
     auto device_index = positions.device().index();
     auto stream = at::cuda::getCurrentCUDAStream(device_index);
@@ -68,7 +68,7 @@ namespace distnnp_integrator
         forces.data_ptr<float>(),
         masses.data_ptr<float>(),
         dt,
-        num_atoms);
+        num_floats);
 
     CUDACHECK(cudaGetLastError());
   }
@@ -86,10 +86,10 @@ namespace distnnp_integrator
     assert(velocities.device() == forces.device());
     assert(velocities.device() == masses.device());
 
-    int num_atoms = velocities.size(0);
+    int num_floats = velocities.numel();  // N*3 — every coordinate component
 
     int threads_per_block = 256;
-    int blocks = (num_atoms + threads_per_block - 1) / threads_per_block;
+    int blocks = (num_floats + threads_per_block - 1) / threads_per_block;
 
     auto device_index = velocities.device().index();
     auto stream = at::cuda::getCurrentCUDAStream(device_index);
@@ -99,7 +99,7 @@ namespace distnnp_integrator
         forces.data_ptr<float>(),
         masses.data_ptr<float>(),
         dt,
-        num_atoms);
+        num_floats);
 
     CUDACHECK(cudaGetLastError());
   }
