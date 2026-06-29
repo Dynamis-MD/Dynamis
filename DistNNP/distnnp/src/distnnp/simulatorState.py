@@ -98,7 +98,7 @@ class SimState:
 
     @property
     def pos(self) -> torch.Tensor:
-        return self._local_molecular_info.atom_positions
+        return self._state.local_molecular_info.atom_positions
 
     @property
     def vel(self) -> torch.Tensor:
@@ -114,7 +114,7 @@ class SimState:
 
     @property
     def local_state(self) -> MolecularInfo:
-        return self._local_molecular_info
+        return self._state.local_molecular_info
 
     @property
     def local_partition_info(self) -> PartitionMessagePassingInfo:
@@ -178,7 +178,9 @@ class SimState:
 
         self._state.local_partition_info = new_partition_info
         self._state.global_molecular_info = global_mol_info
+        self.parition_info = new_partition_info
 
-        self.setup_mass_and_forces(
+        self._local_molecular_info = self.setup_mass_and_forces(
             partition_info=new_partition_info, molecular_system=global_mol_info
         )
+        self._state.local_molecular_info = self._local_molecular_info
