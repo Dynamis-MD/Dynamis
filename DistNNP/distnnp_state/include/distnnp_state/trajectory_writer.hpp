@@ -8,29 +8,41 @@ namespace distnnp_state {
 
 class TrajectoryWriter {
 public:
-    explicit TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, std::string output_dir = "./trajectory");
+    explicit TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, const std::string& output_dir = "./trajectory", const std::string& output_file = "trajectory.distnnp");
     ~TrajectoryWriter();
 
     // TODO eventually this can be initialize with the custom binary format as a file
     MolecularInfo initialize(const std::string& input_file_name, const float time_per_step, const uint32_t steps_per_write);
 
-    void write_frame(uint32_t frame_idx, torch::Tensor indices, torch::Tensor positions, torch::Tensor velocities);
+    void submit(uint32_t step, MolecularInfo state);
+    void flush();
 
-    void update_atom_counts(std::vector<uint32_t> counts) {
-        rank_atom_counts = std::move(counts);
+    void update_atom_counts(torch::Tensor counts) {
+        // Must save to a named variable before calling data_ptr — the temporary
+        // from .to(kCPU).contiguous() would be destroyed at the semicolon,
+        // leaving a dangling pointer into freed storage.
+        torch::Tensor cpu_counts = counts.to(torch::kCPU).to(torch::kLong).contiguous();
+        int64_t* data = cpu_counts.data_ptr<int64_t>();
+        rank_atom_counts.clear();
+        rank_atom_counts.reserve(cpu_counts.numel());
+        for (int64_t i = 0; i < cpu_counts.numel(); i++) {
+            rank_atom_counts.push_back(static_cast<uint32_t>(data[i]));
+        }
     }
 
     void write_to_xyz(const MolecularInfo& state, const std::string& file_name = "output.xyz");
 
 private:
+    std::string output_file;
     MolecularInfo load_xyz_file(const std::string& xyz_file_name);
     MolecularInfo load_distnnp_file(const std::string& xyz_file_name);
-    void write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state);
+    void write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state, uint32_t rank);
+
+    // only set to true if the file has been closed
+    bool flushed{ false };
 
     py::bytes run_id;
     std::string author;
-
-    uint32_t writes{ 0 };
 
     uint64_t total_atoms;
     uint32_t bytes_per_atom;

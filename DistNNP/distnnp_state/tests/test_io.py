@@ -55,8 +55,9 @@ def test_distnnp_io():
     with TrajectoryWriter(0, b"1234", "author", "./") as writer:
         env = writer.initialize("tests/xyz.xyz", 1.0, 1)
 
-        writer.update_atom_counts([6])
-        writer.write_frame(0, env.atom_vertex_numbers, env.atom_positions, env.atom_velocities)
+        writer.update_atom_counts(torch.tensor([6], dtype=torch.uint32))
+        writer.submit(0, env)
+        writer.flush()
 
     writer2 = TrajectoryWriter(1, b"1234", "author", "./")
     env2 = writer2.initialize("./trajectory.distnnp", 1.0, 1)
@@ -141,12 +142,16 @@ def test_write_frame():
     env2.atom_positions = torch.split(env2.atom_positions, 3)[1]
     env2.atom_velocities = torch.split(env2.atom_velocities, 3)[1]
 
-    base_writer.update_atom_counts([3, 3])
-    writer1.update_atom_counts([3, 3])
+    base_writer.update_atom_counts(torch.tensor([3, 3], dtype=torch.uint32))
+    writer1.update_atom_counts(torch.tensor([3, 3], dtype=torch.uint32))
 
     # we are assuming the front matter is fine, just reading the frame
-    base_writer.write_frame(0, env1.atom_vertex_numbers, env1.atom_positions, env1.atom_velocities)
-    writer1.write_frame(0, env2.atom_vertex_numbers, env2.atom_positions, env2.atom_velocities)
+    base_writer.submit(0, env1)
+    writer1.submit(0, env2)
+
+    # making sure the file is fully written to
+    base_writer.flush()
+    writer1.flush()
 
     # front matter size is 320
     format = "<232x 6Q 18f 18f"
