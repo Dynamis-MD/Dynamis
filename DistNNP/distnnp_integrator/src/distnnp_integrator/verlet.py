@@ -82,7 +82,7 @@ class Verlet(DistNNPIntegrator):
             step_size = self.dt
 
         state = dist_state.local_molecular_info
-        atom_masses = TORCH_MASSES.to(state.atom_positions.device)[state.atom_types.reshape(-1)]
+        atom_masses = TORCH_MASSES.to(state.atom_positions.device)[state.atom_types.reshape(-1).to(torch.long)]
 
         # 0. Compute forces
         energy, new_forces = model(dist_state)
