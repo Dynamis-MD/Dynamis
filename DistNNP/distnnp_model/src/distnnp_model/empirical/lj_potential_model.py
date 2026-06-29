@@ -105,12 +105,18 @@ class LennardJonesPotentialModel(DistNNPModel):
         local_atom_types = distributed_state.local_molecular_info.atom_types
 
         with torch.no_grad():
-            # Exchanger expects 2D [N, F], so we unsqueeze(1) then squeeze(1) back
-            atom_types = FeaturePushToExchange.apply(
-                local_atom_types.float().unsqueeze(1),
-                distributed_state,
-                self.atom_type_exchanger,
-            ).squeeze(1).long()  # type: ignore
+            # exchanger needs a 2D [N, 1] feature; the LJ energy needs 1D [N]
+            # atom-type indices. Without the reshape(-1), atom_types stays [N, 1],
+            # making sigma_ij [E, 1] and sigma_ij / distances broadcast to [E, E]
+            # -> energy (and forces) inflated ~E x, which blows positions up on the
+            # next integrator step and overflows the radius-graph grid size.
+            atom_types = (
+                FeaturePushToExchange.apply(
+                    local_atom_types.float(), distributed_state, self.atom_type_exchanger
+                )
+                .long()
+                .reshape(-1)
+            )  # type: ignore
 
         # Construct the radius graph with PBC using the local positions (including boundary atoms)
 
