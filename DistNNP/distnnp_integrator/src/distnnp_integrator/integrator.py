@@ -15,6 +15,5 @@ class DistNNPIntegrator(ABC):
         """
         raise NotImplementedError("Subclasses must implement the step method.")
     
-    @abstractmethod
     def reset(self) -> None:
         pass
