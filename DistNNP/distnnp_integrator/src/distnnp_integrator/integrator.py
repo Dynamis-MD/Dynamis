@@ -14,3 +14,7 @@ class DistNNPIntegrator(ABC):
         This method should be implemented by subclasses to perform the actual integration step.
         """
         raise NotImplementedError("Subclasses must implement the step method.")
+    
+    @abstractmethod
+    def reset(self) -> None:
+        pass

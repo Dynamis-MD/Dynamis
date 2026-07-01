@@ -19,6 +19,9 @@ class Verlet(DistNNPIntegrator):
         self.cpp_integrator = VerletIntegrator()
         self.prev_forces = None
 
+    def reset(self) -> None:
+        self.prev_forces = None
+        
     def halfstep1_(
         self,
         pos: torch.Tensor,

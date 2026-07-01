@@ -21,6 +21,9 @@ class Langevin(DistNNPIntegrator):
         self.cpp_integrator = LangevinIntegrator()
         self.prev_forces = None
 
+    def reset(self) -> None:
+        self.prev_forces = None
+
     def halfstep1_(
         self,
         pos: torch.Tensor,
