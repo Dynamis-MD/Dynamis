@@ -1,6 +1,7 @@
 #include "distnnp_state/distnnp_state.hpp"
 #include "distnnp_state/partitioner.hpp"
-#include "distnnp_state/radius_pbc.hpp"
+#include "distnnp_state/radius_graph.hpp"
+#include "distnnp_state/dist_graph_ops.hpp"
 #include "distnnp_state/trajectory_writer.hpp"
 #include <torch/extension.h>
 
@@ -131,4 +132,49 @@ PYBIND11_MODULE(distnnp_state_impl, m)
           py::arg("radius"),
           py::arg("max_num_neighbors"),
           py::arg("enforce_max_strictly"));
+
+    m.def("radius_graph_pbc_ex", &radius_graph_pbc_ex,
+          "Extended radius graph: accepts optional target_indices subset, returns "
+          "(edge_index, cell_shifts, num_neighbors_image, neighbor_counts).",
+          py::arg("pos"),
+          py::arg("cell"),
+          py::arg("pbc"),
+          py::arg("radius"),
+          py::arg("max_num_neighbors"),
+          py::arg("enforce_max_strictly"),
+          py::arg("target_indices") = c10::optional<at::Tensor>{});
+
+    m.def("radius_graph_pbc_counts_ex", &radius_graph_pbc_counts_ex,
+          "Count-only variant: returns just neighbor_counts[N_target] int32. "
+          "Skips edge buffer + prefix-sum + B4 write kernel (~50% faster).",
+          py::arg("pos"),
+          py::arg("cell"),
+          py::arg("pbc"),
+          py::arg("radius"),
+          py::arg("target_indices") = c10::optional<at::Tensor>{});
+
+    // ===== Distributed build_graph hot-path ops (Mode A) =====
+
+    m.def("filter_edges_to_radius", &filter_edges_to_radius,
+          "Filter edges built at r+skin down to true cutoff r: keep edge iff "
+          "||pos[src] + cell_shift @ cell - pos[dst]||^2 <= r^2. Order-preserving. "
+          "Fused CUDA kernel + compaction; replaces the ATen recompute (step 8).",
+          py::arg("edges"),
+          py::arg("cell_shifts"),
+          py::arg("pos"),
+          py::arg("cell"),
+          py::arg("radius"));
+
+    m.def("extract_halo_info", &extract_halo_info,
+          "Derive halo send/recv CSR + interior mask from per-rank edges "
+          "(dst in my_outer) via graph symmetry, grouped by peer and sorted by "
+          "global atom id within each peer (no NCCL). Returns "
+          "(send_offsets, send_local_indices, recv_offsets, recv_ghost_indices, "
+          "interior_mask, recv_atom_global). step 7.",
+          py::arg("edges"),
+          py::arg("pid_outer"),
+          py::arg("my_outer_atoms"),
+          py::arg("my_rank"),
+          py::arg("world_size"),
+          py::arg("N"));
 }

@@ -7,8 +7,8 @@
 //      → builds graph at cutoff, computes edge_counts, stores edge_index
 
 #include "distnnp_state/partitioner.hpp"
-#include "distnnp_state/sfc_cuda.hpp"
-#include "distnnp_state/radius_pbc.hpp"
+#include "distnnp_state/sfc.hpp"
+#include "distnnp_state/radius_graph.hpp"
 
 namespace distnnp_state
 {
@@ -132,13 +132,17 @@ static PartitionMessagePassingInfo do_partition(
         labels = torch::empty({N}, long_opts);
 
         if (weights.defined()) {
-            auto sorted_w = weights.to(torch::kFloat).index_select(0, perm);
+            // Exact int64 prefix sum (weights are integer edge counts). A float
+            // cumsum rounds above 2^24, making boundary atoms land on either
+            // side of a cut depending on FP rounding — non-deterministic across
+            // ranks → duplicate/missing edges. Integer arithmetic is exact.
+            auto sorted_w = weights.to(torch::kLong).index_select(0, perm);
             auto cumsum_w = sorted_w.cumsum(0);
-            float total = cumsum_w[-1].item<float>();
+            int64_t total = cumsum_w[-1].item<int64_t>();
 
             for (int64_t i = 0; i < N; i++) {
-                float cs = cumsum_w[i].item<float>();
-                int64_t p = static_cast<int64_t>(cs * static_cast<float>(W) / total);
+                int64_t cs = cumsum_w[i].item<int64_t>();
+                int64_t p = (total > 0) ? (cs * W) / total : int64_t(0);
                 p = std::max(p, int64_t(0));
                 p = std::min(p, W - 1);
                 labels[perm[i].item<int64_t>()] = p;
