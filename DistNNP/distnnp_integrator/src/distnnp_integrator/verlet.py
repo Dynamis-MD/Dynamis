@@ -17,6 +17,7 @@ class Verlet(DistNNPIntegrator):
         super().__init__()
         self.dt = dt
         self.cpp_integrator = VerletIntegrator()
+        self.prev_forces = None
 
     def halfstep1_(
         self,
@@ -85,8 +86,11 @@ class Verlet(DistNNPIntegrator):
         atom_masses = TORCH_MASSES.to(state.atom_positions.device)[state.atom_types.reshape(-1).to(torch.long)]
 
         # 0. Compute forces
-        energy, new_forces = model(dist_state)
-        state.atom_forces = new_forces
+        if self.prev_forces is None:
+            _, atom_forces = model(dist_state)
+        else:
+            state.atom_forces = self.prev_forces
+    
         # 1. Update v to half-step, and pos to full-step
         self.halfstep1_(
             state.atom_positions,
@@ -98,9 +102,10 @@ class Verlet(DistNNPIntegrator):
 
         # 2. Recompute forces at new positions
         energy, new_forces = model(dist_state)
-        state.atom_forces = new_forces
+    
+        self.prev_forces = new_forces
 
         # 3. Complete the velocity full-step update
         self.halfstep2_(
-            state.atom_velocities, state.atom_forces, atom_masses, step_size
+            state.atom_velocities, new_forces, atom_masses, step_size
         )
