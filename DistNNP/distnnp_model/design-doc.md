@@ -121,19 +121,26 @@ Step 7: Return
 
 ## `FeaturePushToExchange` — Autograd Interface
 
-Declared in `src/distnnp_model/comm/feature_push.py`. This is a `torch.autograd.Function` that wraps a halo exchange and makes it differentiable.
+Declared in `src/distnnp_model/comm/feature_push.py`. This is a `torch.autograd.Function` that makes halo exchange differentiable.
 
 ```python
-all_features = FeaturePushToExchange.apply(
-    features_to_push,  # [num_local, F]  — owned-atom features
-    state,             # DistNNPState
-    exchanger,         # Exchanger instance
-)  # → [num_local + num_ghost, F]
+class FeaturePushToExchange(Function):
+    @staticmethod
+    def forward(ctx, features_to_push, state, exchanger) -> Tensor:
+        # Returns: ghost_features [num_ghost, F]
+        ctx.save_for_backward(...)
+        return exchanger.feature_push_forward(features_to_push, state.local_partition_info)
+
+    @staticmethod
+    def backward(ctx, grad_output) -> Tuple[Tensor, None, None]:
+        # grad_output: [num_ghost, F] — gradients at ghost slots
+        # Returns: [num_local, F] — gradients accumulated on owned atoms
+        return exchanger.feature_push_backward(
+            grad_output, ctx._features_to_push_shape, state.local_partition_info
+        ), None, None
 ```
 
-`FeaturePushToExchange.apply` is the only correct entry point when forces are needed. Calling `exchanger.feature_push_forward` directly is only appropriate for inference without force computation (i.e., no `energy.backward()`).
-
-#### Forward semantics
+### Forward semantics
 
 Input: `features_to_push [num_local, F]` — features on owned atoms.
 
@@ -145,48 +152,50 @@ Operation:
 
 The returned tensor covers only ghost atoms, not local atoms. The caller concatenates them: `all_features = cat([local, ghost], dim=0)`.
 
-Input: `grad_output [num_local + num_ghost, F]` — loss gradients flowing back through the full feature matrix.
+### Backward semantics
 
 Input: `grad_output [num_ghost, F]` — loss gradients flowing back through the ghost atom features.
 
-The scatter-add is correct because multiple remote ranks may use the same local atom as a ghost; each contributes a partial gradient that must be accumulated.
+Operation (reverse of forward):
+1. Gather the ghost grad rows (mirror of recv in forward) into a contiguous send buffer.
+2. Transmit ghost gradients back to the ranks that originally sent those atoms.
+3. Receive and scatter-add into `grad_input [num_local, F]` at the positions identified by `send_local_indices`.
+
+The scatter-add is correct because multiple remote ranks may have used the same local atom as a ghost — each contributes a gradient that must be accumulated.
+
+### Non-differentiable path
+
+For position exchange during inference or when forces are computed without autograd (e.g., a tabulated potential), the exchange can be performed without wrapping in `FeaturePushToExchange`. This avoids the autograd overhead and allows the backend to skip recording context. This is exposed as a direct call to `exchanger.feature_push_forward(...)` rather than via `.apply(...)`.
 
 ---
 
-## `Exchanger` ABC — Communication Engine
+## `push_buffer_create` — GPU Gather Kernel
 
-Declared in `src/distnnp_model/comm/exchanger.py`. `Exchanger` owns all persistent communication state and exposes four methods that `FeaturePushToExchange` and model subclasses call.
+Declared in `include/distnnp_model/push_buffer.hpp`, implemented in `src/csrc/push_buffer.cu`.
 
-```python
-class Exchanger(ABC):
-    def setup_exchanger(
-        self,
-        distributed_env: DistEnvironment,
-        partition_info: PartitionMessagePassingInfo,
-        max_feature_dim: int,
-    ) -> None: ...
-
-    def reset_buffers(
-        self,
-        feature_dim: int,
-        partition_info: PartitionMessagePassingInfo,
-        device: torch.device,
-    ) -> None: ...
-
-    def feature_push_forward(
-        self,
-        features_to_push: torch.Tensor,       # [num_local, F]
-        partition_info: PartitionMessagePassingInfo,
-    ) -> torch.Tensor: ...                     # [num_local + num_ghost, F]
-
-    def feature_push_backward(
-        self,
-        grad_output: torch.Tensor,             # [num_local + num_ghost, F]
-        partition_info: PartitionMessagePassingInfo,
-    ) -> torch.Tensor: ...                     # [num_local, F]
+```cpp
+at::Tensor push_buffer_create(
+    at::Tensor input,       // [num_local, F]  — source feature matrix
+    at::Tensor buffer,      // [num_send, F]   — pre-allocated send buffer
+    at::Tensor input_locs   // [num_send]  int64 — indices of rows to gather
+);
 ```
 
-### `setup_exchanger`
+**What it does:** Gathers `input[input_locs[i], :]` into `buffer[i, :]` for all `i`. This is the indirection-gather step that packs the atoms to be sent into a layout suitable for a bulk transfer.
+
+**Performance path:** When `F % 4 == 0`, the kernel uses a `float4` vector path (`push_buffer_gather_kernel_vec4`) that moves 16 bytes per thread instead of 4, giving up to 4× better memory throughput for large feature dimensions. NNP embedding dimensions (e.g., 128, 256, 512) are almost always divisible by 4, so this path is the common case.
+
+**Thread layout:** 32×32 threads per block. Row index covers `num_send`, column index covers `F` (or `F/4` in the vec4 path). Grid is sized to cover all rows and columns without overflow.
+
+**Device pinning:** `at::cuda::CUDAGuard device_guard(input.device())` ensures the kernel runs on the correct GPU when multiple GPUs are visible. Uses the current CUDA stream so it integrates with PyTorch's stream management.
+
+**Python binding:**
+```python
+from distnnp_model.distnnp_model_impl import push_buffer_create
+send_buffer = push_buffer_create(local_features, send_buffer, send_indices)
+```
+
+---
 
 ## `FeatureExchanger` — Communication Engine
 
@@ -208,21 +217,48 @@ public:
 };
 ```
 
-Pass the largest feature dimension that will appear across all layers (or across all steps if repartitioning changes atom counts) as `max_feature_dim`.
+### Role
 
 `FeatureExchanger` owns all state required for communication: registered memory buffers, connection handles (QPs for RDMA), and cached send/recv split sizes derived from the halo maps. It is the only object in `distnnp_model` that talks to the network or to peer GPUs.
 
 ### How halo maps are consumed
 
-Both `feature_push_forward` and `feature_push_backward` read the following fields from `PartitionMessagePassingInfo`:
+`feature_push_forward` reads the following fields from `PartitionMessagePassingInfo`:
 
 | Field | Usage |
 |---|---|
 | `send_offsets [W+1]` | CSR row pointers — `send_offsets[r]..send_offsets[r+1]` indexes `send_local_indices` for rank `r` |
 | `send_local_indices [total_send]` | Ordered list of local atom indices to send, sorted by destination rank |
 | `recv_offsets [W+1]` | CSR row pointers — `recv_offsets[r]..recv_offsets[r+1]` indexes `recv_ghost_indices` for rank `r` |
-| `recv_ghost_indices [total_recv]` | Ordered list of ghost slot positions (row offsets ≥ `num_local`) where received atoms land |
-| `global_send_recv_matrix [W, W]` | Used at setup time to identify which rank pairs communicate |
+| `recv_ghost_indices [total_recv]` | Ordered list of ghost slot positions (indices ≥ `num_local`) where received atoms land |
+| `global_send_recv_matrix [W, W]` | Used at setup time to know which rank pairs have non-zero communication volume |
+
+`feature_push_backward` uses the same maps but with send and recv roles reversed: ghost gradients flow back from ghost slots (recv side in forward) to owned atom positions (send side in forward).
+
+---
+
+## Communication Backends
+
+`FeatureExchanger` dispatches to one of two transport backends based on whether the communicating rank pair is on the same physical node (intra-node) or on different nodes (inter-node). The dispatch decision is made once at setup time, using `DistEnvironment.gpus_per_node` and rank arithmetic.
+
+```
+rank_a // gpus_per_node == rank_b // gpus_per_node  →  intra-node backend
+rank_a // gpus_per_node != rank_b // gpus_per_node  →  inter-node backend
+```
+
+Each backend satisfies the same abstract interface:
+
+```python
+class AbstractCommBackend:
+    def setup(self, local_rank, peer_ranks, send_counts, recv_counts, feature_dim_max):
+        """Allocate persistent buffers, register memory, establish connections."""
+
+    def send_recv(self, send_buffer, recv_buffer, send_counts, recv_counts):
+        """Execute one round of bulk feature transfer. May be asynchronous."""
+
+    def wait(self):
+        """Block until the last send_recv has completed on the CUDA stream."""
+```
 
 ### Intra-node: Copy Engine (NVLink / PCIe)
 
@@ -297,94 +333,119 @@ Sender                                Receiver
 
 ## Interface Between PyTorch Autograd and Communication
 
-`FeaturePushToExchange` is the explicit boundary between CUDA/RDMA operations and PyTorch autograd.
+The central design challenge is that CUDA kernels and RDMA operations are not natively understood by PyTorch's autograd engine. `FeaturePushToExchange` is the explicit boundary.
 
 ### Forward pass autograd contract
 
 When `FeaturePushToExchange.apply(local_features, state, exchanger)` is called:
 - `local_features` must have `requires_grad=True` if forces are needed.
-- The returned `[num_local + num_ghost, F]` tensor is a leaf output of the autograd Function. Gradients flowing back through it during `energy.backward()` trigger `FeaturePushToExchange.backward`.
-- `state` and `exchanger` are not differentiable. `backward` returns `None` for both.
+- The returned `ghost_features` tensor is a leaf output of the autograd Function. Gradients flowing back through `ghost_features` during `energy.backward()` will trigger `FeaturePushToExchange.backward`.
+- `state` and `exchanger` have no gradient (they are metadata and a stateful object, respectively). `backward` returns `None` for both.
 
 ### Backward pass gradient routing
 
 ```
 energy.backward()
-  → grad flows through NNP → arrives at grad_all_features [num_local + num_ghost, F]
+  → grad flows through NNP → arrives at grad_all_positions [num_local + num_ghost, 3]
+  → local slice:  grad_all_positions[:num_local]   = direct gradient on owned atoms
+  → ghost slice:  grad_all_positions[num_local:]   = gradient on ghost atoms
 
-  FeaturePushToExchange.backward receives grad_all_features as grad_output.
-  exchanger.feature_push_backward(grad_output, partition_info):
-    → local slice  grad_output[:num_local]  — flows back directly to owned-atom gradients
-    → ghost slice  grad_output[num_local:]  — sent back to owning ranks via reverse exchange
-    → owning rank scatter-adds received ghost grads into local positions (send_local_indices)
+  Ghost gradient slice is the grad_output seen by FeaturePushToExchange.backward.
+  backward() calls exchanger.feature_push_backward(grad_output, ...)
+  → reverse communication: ghost grad slice is sent back to the owning rank
+  → owning rank accumulates into its local grad_input via scatter-add
 
-  Final grad_input [num_local, F] = direct local grad + accumulated ghost grads from peers
+  Final grad for local_positions = direct gradient + accumulated ghost gradient
 ```
 
-Every ghost atom is a copy of an owned atom. The gradient at a ghost slot is the partial derivative of energy through that ghost's participation in the NNP. Accumulating all ghost gradients for the same owned atom gives the total gradient for that atom.
+This gradient routing is correct because every ghost atom is a copy of some owned atom. The gradient at the ghost slot is the partial derivative of energy with respect to that owned atom's position, computed through the ghost's participation in the NNP. Scatter-adding all ghost gradients for the same owned atom gives the total gradient.
 
 ### Detaching the radius graph
 
-Radius graph construction is performed inside `torch.no_grad()`. Graph topology (which atom pairs are neighbours) is a discrete function of positions and is not differentiable. Excluding it from autograd prevents incorrect gradient flow through graph construction and avoids storing intermediates for the graph builder.
+The radius graph construction (`radius_graph_pbc_cuda`) is performed inside `torch.no_grad()`. The graph topology (which atom pairs are neighbours) is a function of positions but is not differentiable in the subgraph sense — edges are discrete. Excluding it from autograd prevents incorrect gradient flow through the graph construction and reduces memory overhead from storing the graph's intermediates.
 
 ---
 
 ## Multi-layer GNN Exchange
 
-For GNN-based NNP models with `L` message-passing layers, a single position exchange before the first layer is insufficient. After each layer, each atom's embedding depends on its neighbours' embeddings from the previous layer. Rank `R` needs the layer-`l` embeddings of its ghost atoms to compute layer `l+1`.
+For GNN-based NNP models with `L` message-passing layers, a single pre-step position exchange is insufficient. After each message-passing layer, each atom's embedding depends on its neighbours' embeddings from the previous layer. To compute layer `l+1`, rank `R` needs the layer-`l` embeddings of its ghost atoms — but those were computed on a different rank.
 
-The exchange pattern:
+The exchange pattern is:
 
 ```
-reset_buffers(feature_dim=3)
-exchange positions                               → all_pos [num_local + num_ghost, 3]
-layer 0 message passing                          → h [num_local + num_ghost, F_0]
+[all ranks]
+  exchange positions (layer 0 input)
+  layer 0 message passing  →  new embeddings [num_local + num_ghost, F_0]
 
-reset_buffers(feature_dim=F_0)
-exchange h[:num_local]                           → h [num_local + num_ghost, F_0]
-layer 1 message passing                          → h [num_local + num_ghost, F_1]
+  exchange updated embeddings (layer 0 output / layer 1 input)
+  layer 1 message passing  →  new embeddings [num_local + num_ghost, F_1]
 
-...
+  ...
 
-reset_buffers(feature_dim=F_{L-2})
-exchange h[:num_local]                           → h [num_local + num_ghost, F_{L-2}]
-layer L-1 message passing                        → output embeddings / energy
+  exchange updated embeddings (layer L-2 output / layer L-1 input)
+  layer L-1 message passing  →  output embeddings / energy
 ```
 
-Each exchange uses the same halo maps (fixed topology for the step) but a different feature dimension.
+Each exchange call uses the same halo maps from `partition_info` (the maps encode the graph topology which is fixed for the step), but a different feature tensor with potentially different feature dimension `F_l`.
 
-### Implementation pattern for GNN subclasses
+### IPC Buffer Lifecycle and Persistent Buffers
+
+CUDA IPC registration is a **destination** requirement, not a source requirement. `cudaIpcGetMemHandle` — which requires the exact base pointer of a raw `cudaMalloc` allocation — is only called on the buffer that **receives** peer writes. The rank doing the writing reads from its own local memory (any device pointer, including a caching-allocator tensor) and writes into the IPC-opened pointer on the remote rank. No IPC registration is needed on the sender side.
+
+This means:
+
+- `x_buffer_` on each rank is the **receive** buffer for ghost atoms written by peers. It must be a `cudaMalloc` allocation so its handle can be exported and opened by peers.
+- `local_features` (a standard PyTorch caching-allocator tensor) is the **source** read by the push kernel. No IPC handle is needed for it.
+- **No copy of local features into the IPC buffer is required.** The push kernel reads directly from `local_features[send_local_indices[i]]` and writes to `peer_x_buffer[remote_offset + ghost_idx]`.
+
+As a result, `x_buffer_` only needs to be sized `[N_ghost, max_F]` — it holds only the ghost receive region. After the exchange, the caller concatenates:
+
+```python
+ghost_h = FeaturePushToExchange.apply(h[:N_local], state, exchanger)
+h = cat([h[:N_local], ghost_h], dim=0)  # caller's responsibility
+```
+
+This matches the `FeaturePushToExchange` API contract: it returns ghost features only; the caller concatenates with local features.
+
+**One-time IPC setup, cheap per-layer reconfiguration.** Opening IPC handles (`cudaIpcOpenMemHandle`) is an expensive kernel-mode operation requiring cross-process coordination. It must not be repeated per GNN layer. The design separates two concerns:
+
+- **Topology setup** (once per partition): allocate `x_buffer [N_ghost, max_F]` and `grad_recv_buffer [total_send, max_F]` for the maximum feature dimension across all layers; export and exchange handles via a single `all_gather`; open remote handles; compute and upload `PushTarget` arrays.
+- **Feature dimension reconfiguration** (once per layer, O(1)): call `reconfigure_feature_dim(F_l)` to update the active column count. This writes a single integer field — no IPC operations, no collectives, no buffer reallocation.
+
+```python
+# One-time initialization (per partition topology)
+exchanger.initialize(max_feature_dim=256, partition_info=..., device=rank)
+    # → cudaMalloc [N_ghost, 256], all_gather handles, cudaIpcOpenMemHandle, PushTarget upload
+
+# Per-layer exchange (no copy of local features needed)
+for layer in gnn_layers:
+    exchanger.set_feature_dim(layer.feature_dim)  # O(1): no IPC ops
+    ghost_h = FeaturePushToExchange.apply(h[:N_local], state, exchanger)
+    h = cat([h[:N_local], ghost_h], dim=0)
+    h = layer(h, edge_index)
+```
+
+`set_feature_dim` / `reconfigure_feature_dim` only updates `feature_dim_` (active transfer width) and validates `new_F <= max_feature_dim_` (the allocated row stride). `PushTarget.remote_offset` is stored in atoms (rows), remaining valid for any `feature_dim <= max_feature_dim`.
+
+The memory overhead of this approach is `(max_F - active_F) * sizeof(float)` per ghost row for layers with smaller F — negligible compared to the cost of repeated handle exchange.
+
+**Implementation pattern for GNN subclasses:**
 
 ```python
 class MyGNNModel(DistNNPModel):
-    def setup(self, distributed_env, partition_info, max_feature_dim):
-        self._feature_exchanger.setup_exchanger(
-            distributed_env, partition_info, max_feature_dim
-        )
-
     def __call__(self, state):
-        local_pos = state.local_partition_info.local_atom_positions.clone()
-        local_pos.requires_grad_(True)
-        num_local = local_pos.shape[0]
-        device = local_pos.device
+        # Layer 0: exchange positions
+        ghost_pos = FeaturePushToExchange.apply(local_pos, state, self._feature_exchanger)
+        all_pos = cat([local_pos, ghost_pos], dim=0)
 
-        # Exchange positions
-        self._feature_exchanger.reset_buffers(3, state.local_partition_info, device)
-        all_pos = FeaturePushToExchange.apply(local_pos, state, self._feature_exchanger)
-        # all_pos: [num_local + num_ghost, 3]
-
-        with torch.no_grad():
-            edge_index = radius_graph(all_pos, ...)
-
+        # Layer 0 forward
         h = self.embedding(all_pos)  # [num_local + num_ghost, F_0]
 
         for layer in self.message_passing_layers:
-            self._feature_exchanger.reset_buffers(
-                layer.feature_dim, state.local_partition_info, device
-            )
-            h = FeaturePushToExchange.apply(h[:num_local], state, self._feature_exchanger)
-            # h: [num_local + num_ghost, F_l]
-            h = layer(h, edge_index)
+            # Exchange embeddings before each layer (ghost slots are updated)
+            ghost_h = FeaturePushToExchange.apply(h[:num_local], state, self._feature_exchanger)
+            h = cat([h[:num_local], ghost_h], dim=0)
+            h = layer(h, edge_index)  # [num_local + num_ghost, F_l]
 
         energy = self.output_head(h[:num_local]).sum()
         energy.backward()
