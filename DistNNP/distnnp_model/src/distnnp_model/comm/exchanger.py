@@ -254,6 +254,7 @@ class GPUDirectExchanger(Exchanger):
         grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(
             max(1, total_send), feature_dim, rank
         )
+        self.grad_recv_buffer = grad_recv_buffer
 
         # --- Exchange IPC handles via NCCL broadcast ---
         x_handle = self.exchanger.export_ipc_handle(x_buffer)
