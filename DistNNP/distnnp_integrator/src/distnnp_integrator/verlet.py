@@ -92,13 +92,13 @@ class Verlet(DistNNPIntegrator):
         if self.prev_forces is None:
             _, atom_forces = model(dist_state)
         else:
-            state.atom_forces = self.prev_forces
+            atom_forces = self.prev_forces
     
         # 1. Update v to half-step, and pos to full-step
         self.halfstep1_(
             state.atom_positions,
             state.atom_velocities,
-            state.atom_forces,
+            atom_forces,
             atom_masses,
             step_size,
         )
