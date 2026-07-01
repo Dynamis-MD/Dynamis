@@ -233,8 +233,6 @@ class GPUDirectExchanger(Exchanger):
         send_offsets = partition_info.send_offsets
         recv_offsets = partition_info.recv_offsets
         
-        total_send = int(send_offsets[-1].item())
-        total_recv = int(recv_offsets[-1].item())
 
         # Buffer sizes must come from this rank's own CSR offsets, which
         # build_halo_maps fills locally and correctly. The global_send_recv_matrix
