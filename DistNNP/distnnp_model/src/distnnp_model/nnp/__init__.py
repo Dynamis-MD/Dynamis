@@ -1,6 +1,4 @@
-from distnnp_model.nnp.uma import (
-    UMAModel,
-)
+from distnnp_model.nnp.uma import UMAModel
 
 __all__ = [
     "UMAModel",
