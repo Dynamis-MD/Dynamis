@@ -60,11 +60,11 @@ class KDTreePartitioner:
         Partition: auto-compute edge weights via radius_graph_pbc (CUDA)
         """
 class MolecularInfo:
-    atom_vertex_numbers: torch.Tensor
-    atom_types: torch.Tensor
-    atom_positions: torch.Tensor
-    atom_velocities: torch.Tensor
     atom_forces: torch.Tensor
+    atom_positions: torch.Tensor
+    atom_types: torch.Tensor
+    atom_velocities: torch.Tensor
+    atom_vertex_numbers: torch.Tensor
     edge_counts: torch.Tensor
     def __init__(self) -> None:
         ...
@@ -85,7 +85,6 @@ class PartitionMessagePassingInfo:
     recv_offsets: torch.Tensor
     send_local_indices: torch.Tensor
     send_offsets: torch.Tensor
-    cell_shifts_halo: torch.Tensor
     def __init__(self) -> None:
         ...
 class SFCCurveType:

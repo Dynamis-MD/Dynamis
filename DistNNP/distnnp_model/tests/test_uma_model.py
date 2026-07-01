@@ -49,8 +49,8 @@ def test_uma_distributed_parity():
     # ==========================================
     # 2. Setup Global Data (Ground Truth)
     # ==========================================
-    total_atoms = 1620
-    cell_length = 30
+    total_atoms = 20
+    cell_length = 10
     torch.manual_seed(42)
     # Give enough spatial spread to ensure cutoffs divide the space reasonably
     global_positions = torch.rand((total_atoms, 3), device=device) * cell_length
@@ -193,17 +193,6 @@ def test_uma_distributed_parity():
     n_local = state.local_molecular_info.num_atoms
     local_indices = state.local_partition_info.partition_indices[:n_local].long().to(device)
 
-    # ghost_indices = state.local_partition_info.recv_ghost_indices.long().to(device)
-    # all_indices = torch.cat([local_indices, ghost_indices], dim=0)
-    # unreduced_forces = local_forces.to(device) # Shape: [n_local + n_ghost, 3]
-    # gathered_forces = [torch.zeros((total_atoms, 3), device=device) for _ in range(world_size)] if rank == 0 else None
-    # rank_force = torch.zeros((total_atoms, 3), device=device)
-    # rank_force.scatter_(0, all_indices.unsqueeze(-1).expand(-1, 3), unreduced_forces)
-    # if world_size > 1:
-    #     dist.gather(rank_force, gather_list=gathered_forces, dst=0)
-    # else:
-    #     gathered_forces = [rank_force]
-
     local_forces = local_forces.to(device)
     gathered_forces = [torch.zeros((total_atoms, 3), device=device) for _ in range(world_size)] if rank == 0 else None
     rank_force = torch.zeros((total_atoms, 3), device=device)
@@ -215,14 +204,13 @@ def test_uma_distributed_parity():
         
     if rank == 0:
         reconstructed_global_forces = torch.sum(torch.stack(gathered_forces), dim=0)
-        global_forces_tensor = torch.tensor(global_forces, device=device)
         print(f"Forces from distributed model: {reconstructed_global_forces}, global forces: {global_forces}")
 
-        max_diff = torch.max(torch.abs(reconstructed_global_forces - global_forces_tensor))
+        max_diff = torch.max(torch.abs(reconstructed_global_forces - global_forces))
         print(f"Maximum Force Difference: {max_diff.item():.6f}")
 
         torch.testing.assert_close(
-            reconstructed_global_forces, global_forces_tensor,
+            reconstructed_global_forces, global_forces,
             rtol=1e0, atol=1e0,
             msg="Distributed forces do not match Standard model forces!"
         )

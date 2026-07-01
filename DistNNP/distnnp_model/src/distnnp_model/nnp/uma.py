@@ -5,33 +5,27 @@ import torch.distributed.nn.functional as dist_nn
 import torch.nn as nn
 import numpy as np
 from torch.profiler import record_function
-from typing import Dict, List, Literal
-from fairchem.core import pretrained_mlip
-from fairchem.core.datasets.atomic_data import AtomicData, warn_if_upcasting
-from fairchem.core.common import gp_utils
-from fairchem.core.common.utils import conditional_grad
-from fairchem.core.common.registry import registry
-from fairchem.core.models.uma.escn_moe import eSCNMDMoeBackbone
-from fairchem.core.models.uma.nn.mole_utils import (
-    model_search_and_replace,
-    recursive_replace_so2_MOLE,
-    replace_MOLE_with_linear,
-)
-from fairchem.core.models.uma.outputs import (
-    compute_energy,
-    compute_forces,
-    compute_forces_and_stress,
-    compute_hessian,
-    # get_l_component_range,
-    # reduce_node_to_system,
-)
-from fairchem.core.units.mlip_unit import (
-    InferenceSettings,
-    guess_inference_settings,
-)
-from fairchem.core.units.mlip_unit.utils import tf32_context_manager
-from fairchem.core.units.mlip_unit.predict import MLIPPredictUnit
-from fairchem.core.units.mlip_unit.single_atom_patch import single_atom_prediction_from_lookup
+from typing import List, Literal
+try:
+    from fairchem.core import pretrained_mlip
+    from fairchem.core.datasets.atomic_data import AtomicData, warn_if_upcasting
+    from fairchem.core.common.utils import conditional_grad
+    from fairchem.core.common.registry import registry
+    from fairchem.core.models.uma.escn_moe import eSCNMDMoeBackbone
+    from fairchem.core.models.uma.nn.mole_utils import (
+        model_search_and_replace,
+        recursive_replace_so2_MOLE,
+        replace_MOLE_with_linear,
+    )
+    from fairchem.core.units.mlip_unit import (
+        InferenceSettings,
+        guess_inference_settings,
+    )
+    from fairchem.core.units.mlip_unit.utils import tf32_context_manager
+    from fairchem.core.units.mlip_unit.single_atom_patch import single_atom_prediction_from_lookup
+except ImportError as e:
+    raise ImportError("fairchem-core must be installed to use UMAModel") from e
+
 from distnnp_model.potential import DistNNPModel
 from distnnp_model.comm.exchanger import Exchanger, GPUDirectExchanger
 from distnnp_model.comm.feature_push import FeaturePushToExchange
@@ -44,19 +38,17 @@ from distnnp_state import (
 def balance_channels_batched(
     emb: torch.Tensor,
     target: torch.Tensor,
-    natoms_global: torch.Tensor, # Must be the total global atoms in the system
+    natoms_global: torch.Tensor,
     batch: torch.Tensor,
     start_idx: int,
     end_idx: int,
-    num_local: int,              # <-- NEW PARAMETER
+    num_local: int,
     target_offset: float = 0.0,
 ) -> torch.Tensor:
     out_emb = emb.clone()
     num_systems = len(natoms_global)
     n_channels = end_idx - start_idx
 
-    # 1. Batched extraction & Sum: ONLY LOCAL ATOMS
-    # This prevents double-counting the ghost atoms during the global reduction
     channels_to_balance_local = emb[:num_local, 0, start_idx:end_idx]
     
     system_sums = torch.zeros(
@@ -64,20 +56,13 @@ def balance_channels_batched(
     )
     system_sums.index_add_(0, batch[:num_local], channels_to_balance_local)
 
-    # 2. Reduce partial sums across all spatial parallel ranks
-    # Using dist_nn.all_reduce is CRITICAL here so that the backward pass 
-    # correctly distributes gradients back across the network!
     if dist.is_initialized():
         system_sums = dist_nn.all_reduce(system_sums, op=torch.distributed.ReduceOp.SUM)
 
-    # 3. Batched correction: broadcast target to all channels
     target_sums = (target - target_offset).unsqueeze(1).expand(-1, n_channels)
     
-    # Calculate the per-atom correction using the GLOBAL natoms count
     corrections = (system_sums - target_sums) / natoms_global.unsqueeze(1)
 
-    # 4. Apply the correction to ALL atoms (local + ghost)
-    # Ghost atoms must shift by the exact same amount as local atoms
     channels_to_balance_all = emb[:, 0, start_idx:end_idx]
     out_emb[:, 0, start_idx:end_idx] = channels_to_balance_all - corrections[batch]
     
@@ -100,14 +85,11 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         self.profiler = profiler
 
     def set_MOLE_coefficients(self, atomic_numbers_full, batch_full, csd_mixed_emb):
-        _rank = dist.get_rank() if dist.is_initialized() else -1
         if self.num_experts == 0:
             return
         
         # OPTIMIZATION: Cache MOLE coefficients - compute once on first call, reuse forever.
         # In MD simulations with merge_mole=True, composition is static.
-        # Check if we can use cache
-        # Use getattr because __init__ might be bypassed during pickle loading (torch.load)
         cached = getattr(self, "_cached_mole_coefficients", None)
         if cached is not None:
             self.global_mole_tensors.expert_mixing_coefficients = cached
@@ -125,10 +107,9 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             if self.use_composition_embedding:
                 # Distributed Logic: Compute Global Mean Composition
                 if dist.is_initialized():
-                    # Use num_local to identify unique atoms
                     num_local = self.num_local
                     if num_local is None:
-                        num_local = atomic_numbers_full.shape[0] # Fallback if not set
+                        num_local = atomic_numbers_full.shape[0]
                     
                     if num_local > atomic_numbers_full.shape[0]:
                          num_local = atomic_numbers_full.shape[0]
@@ -141,9 +122,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                     # Handle CPU tensors with NCCL backend (which doesn't support CPU all_reduce)
                     is_cpu = local_sum.device.type == "cpu"
                     if is_cpu and dist.get_backend() == "nccl":
-                        # Move to current cuda device
-                        # Assuming torch.cuda.set_device has been called appropriately by launcher/script
-                        # We use .cuda() which maps to current device
                         local_sum_cuda = local_sum.cuda()
                         local_count_cuda = local_count.cuda()
                         
@@ -217,7 +195,7 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                 batch=batch,
                 start_idx=self.charge_channel_start,
                 end_idx=self.charge_channel_end,
-                num_local=self.num_local,        # Pass num_local here
+                num_local=self.num_local,
                 target_offset=0.0,
             )
         if self.spin_channel_end > self.spin_channel_start:
@@ -228,17 +206,12 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                 batch=batch,
                 start_idx=self.spin_channel_start,
                 end_idx=self.spin_channel_end,
-                num_local=self.num_local,        # Pass num_local here
+                num_local=self.num_local,
                 target_offset=1.0,
             )
         return x_message_prime
 
     def forward(self, data_dict):
-        # DEBUG: Track forward pass entry
-        _rank = dist.get_rank() if dist.is_initialized() else 0
-        
-        # We need to inject self.exchanger.exchange(x_message) before each block.
-
         # Pre-computation (same as original)
         data_dict["atomic_numbers"] = data_dict["atomic_numbers"].long()
         data_dict["atomic_numbers_full"] = data_dict["atomic_numbers"]
@@ -269,34 +242,23 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             if self.regress_config.stress:
                 data_dict["cell"].requires_grad_(True)
 
-        # Profile: generate_graph
         if self.profiler:
             self.profiler.start("generate_graph")
         with record_function("generate_graph"):
             graph_dict = self._generate_graph(data_dict)
-            # if "node_offset" not in graph_dict:
-            #      node_offset = data_dict["natoms"].cumsum(dim=0).roll(1)
-            #      node_offset[0] = 0
-            #      graph_dict["node_offset"] = node_offset
         if self.profiler:
             self.profiler.stop("generate_graph")
             
         # DISTNNP OPTIMIZATION: Filter redundant edges early
-        # This logic was originally in eSCNMD.forward but is REPLICATED here because
-        # DistributedESCNMDBackbone overrides forward() without calling super().
-        
-        # 2. Keep reference to original edges for MOLE stats
+        # Keep reference to original edges for MOLE stats
         original_edge_index = graph_dict["edge_index"]
         
-        # 3. Filter if num_local is valid
+        # Filter if num_local is valid
         if num_local is not None and isinstance(num_local, int) and num_local < data_dict["pos"].shape[0]:
-            # Update self.num_local for later usage in forward loop if needed
             self.num_local = num_local
-            
-            pre_edges = graph_dict["edge_index"].shape[1]
-            # Filter edges: only keep edges where target < num_local
+
             mask = graph_dict["edge_index"][1] < num_local
-            
+
             # Apply filter to all edge tensors
             graph_dict["edge_index"] = graph_dict["edge_index"][:, mask]
             
@@ -306,15 +268,14 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             if "edge_distance_vec" in graph_dict:
                 graph_dict["edge_distance_vec"] = graph_dict["edge_distance_vec"][mask]
 
-            if "cell_offset" in graph_dict:
-                graph_dict["cell_offset"] = graph_dict["cell_offset"][mask]
+            if "cell_offsets" in graph_dict:
+                graph_dict["cell_offsets"] = graph_dict["cell_offsets"][mask]
 
         if graph_dict["edge_index"].numel() == 0:
              raise ValueError(
                 f"No edges found. Check cutoff {self.cutoff}."
             )
 
-        # Profile: wigner matrix computation
         if self.profiler:
             self.profiler.start("wigner")
         with record_function("obtain wigner"):
@@ -333,8 +294,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         if self.profiler:
             self.profiler.stop("wigner")
 
-        # Initialize node embeddings
-        # Profile: atom_embedding
         if self.profiler:
             self.profiler.start("atom_embedding")
         with record_function("atom embedding"):
@@ -359,8 +318,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         )
         self.log_MOLE_stats()
 
-        # edge degree embedding
-        # Profile: edge_embedding
         if self.profiler:
             self.profiler.start("edge_embedding")
         with record_function("edge embedding"):
@@ -398,7 +355,7 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             if self._feature_exchangers:
                 exchanger = self._feature_exchangers[-1]
                 n_local = self.num_local
-                orig_shape = x_message.shape  # [n_atoms, sph_feature_size, sphere_channels]
+                orig_shape = x_message.shape # [n_atoms, sph_feature_size, sphere_channels]
                 feat_dim = orig_shape[1] * orig_shape[2]
                 x_local_flat = x_message[:n_local].reshape(n_local, feat_dim)
 
@@ -421,9 +378,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         local_dest_mask = graph_dict["edge_index"][1] < effective_num_local
 
         local_edge_index = graph_dict["edge_index"][:, local_dest_mask]
-        
-        # We also need to filter edge attributes accordingly
-        local_edge_distance = graph_dict["edge_distance"][local_dest_mask]
         
         # === OVERLAP OPTIMIZATION (Area 3) ===
         # Check config flag first to avoid any overhead when disabled
@@ -457,16 +411,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                 interior_edge_index = local_edge_index[:, interior_edge_mask]
                 boundary_edge_index = local_edge_index[:, boundary_edge_mask]
                 
-                interior_edge_distance = local_edge_distance[interior_edge_mask]
-                boundary_edge_distance = local_edge_distance[boundary_edge_mask]
-                
-                # Filter x_edge for interior and boundary
-                interior_x_edge_per_layer = [local_x_edge_per_layer[i][interior_edge_mask] for i in range(self.num_layers)]
-                boundary_x_edge_per_layer = [local_x_edge_per_layer[i][boundary_edge_mask] for i in range(self.num_layers)]
-                
-                # === Area 3 Fix: Pre-compute interior atom indices for efficient merge ===
-                interior_indices = torch.where(interior_atom_mask[:self.num_local])[0]
-                
                 # === Area 3 Fix: Pre-compute Wigner filtered tensors ONCE (not per-layer) ===
                 def _filter_wigner_once(wigner_dict, mask, full_mask):
                     """Filter wigner dict by edge mask, relative to local_dest_mask"""
@@ -483,16 +427,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                     elif isinstance(wigner_dict, torch.Tensor):
                         return wigner_dict[full_mask][mask]
                     return wigner_dict
-                
-                interior_wigner = _filter_wigner_once(wigner, interior_edge_mask, local_dest_mask)
-                interior_wigner_inv = _filter_wigner_once(wigner_inv, interior_edge_mask, local_dest_mask)
-                interior_envelope = edge_envelope[local_dest_mask][interior_edge_mask] if edge_envelope is not None else None
-                interior_wigner_inv_envelope = interior_wigner_inv * interior_envelope
-                
-                boundary_wigner = _filter_wigner_once(wigner, boundary_edge_mask, local_dest_mask)
-                boundary_wigner_inv = _filter_wigner_once(wigner_inv, boundary_edge_mask, local_dest_mask)
-                boundary_envelope = edge_envelope[local_dest_mask][boundary_edge_mask] if edge_envelope is not None else None
-                boundary_wigner_inv_envelope = boundary_wigner_inv * boundary_envelope
                 
                 # Log overlap stats once (skip under torch.compile to avoid dynamo errors)
                 if not hasattr(self, '_logged_overlap_stats') and not torch.compiler.is_compiling():
@@ -542,7 +476,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                     local_x_edge_per_layer = [x_edge_per_layer[i][local_dest_mask] for i in range(self.num_layers)]
 
             # Now run the block with updated ghost features
-            # Profile: mp_block
             if self.profiler:
                 self.profiler.start(f"mp_block_{i}")
             with record_function(f"message passing {i}"):
@@ -717,7 +650,6 @@ class UMAModel(DistNNPModel):
         self.device = device
         self.global_rank = global_rank
         inference_settings = guess_inference_settings(inference_settings)
-        inference_settings.merge_mole = True
         if overrides is None:
             overrides = {"backbone": {"model": "distributed_escnmd_backbone"}}
         elif "backbone" not in overrides:

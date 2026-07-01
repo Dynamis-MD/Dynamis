@@ -42,8 +42,7 @@ PYBIND11_MODULE(distnnp_state_impl, m)
         .def_readwrite("recv_ghost_indices", &distnnp_state::PartitionMessagePassingInfo::recv_ghost_indices)
         .def_readwrite("interior_mask", &distnnp_state::PartitionMessagePassingInfo::interior_mask)
         .def_readwrite("edge_index", &distnnp_state::PartitionMessagePassingInfo::edge_index)
-        .def_readwrite("edge_index_halo", &distnnp_state::PartitionMessagePassingInfo::edge_index_halo)
-        .def_readwrite("cell_shifts_halo", &distnnp_state::PartitionMessagePassingInfo::cell_shifts_halo);
+        .def_readwrite("edge_index_halo", &distnnp_state::PartitionMessagePassingInfo::edge_index_halo);
 
     py::class_<distnnp_state::DistNNPState>(m, "DistNNPState")
         .def(py::init<>())
