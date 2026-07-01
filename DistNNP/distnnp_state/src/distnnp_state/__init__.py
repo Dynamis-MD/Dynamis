@@ -43,4 +43,5 @@ __all__ = [
     "DistGraphBuilder",
     "DistBuildGraphResult",
     "BuildMode",
+    "SimState",
 ]

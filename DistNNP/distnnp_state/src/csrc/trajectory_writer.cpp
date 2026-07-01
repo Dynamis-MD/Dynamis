@@ -5,31 +5,55 @@
 #include <stdexcept>
 #include <string>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 namespace distnnp_state {
 
-TrajectoryWriter::TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, std::string output_dir)
+TrajectoryWriter::TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, const std::string& output_dir, const std::string& output_file)
     : rank(global_rank)
     , output_dir(output_dir)
-    // TODO validate both of these
+    , output_file(output_file)
     , run_id(run_id)
     , author(author)
 {
-    // currently just overwriting, TODO increment number over time
+    // Ensure output directory exists.
+    struct stat st;
+    if (stat(output_dir.c_str(), &st) != 0) {
+        if (mkdir(output_dir.c_str(), 0755) != 0) {
+            std::cerr << "Failed to create output directory: " << output_dir << std::endl;
+            exit(1);
+        }
+    } else if (!S_ISDIR(st.st_mode)) {
+        std::cerr << "Output path exists and is not a directory: " << output_dir << std::endl;
+        exit(1);
+    }
+
+    const std::string file_path = output_dir + "/" + output_file;
     if (global_rank == 0)
-        fd = open((output_dir + "/trajectory.distnnp").c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        fd = open(file_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
     else
-        fd = open((output_dir + "/trajectory.distnnp").c_str(), O_RDWR | O_CREAT, 0644);
+        fd = open(file_path.c_str(), O_RDWR | O_CREAT, 0644);
 
     if (fd < 0) {
-        std::cerr << "Failed to open " << output_dir << "/trajectory.distnnp" << std::endl;
+        std::cerr << "Failed to open " << file_path << std::endl;
         exit(1);
     }
 }
 TrajectoryWriter::~TrajectoryWriter() {
-    auto res = close(fd);
-    if (res != 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    // only flush and close if not already done
+    if (!flushed) {
+        auto res = close(fd);
+        if (res != 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    }
+}
+void TrajectoryWriter::flush() {
+    if (!flushed) {
+        auto res = close(fd);
+        if (res != 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+        flushed = true;
+    }
 }
 
 MolecularInfo TrajectoryWriter::initialize(const std::string& input_file_name, const float time_per_step, const uint32_t steps_per_write) {
@@ -45,13 +69,16 @@ MolecularInfo TrajectoryWriter::initialize(const std::string& input_file_name, c
         return state;
     }
 
-    if (rank == 0)
-        write_front_matter(time_per_step, steps_per_write, state);
+    if (state.num_atoms == 0 || !state.atom_types.defined()) {
+        throw std::runtime_error("TrajectoryWriter::initialize: failed to load '" + input_file_name + "'");
+    }
+
+    write_front_matter(time_per_step, steps_per_write, state, rank);
 
     return state;
 }
 
-void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state) {
+void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state, uint32_t rank) {
     // figure out sizes of header and each rank size
     // resize file to the correct size
 
@@ -81,6 +108,21 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
     front_matter_size += state.num_atoms; // 8 bit unsigned ints for each atom
     uint32_t atom_type_padding = 8 - (state.num_atoms % 8);
     front_matter_size += atom_type_padding;
+
+    // all ranks need to know front matter size, bytes per atom, and total atoms
+
+    // This is only for version 1
+    const uint32_t bytes_per_atom = sizeof(uint64_t) // atom index
+                                  + (3 * sizeof(float)) // position
+                                  + (3 * sizeof(float)); // velocity
+
+    this->front_matter_size = front_matter_size;
+    this->bytes_per_atom = bytes_per_atom;
+    this->total_atoms = state.num_atoms;
+
+    // all other ranks only need to know the above 3 values so can return here
+    if (rank != 0) return;
+
 
     // create a buffer
     std::vector<uint8_t> buf(front_matter_size);
@@ -121,7 +163,6 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
     offset += sizeof(steps_per_write);
 
     // bytes_per_atom, id, position, velocity
-    const uint32_t bytes_per_atom = 8 + (3 * 4) + (3 * 4);
     memcpy(buf.data() + offset, &bytes_per_atom, sizeof(bytes_per_atom));
     offset += sizeof(bytes_per_atom);
 
@@ -182,7 +223,8 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
         throw std::runtime_error("partial write");
     }
 }
-void TrajectoryWriter::write_frame(uint32_t frame_idx, torch::Tensor indices, torch::Tensor positions, torch::Tensor velocities) {
+
+void TrajectoryWriter::submit(uint32_t step, MolecularInfo state) {
 
     // to make this easier, i think im going to write each tensor one after the other
     // so it will be
@@ -190,26 +232,8 @@ void TrajectoryWriter::write_frame(uint32_t frame_idx, torch::Tensor indices, to
     // atom_positions | 3 x float32 x frame_size
     // atom_velocities | 3 x float32 x frame_size
 
-    if (writes == 0) {
-        // first write, don't have these values saved
-        // need to read in total_atoms, bytes_per_atom, front_matter_size
-
-        // TODO need to guarentee that rank 0 is done writing
-
-        auto n = pread(fd, &total_atoms, sizeof(total_atoms), 92);
-        if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-        if (n != sizeof(total_atoms)) throw std::runtime_error("unexpected end of file");
-
-        n = pread(fd, &bytes_per_atom, sizeof(bytes_per_atom), 108);
-        if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-        if (n != sizeof(bytes_per_atom)) throw std::runtime_error("unexpected end of file");
-
-        n = pread(fd, &front_matter_size, sizeof(front_matter_size), 212);
-        if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-        if (n != sizeof(front_matter_size)) throw std::runtime_error("unexpected end of file");
-    }
-
-    uint32_t offset = front_matter_size + (writes * total_atoms * bytes_per_atom);
+    // TODO make sure the step will calculate the correct offset
+    uint32_t offset = front_matter_size + (step * total_atoms * bytes_per_atom);
 
     if (offset < 220)
         throw std::runtime_error("Illegal offset");
@@ -219,10 +243,11 @@ void TrajectoryWriter::write_frame(uint32_t frame_idx, torch::Tensor indices, to
     for (int i = 0; i < rank; i++) {
         atom_count += rank_atom_counts.at(i);
     }
+    std::cout << "Rank " << rank << " writing " << rank_atom_counts.at(rank) << " atoms at offset " << offset << std::endl;
 
     // doing sizeof here to be more explicit about the calculations
-    uint32_t indices_offset = offset + (atom_count * sizeof(uint64_t));
-    offset += total_atoms * sizeof(uint64_t);
+    uint32_t indices_offset = offset + (atom_count * sizeof(int64_t));
+    offset += total_atoms * sizeof(int64_t);
     uint32_t positions_offset = offset + (atom_count * 3 * sizeof(float));
     offset += total_atoms * 3 * sizeof(float);
     uint32_t velocities_offset = offset + (atom_count * 3 * sizeof(float));
@@ -230,20 +255,17 @@ void TrajectoryWriter::write_frame(uint32_t frame_idx, torch::Tensor indices, to
 
 
     auto write_tensor = [&](torch::Tensor t, uint32_t off) {
-        size_t tensor_bytes = t.numel() * t.element_size();
-        ssize_t written = pwrite(fd, t.data_ptr(), tensor_bytes, off);
+        torch::Tensor cpu_tensor = t.to(torch::kCPU).contiguous();
+        size_t tensor_bytes = cpu_tensor.numel() * cpu_tensor.element_size();
+        ssize_t written = pwrite(fd, cpu_tensor.data_ptr(), tensor_bytes, off);
 
-        // TODO might have to make this a loop if cant write the entire tensor at once
         if (written < 0) throw std::runtime_error("pwrite failed: " + std::string(strerror(errno)));
         if (static_cast<size_t>(written) != tensor_bytes) throw std::runtime_error("partial write");
     };
 
-    write_tensor(indices.contiguous(), indices_offset); // TODO make sure on CPU
-    write_tensor(positions.contiguous(), positions_offset); // TODO make sure on CPU
-    write_tensor(velocities.contiguous(), velocities_offset); // TODO make sure on CPU
-
-    // to calculate frame offsets better
-    writes += 1;
+    write_tensor(state.atom_vertex_numbers, indices_offset);
+    write_tensor(state.atom_positions, positions_offset);
+    write_tensor(state.atom_velocities, velocities_offset);
 }
 
 MolecularInfo TrajectoryWriter::load_distnnp_file(const std::string& distnnp_file_name) {
@@ -303,13 +325,13 @@ MolecularInfo TrajectoryWriter::load_distnnp_file(const std::string& distnnp_fil
 
     // ids
     
-    uint32_t block_size = atoms.num_atoms * sizeof(uint64_t);
+    uint32_t block_size = atoms.num_atoms * sizeof(int64_t);
     // offset is the start of the frame
-    std::vector<uint64_t> ids(atoms.num_atoms);
+    std::vector<int64_t> ids(atoms.num_atoms);
     n = pread(dist_fd, ids.data(), block_size, loc);
     if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
     if (n != block_size) throw std::runtime_error("unexpected end of file");
-    atoms.atom_vertex_numbers = torch::from_blob(ids.data(), {atoms.num_atoms}, torch::kUInt64).clone();
+    atoms.atom_vertex_numbers = torch::from_blob(ids.data(), {atoms.num_atoms}, torch::kInt64).clone();
 
     loc += block_size; // new loc is at the end of this chunk of data
 
@@ -417,7 +439,7 @@ MolecularInfo TrajectoryWriter::load_xyz_file(const std::string& xyz_file_name) 
 
     // tensor setup
     atoms.num_atoms = num_atoms;
-    atoms.atom_vertex_numbers = torch::arange(0, num_atoms, 1).to(torch::kUInt64);
+    atoms.atom_vertex_numbers = torch::arange(0, num_atoms, 1).to(torch::kInt64);
     atoms.atom_types = torch::from_blob(types.data(), {num_atoms}, torch::kUInt8).clone();
     atoms.atom_positions = torch::from_blob(positions.data(), {num_atoms, 3}).clone();
 
