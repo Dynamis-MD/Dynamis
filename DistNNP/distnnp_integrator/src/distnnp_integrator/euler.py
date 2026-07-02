@@ -62,3 +62,4 @@ class Euler(DistNNPIntegrator):
             atom_masses,
             step_size,
         )
+        return energy, forces

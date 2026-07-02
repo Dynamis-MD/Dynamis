@@ -104,3 +104,5 @@ class Verlet(DistNNPIntegrator):
         self.halfstep2_(
             state.atom_velocities, state.atom_forces, atom_masses, step_size
         )
+
+        return energy, new_forces
