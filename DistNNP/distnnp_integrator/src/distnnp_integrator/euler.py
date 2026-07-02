@@ -45,7 +45,7 @@ class Euler(DistNNPIntegrator):
             model (DistNNPModel): The potential model used to compute forces based on the current state.
         """
         # Compute forces using the provided model
-        energy, forces = model(state)
+        energy, new_forces = model(state)
         if dt is not None:
             step_size = dt
         else:
@@ -58,8 +58,8 @@ class Euler(DistNNPIntegrator):
         self.step_(
             molecular_info.atom_positions,
             molecular_info.atom_velocities,
-            forces,
+            new_forces,
             atom_masses,
             step_size,
         )
-        return energy, forces
+        return energy, new_forces
