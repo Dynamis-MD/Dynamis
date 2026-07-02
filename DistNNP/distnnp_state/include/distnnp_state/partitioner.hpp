@@ -1,11 +1,9 @@
 #pragma once
 #include "distnnp_state/distnnp_state.hpp"
 
-namespace distnnp_state
-{
+namespace distnnp_state {
 
-class AbstractPartitioner
-{
+class AbstractPartitioner {
 public:
   virtual ~AbstractPartitioner() = default;
 
@@ -14,17 +12,17 @@ public:
   virtual PartitionMessagePassingInfo partition(const MolecularInfo &state,
                                                 const DistEnvironment &env) = 0;
 
-  // Shared: builds CSR halo maps using info.partition_id + CUDA radius_graph_pbc.
-  // Fills send_offsets, send_local_indices, recv_offsets, recv_ghost_indices,
-  // interior_mask, and updates global_send_recv_matrix with halo counts.
+  // Shared: builds CSR halo maps using info.partition_id + CUDA
+  // radius_graph_pbc. Fills send_offsets, send_local_indices, recv_offsets,
+  // recv_ghost_indices, interior_mask, and updates global_send_recv_matrix with
+  // halo counts.
   void build_halo_maps(PartitionMessagePassingInfo &info,
                        const MolecularInfo &global_state,
                        const DistEnvironment &env,
                        const SimulationConfig &config);
 };
 
-class SimpleSpatialPartitioner : public AbstractPartitioner
-{
+class SimpleSpatialPartitioner : public AbstractPartitioner {
   // Identity partitioner: contiguous split of global atoms across ranks.
   // Rank r gets atoms [r*N/W, (r+1)*N/W).
 public:
@@ -32,8 +30,7 @@ public:
                                         const DistEnvironment &env) override;
 };
 
-class KDTreePartitioner : public AbstractPartitioner
-{
+class KDTreePartitioner : public AbstractPartitioner {
   // Uses a KD-tree to spatially partition the atoms. More efficient
   // for large systems with non-uniform atom distributions.
   //
@@ -57,8 +54,7 @@ public:
 
 enum class SFCCurveType : int { Morton = 0, Hilbert = 1 };
 
-class SFCPartitioner : public AbstractPartitioner
-{
+class SFCPartitioner : public AbstractPartitioner {
   // Uses a space-filling curve (Morton Z-curve or Hilbert curve) to partition
   // the atoms. Good locality and load balancing for certain systems.
   //
@@ -68,8 +64,10 @@ class SFCPartitioner : public AbstractPartitioner
   //   3. Auto-weighted: edge_counts undefined + SimulationConfig provided
   //      → builds graph at cutoff, computes edge_counts, stores edge_index
   SFCCurveType curve_type_;
+
 public:
-  explicit SFCPartitioner(SFCCurveType ct = SFCCurveType::Morton) : curve_type_(ct) {}
+  explicit SFCPartitioner(SFCCurveType ct = SFCCurveType::Morton)
+      : curve_type_(ct) {}
 
   // Modes 1 & 2: unweighted or user-provided weights
   PartitionMessagePassingInfo partition(const MolecularInfo &state,
