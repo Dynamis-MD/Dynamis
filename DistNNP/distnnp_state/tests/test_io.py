@@ -22,10 +22,10 @@ def test_xyz_extended_io():
     velocities = velocities.reshape(6, 3)
 
     assert env.num_atoms == 6
-    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.uint8), env.atom_types)
+    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.long), env.atom_types)
     assert torch.equal(positions, env.atom_positions)
     assert torch.equal(velocities, env.atom_velocities)
-    assert torch.equal(torch.arange(0, 6, 1).to(torch.uint64), env.atom_vertex_numbers)
+    assert torch.equal(torch.arange(0, 6, 1).to(torch.int64), env.atom_vertex_numbers)
 
 def test_xyz_io():
     """Regular xyz test"""
@@ -39,10 +39,10 @@ def test_xyz_io():
     positions = torch.concat((values, values), dim=0)
     positions = positions.reshape([6, 3])
     assert env.num_atoms == 6
-    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.uint8), env.atom_types)
+    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.long), env.atom_types)
     assert torch.equal(positions, env.atom_positions)
     assert torch.equal(torch.zeros([6, 3]), env.atom_velocities)
-    assert torch.equal(torch.arange(0, 6, 1).to(torch.uint64), env.atom_vertex_numbers)
+    assert torch.equal(torch.arange(0, 6, 1).to(torch.int64), env.atom_vertex_numbers)
 
 def test_distnnp_io():
     """Distnnp test"""
@@ -63,10 +63,10 @@ def test_distnnp_io():
     env2 = writer2.initialize("./trajectory.distnnp", 1.0, 1)
 
     assert env2.num_atoms == 6
-    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.uint8), env2.atom_types)
+    assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.long), env2.atom_types)
     assert torch.equal(positions, env2.atom_positions)
     assert torch.equal(torch.zeros([6, 3], dtype=torch.float32), env2.atom_velocities)
-    assert torch.equal(torch.arange(0, 6, 1).to(torch.uint64), env2.atom_vertex_numbers)
+    assert torch.equal(torch.arange(0, 6, 1).to(torch.int64), env2.atom_vertex_numbers)
 
 
 def test_write_front_matter():

@@ -204,7 +204,7 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
 
     // tensor of atomic numbers
     // TODO this could be large and its own separate write to the file to make things easier probably
-    auto t = state.atom_types.contiguous();
+    auto t = state.atom_types.contiguous().toType(torch::kUInt8);
 
     size_t tensor_bytes = t.numel() * t.element_size();
     memcpy(buf.data() + offset, t.data_ptr(), tensor_bytes);
@@ -316,7 +316,7 @@ MolecularInfo TrajectoryWriter::load_distnnp_file(const std::string& distnnp_fil
     n = pread(dist_fd, types.data(), types.size(), 224);
     if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
     if (n != types.size()) throw std::runtime_error("unexpected end of file");
-    atoms.atom_types = torch::from_blob(types.data(), {atoms.num_atoms}, torch::kUInt8).clone();
+    atoms.atom_types = torch::from_blob(types.data(), {atoms.num_atoms}, torch::kUInt8).clone().to(torch::kInt64);
 
     uint64_t frame_size = bytes_per_atom * atoms.num_atoms;
 
@@ -440,7 +440,7 @@ MolecularInfo TrajectoryWriter::load_xyz_file(const std::string& xyz_file_name) 
     // tensor setup
     atoms.num_atoms = num_atoms;
     atoms.atom_vertex_numbers = torch::arange(0, num_atoms, 1).to(torch::kInt64);
-    atoms.atom_types = torch::from_blob(types.data(), {num_atoms}, torch::kUInt8).clone();
+    atoms.atom_types = torch::from_blob(types.data(), {num_atoms}, torch::kUInt8).clone().toType(torch::kInt64);
     atoms.atom_positions = torch::from_blob(positions.data(), {num_atoms, 3}).clone();
 
     if (velocity_index == -1)
@@ -452,14 +452,14 @@ MolecularInfo TrajectoryWriter::load_xyz_file(const std::string& xyz_file_name) 
 }
 void TrajectoryWriter::write_to_xyz(const MolecularInfo& state, const std::string& file_name) {
 
-    std::unordered_map<uint8_t, std::string> reversed_table;
+    std::unordered_map<int64_t, std::string> reversed_table;
 
     for (const auto& [label, number] : periodic_table) {
-        reversed_table.insert({number, label});
+        reversed_table.insert({static_cast<int64_t>(number), label});
     }
 
     // accessors for the state info
-    auto types = state.atom_types.accessor<uint8_t, 1>();
+    auto types = state.atom_types.accessor<int64_t, 1>();
     auto positions = state.atom_positions.accessor<float, 2>();
     auto velocities = state.atom_velocities.accessor<float, 2>();
 
