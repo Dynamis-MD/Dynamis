@@ -69,9 +69,6 @@ class SimState:
             partition_info.partition_indices
         ]
         num_local_atoms = local_molecular_info.atom_positions.shape[0]
-        local_molecular_info.atom_forces = torch.zeros(
-            num_local_atoms, 3, device=self.device
-        )
         local_molecular_info.num_atoms = num_local_atoms
 
         return local_molecular_info
