@@ -51,11 +51,9 @@ class Euler(DistNNPIntegrator):
         else:
             step_size = self.dt
 
-        
-
         molecular_info = state.local_molecular_info
 
-        atom_masses = TORCH_MASSES.to(molecular_info.atom_positions.device)[state.atom_types.reshape(-1)]
+        atom_masses = TORCH_MASSES.to(molecular_info.atom_positions.device)[state.atom_types.reshape(-1).to(torch.long)]
         # Update positions and velocities using the Euler method
         self.step_(
             molecular_info.atom_positions,

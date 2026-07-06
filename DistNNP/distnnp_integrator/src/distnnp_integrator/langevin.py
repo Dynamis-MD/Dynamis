@@ -93,7 +93,7 @@ class Langevin(DistNNPIntegrator):
 
         # Langevin requires normally distributed noise for thermal kicks
         noise1 = torch.randn_like(state.atom_velocities)
-        atom_masses = TORCH_MASSES.to(state.atom_positions.device)[state.atom_types.reshape(-1)]
+        atom_masses = TORCH_MASSES.to(state.atom_positions.device)[state.atom_types.reshape(-1).to(torch.long)]
 
         energy, new_forces = model(dist_state)
         state.atom_forces = new_forces
