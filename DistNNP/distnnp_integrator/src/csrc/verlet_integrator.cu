@@ -15,9 +15,7 @@ namespace
   {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_floats) {
-      //velocities[idx] += 0.5f * (forces[idx] / masses[idx / 3]) * dt;
-      // eV_fs2_per_amu_ang2 = 0.009649f
-      velocities[idx] += 0.5f * (forces[idx] / masses[idx / 3]) * dt * 0.009649f;
+      velocities[idx] += 0.5f * (forces[idx] / masses[idx / 3]) * dt;
       positions[idx] += velocities[idx] * dt;
     }
   }
