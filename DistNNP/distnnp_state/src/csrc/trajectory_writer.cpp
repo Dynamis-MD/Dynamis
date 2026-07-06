@@ -407,10 +407,15 @@ MolecularInfo TrajectoryWriter::load_xyz_file(const std::string& xyz_file_name) 
     std::vector<uint8_t> types;
     std::vector<float> positions;
     std::vector<float> velocities;
-    while (std::getline(xyz_file, line)) {
+    for (int i = 0; i < num_atoms; i++) {
+	// only parse the first frame if multiple
+	if (!std::getline(xyz_file, line)) break;
+	if (!line.empty() && line.back() == '\r')
+	    line.pop_back();
+
         // add this atom to info
         std::stringstream ss(line);
-        std::string element, xstr, ystr, zstr;
+        std::string element, xstr, ystr, zstr, extra;
         if(!(ss >> element >> xstr >> ystr >> zstr)) {
             std::cerr << "Line failed to parse" << std::endl;
             return atoms;
