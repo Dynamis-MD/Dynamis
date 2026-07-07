@@ -1,8 +1,8 @@
 ---
 BasedOnStyle: WebKit
-Standard: Cpp11
+Standard: Latest
 SortIncludes: false
-ColumnLimit: 0
+ColumnLimit: 80
 ContinuationIndentWidth: 8
 FixNamespaceComments: true
 NamespaceIndentation: None
@@ -13,6 +13,7 @@ AllowShortFunctionsOnASingleLine: Inline
 ConstructorInitializerAllOnOneLineOrOnePerLine: true
 AlwaysBreakTemplateDeclarations: true
 BreakBeforeBinaryOperators: None
+BreakStringLiterals: true
 SpaceBeforeCpp11BracedList: false
 BreakBeforeBraces: Custom
 BraceWrapping:
