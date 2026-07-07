@@ -1,0 +1,63 @@
+# DistNNP experiment dataset checksums (SHA256)
+# ---------------------------------------------------------------------------
+# Paths are relative to experiments/exp_datasets/.
+# Verify one tier (run from experiments/exp_datasets/):
+#     grep -E '^[0-9a-f]{64}  baselines/'       scripts/checksums.txt | sha256sum -c -
+#     grep -E '^[0-9a-f]{64}  (protein_|membrane/)' scripts/checksums.txt | sha256sum -c -
+# setup_data.sh does this automatically after each tier.
+#
+# TIERS
+#   Tier 1  baselines/       generated  — scripts/03_generate_ch4.py (version-independent)
+#   Tier 2  pdb/             downloaded — scripts/01_download_pdbs.sh (RCSB; informational)
+#   Tier 3  protein_*/ etc.  archive    — scripts/download_datasets.sh (hosted tar.xz)
+#   Tier 4  *_density.xyz    external   — user-provided (../data/ symlinks); not listed here
+#
+# ===========================================================================
+# Tier 1 — CH4/O2 baselines (generated, bit-reproducible)
+# `python scripts/03_generate_ch4.py --overwrite` reproduces these byte-for-byte
+# on any platform / NumPy version. Positions are bit-exact everywhere; momenta
+# are stable across NumPy versions and may differ only in the last ULP across
+# libm implementations (physically irrelevant — MD re-thermalizes velocities).
+#
+# Only the normal-density "splited" variant is pinned/shipped. The "cluster"
+# variant is an opt-in extreme partition-imbalance artifact (CH4 concentrated,
+# atoms overlapping by design) — generate with `--variants cluster`; it is
+# intentionally NOT checksummed here.
+# ===========================================================================
+d9123a2f34f14d9a1a40bff8ed4284bd16fdd7205729c398c5d66b0084a2deea  baselines/ch4_1k_splited.xyz
+0232ff3bc5ade8eb2fc1d46599298263ef39ce32fe1d6182081854bdd2db1fcc  baselines/ch4_2k_splited.xyz
+5f9c117eb060ae31a10d97e2d6b9c016077f350d0791cd013ad450720b32f9d7  baselines/ch4_4k_splited.xyz
+098d8ca96d8824f7de92adc2ff05d8ed9f858b73a360e934656dad934eeeec61  baselines/ch4_8k_splited.xyz
+4460fbb5a76328745144e2053997eb7e7c6621157e261bb746b7b1531e69930a  baselines/ch4_16k_splited.xyz
+ebb1d421aae9e514ec97c696de1c18eb89cfbe392716ea7ab547e86c0c28bf26  baselines/ch4_32k_splited.xyz
+6334fc8b2a93998368cdfbb255e455aa4a76462843f4153b99586122763914af  baselines/ch4_64k_splited.xyz
+15cb03cfb2a528f1ba1b3fa3acb9a21dcf8a21d95d999b2ab72cef4eda457531  baselines/ch4_128k_splited.xyz
+a4304327f89adfc5e291d9d9483d416f10542e1488ac560d5118f17403feb8b0  baselines/ch4_256k_splited.xyz
+8ee51a434acc3789a3852b52c12b31bc096544178bdadebf26b67c4fdda66813  baselines/ch4_512k_splited.xyz
+3b586298b9ddbd29495fc15647abe32b3e3d0e546953c4bce6dd7c9de9455a72  baselines/ch4_1024k_splited.xyz
+#
+# ===========================================================================
+# Tier 2 — raw PDB structures (downloaded from RCSB) — INFORMATIONAL ONLY
+# RCSB may re-version (remediate) entries; a mismatch means upstream changed,
+# not that your download is corrupt. 1AKI/2RIK/9GMO.cif are also fetched by
+# 01_download_pdbs.sh but were not pinned here.
+# ===========================================================================
+069c2263baa97042bb09544c9913f1fa52097bb8deff0c5b36b7c4969c08b909  pdb/1GRL.pdb
+2b96d4099d2379d40c43884fdc08b8728b873d334d7c746081c2ae68b6077279  pdb/2W49.pdb
+4ef448eb9767e615b688678e6eb874c69e9ee8e53eece07f0830b8c7ca62bb0f  pdb/6P9X.pdb
+900cdb7a2d9a90f4cbd1de43e9562566cb281a92e8696ce5a87f95a4bb2cb88e  pdb/apoa1.pdb
+#
+# ===========================================================================
+# Tier 3 — hosted archive + its extracted contents (version-dependent)
+# Built from pdbfixer/OpenMM output; NOT bit-reproducible across tool versions,
+# so distributed as a checksummed archive. download_datasets.sh fetches it.
+# ===========================================================================
+0ce2c20ed9abcd906a93120fb8b58745459fde540fcf690bfc7c9b280546e4f2  distnnp_exp_datasets_v1.tar.xz
+b0ab0549e5ff83e1d38a8659f8b2d817cf55ddd3433938a8a971b55410910cea  protein_vacuum/1aki_vacuum_openmm.xyz
+1d354aea0f49c0535f5594ef8101951f2d0004b83248366746a7f323a2a1f9d0  protein_vacuum/2rik_vacuum_openmm.xyz
+36c4d74b06f83ad0ebd2312aeb33cf5b45a57f0d0d2024f3f400db89a36132e9  protein_vacuum/2w49_vacuum_openmm.xyz
+cc5ca9d0e64b7c18a91184915e744974ea8960996444178e58696d83665754cd  protein_vacuum/6p9x_vacuum_openmm.xyz
+3124191353cb079b44f9c9441e5f9880ba1bd811d23f160c9393c85d039604ec  protein_vacuum/9gmo_vacuum.xyz
+02ed828c65d74d32b1b707b66dec76be620ac263c5e394ba7fbab28d5adee4bb  protein_vacuum/groel_vacuum_openmm.xyz
+e89902240abec93a98a507313fa1d60e6dad3080fe0ee5d0dc7c2678b815de80  membrane/apoa1_92k_openmm.xyz
+8302ca57d65455aab5adb6cec7e892efce21d61b24d1ee0cb0aae4f2277a7ce5  protein_solvated/dhfr_23k_openmm.xyz
