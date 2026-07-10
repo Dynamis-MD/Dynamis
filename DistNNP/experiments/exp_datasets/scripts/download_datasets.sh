@@ -85,15 +85,41 @@ if [[ "$DO_ARCHIVE" == "1" ]]; then
         echo "  Using local archive: $ARCHIVE_LOCAL"
         src="$ARCHIVE_LOCAL"; cleanup=0
     else
-        echo "  Downloading $ARCHIVE_URL ..."
-        src="$DATASETS_DIR/$ARCHIVE_NAME"; cleanup=1
-        if ! wget -q -O "$src" "$ARCHIVE_URL"; then
+        # Download to a TEMP file, never to "$DATASETS_DIR/$ARCHIVE_NAME": a
+        # locally-built archive may already live there, and cleanup on failure
+        # (rm -f "$src") would destroy it.
+        src="$(mktemp "${TMPDIR:-/tmp}/distnnp_archive.XXXXXX")"; cleanup=1
+        got=0
+        # Preferred: authenticated download via gh. Required for a PRIVATE repo —
+        # release assets inherit repo visibility, so an unauthenticated wget of a
+        # private asset 404s. Skipped when the user pinned an explicit public URL
+        # via DISTNNP_ARCHIVE_URL.
+        if [[ -z "${DISTNNP_ARCHIVE_URL:-}" ]] && command -v gh >/dev/null 2>&1; then
+            echo "  Downloading via gh: ${ARCHIVE_REPO} ${ARCHIVE_TAG}/${ARCHIVE_NAME} ..."
+            if gh release download "$ARCHIVE_TAG" -R "$ARCHIVE_REPO" \
+                   -p "$ARCHIVE_NAME" -O "$src" --clobber 2>/dev/null; then
+                got=1
+            else
+                echo "  (gh download unavailable — falling back to direct URL)"
+            fi
+        fi
+        # Fallback: unauthenticated direct URL. Works only if the asset is PUBLIC,
+        # or DISTNNP_ARCHIVE_URL points at a public host. The interface is kept for
+        # when the archive is eventually published publicly — nothing is uploaded here.
+        if [[ "$got" == "0" ]]; then
+            echo "  Downloading $ARCHIVE_URL ..."
+            if wget -q -O "$src" "$ARCHIVE_URL"; then
+                got=1
+            fi
+        fi
+        if [[ "$got" == "0" ]]; then
             rm -f "$src"
-            echo "  ERROR: download failed."
-            echo "  Expected a published GitHub Release '${ARCHIVE_TAG}' on ${ARCHIVE_REPO}"
-            echo "  with asset '${ARCHIVE_NAME}' attached. Create it with:"
-            echo "    gh release create ${ARCHIVE_TAG} ${ARCHIVE_NAME} --title '...' --notes '...'"
-            echo "  Or override: DISTNNP_ARCHIVE_URL=<url> / DISTNNP_ARCHIVE_LOCAL=<path>"
+            echo "  ERROR: could not obtain '${ARCHIVE_NAME}'."
+            echo "  ${ARCHIVE_REPO} is private, so its release asset needs an authenticated"
+            echo "  download. Do one of:"
+            echo "    - gh auth login   (with read access to ${ARCHIVE_REPO}), then re-run"
+            echo "    - publish it:  gh release create ${ARCHIVE_TAG} ${ARCHIVE_NAME} -R ${ARCHIVE_REPO} --title '...' --notes '...'"
+            echo "    - override:    DISTNNP_ARCHIVE_LOCAL=<path>  or  DISTNNP_ARCHIVE_URL=<public-url>"
             exit 1
         fi
     fi

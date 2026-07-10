@@ -52,7 +52,7 @@ a4304327f89adfc5e291d9d9483d416f10542e1488ac560d5118f17403feb8b0  baselines/ch4_
 # Built from pdbfixer/OpenMM output; NOT bit-reproducible across tool versions,
 # so distributed as a checksummed archive. download_datasets.sh fetches it.
 # ===========================================================================
-0ce2c20ed9abcd906a93120fb8b58745459fde540fcf690bfc7c9b280546e4f2  distnnp_exp_datasets_v1.tar.xz
+ebac02db20776fe31862509c984a18cc299f46717948977745e3727fe8c32b15  distnnp_exp_datasets_v1.tar.xz
 b0ab0549e5ff83e1d38a8659f8b2d817cf55ddd3433938a8a971b55410910cea  protein_vacuum/1aki_vacuum_openmm.xyz
 1d354aea0f49c0535f5594ef8101951f2d0004b83248366746a7f323a2a1f9d0  protein_vacuum/2rik_vacuum_openmm.xyz
 36c4d74b06f83ad0ebd2312aeb33cf5b45a57f0d0d2024f3f400db89a36132e9  protein_vacuum/2w49_vacuum_openmm.xyz
