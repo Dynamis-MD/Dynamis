@@ -141,7 +141,15 @@ PYBIND11_MODULE(distnnp_state_impl, m) {
            "Update the rank offsets. Should be called after every repartition",
            py::arg("counts"))
       .def("submit", &distnnp_state::TrajectoryWriter::submit,
-           "Submits a state to be written", py::arg("step"), py::arg("state"))
+           "Submits a state to be written. cell/pbc are optional and are "
+           "carried forward from the last value seen if omitted",
+           py::arg("step"), py::arg("state"),
+           py::arg("cell") = c10::optional<at::Tensor>{},
+           py::arg("pbc") = c10::optional<at::Tensor>{})
+      .def("get_cell", &distnnp_state::TrajectoryWriter::get_cell,
+           "Returns the currently cached simulation cell (float32 [3, 3])")
+      .def("get_pbc", &distnnp_state::TrajectoryWriter::get_pbc,
+           "Returns the currently cached periodic boundary flags (uint8 [3])")
       .def("flush", &distnnp_state::TrajectoryWriter::flush,
            "Flushes the queue and closes the file")
       .def("__enter__",
