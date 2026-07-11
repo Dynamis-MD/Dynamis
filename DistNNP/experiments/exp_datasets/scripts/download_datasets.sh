@@ -14,16 +14,25 @@
 #   bash download_datasets.sh --pdb-only
 #   bash download_datasets.sh --archive-only
 #
+# Archive source resolution (first hit that verifies wins):
+#   1. DISTNNP_ARCHIVE_LOCAL      — explicit local copy (never downloaded/deleted)
+#   2. shared-dir cache           — DISTNNP_ARCHIVE_SHARED_DIR/<archive> (see below)
+#   3. gh release download        — authenticated (needed for a PRIVATE repo)
+#   4. wget from DISTNNP_ARCHIVE_URL / GitHub Release URL (public only)
+# On a shared cluster (e.g. Delta) the archive lives in a group-readable dir so
+# the ~23 MB download happens ONCE for the whole team; only a miss or a stale
+# copy falls through to the network. A fresh download is cached back there.
+#
 # The archive is distributed as a GitHub Release asset (NOT committed to git —
-# it stays out of the repo's history). By default this script fetches it from
-# the release below; create it once with:
+# it stays out of the repo's history). Create it once with:
 #   gh release create datasets-v1 distnnp_exp_datasets_v1.tar.xz \
-#       --title "DistNNP experiment datasets v1" --notes "protein/membrane XYZ"
+#       --title "DistNNP experiment datasets v1" --notes "protein/membrane/capsid XYZ"
 # Override the source via any of:
 #   export DISTNNP_ARCHIVE_REPO="owner/repo"      # default: szaman19/DistNNP
 #   export DISTNNP_ARCHIVE_TAG="datasets-v1"      # release tag
 #   export DISTNNP_ARCHIVE_URL="https://.../distnnp_exp_datasets_v1.tar.xz"  # full URL
 #   export DISTNNP_ARCHIVE_LOCAL="/path/to/distnnp_exp_datasets_v1.tar.xz"   # local copy
+#   export DISTNNP_ARCHIVE_SHARED_DIR="/projects/bcpt/public/distnnp_datasets" # shared cache (default)
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,6 +45,8 @@ ARCHIVE_REPO="${DISTNNP_ARCHIVE_REPO:-szaman19/DistNNP}"
 ARCHIVE_TAG="${DISTNNP_ARCHIVE_TAG:-datasets-v1}"
 ARCHIVE_URL="${DISTNNP_ARCHIVE_URL:-https://github.com/${ARCHIVE_REPO}/releases/download/${ARCHIVE_TAG}/${ARCHIVE_NAME}}"
 ARCHIVE_LOCAL="${DISTNNP_ARCHIVE_LOCAL:-}"
+# Shared group-readable cache (checked before any download; "" disables).
+ARCHIVE_SHARED_DIR="${DISTNNP_ARCHIVE_SHARED_DIR:-/projects/bcpt/public/distnnp_datasets}"
 
 DO_PDB=1
 DO_ARCHIVE=1
@@ -77,14 +88,29 @@ fi
 
 # ── Tier 3: hosted version-dependent archive ──────────────────────────────
 if [[ "$DO_ARCHIVE" == "1" ]]; then
-    echo ">>> Tier 3: hosted protein/membrane archive"
+    echo ">>> Tier 3: hosted protein/membrane/capsid archive"
+
+    expected="$(grep "  ${ARCHIVE_NAME}\$" "$CHECKSUMS" | awk '{print $1}')"
+    archive_ok() {  # 0 iff $1 exists and its sha256 matches the pinned archive hash
+        [[ -f "$1" ]] || return 1
+        [[ "$(sha256sum "$1" | awk '{print $1}')" == "$expected" ]]
+    }
+    shared_copy=""
+    [[ -n "$ARCHIVE_SHARED_DIR" ]] && shared_copy="$ARCHIVE_SHARED_DIR/$ARCHIVE_NAME"
 
     # Resolve the archive source. `cleanup=1` marks a temp we downloaded and may
-    # delete; a user-provided local archive is NEVER deleted.
+    # delete; a local/shared copy is NEVER deleted.
+    src=""; cleanup=0
     if [[ -n "$ARCHIVE_LOCAL" ]]; then
         echo "  Using local archive: $ARCHIVE_LOCAL"
         src="$ARCHIVE_LOCAL"; cleanup=0
+    elif [[ -n "$shared_copy" && -f "$shared_copy" ]] && archive_ok "$shared_copy"; then
+        # Primary path on a shared cluster: verified cache, no network.
+        echo "  Using shared cache: $shared_copy"
+        src="$shared_copy"; cleanup=0
     else
+        [[ -n "$shared_copy" && -f "$shared_copy" ]] && \
+            echo "  (shared cache present but checksum stale — re-downloading)"
         # Download to a TEMP file, never to "$DATASETS_DIR/$ARCHIVE_NAME": a
         # locally-built archive may already live there, and cleanup on failure
         # (rm -f "$src") would destroy it.
@@ -120,17 +146,29 @@ if [[ "$DO_ARCHIVE" == "1" ]]; then
             echo "    - gh auth login   (with read access to ${ARCHIVE_REPO}), then re-run"
             echo "    - publish it:  gh release create ${ARCHIVE_TAG} ${ARCHIVE_NAME} -R ${ARCHIVE_REPO} --title '...' --notes '...'"
             echo "    - override:    DISTNNP_ARCHIVE_LOCAL=<path>  or  DISTNNP_ARCHIVE_URL=<public-url>"
+            echo "    - shared cache: put ${ARCHIVE_NAME} in ${ARCHIVE_SHARED_DIR:-<disabled>}"
             exit 1
+        fi
+        # Best-effort: seed the shared cache so teammates skip the download.
+        # Atomic (tmp + mv); never fatal if the dir is read-only for us.
+        if [[ -n "$shared_copy" ]] && archive_ok "$src"; then
+            if mkdir -p "$ARCHIVE_SHARED_DIR" 2>/dev/null \
+               && cp "$src" "${shared_copy}.tmp.$$" 2>/dev/null \
+               && mv "${shared_copy}.tmp.$$" "$shared_copy" 2>/dev/null; then
+                chmod 0664 "$shared_copy" 2>/dev/null || true
+                echo "  Cached archive into shared dir: $shared_copy"
+            else
+                rm -f "${shared_copy}.tmp.$$" 2>/dev/null || true
+            fi
         fi
     fi
 
-    # Verify the archive itself before trusting it.
+    # Authoritative verify before trusting it (also catches a bad LOCAL override).
     echo "  Verifying archive checksum ..."
-    expected="$(grep "  ${ARCHIVE_NAME}\$" "$CHECKSUMS" | awk '{print $1}')"
-    actual="$(sha256sum "$src" | awk '{print $1}')"
-    if [[ "$expected" != "$actual" ]]; then
+    if ! archive_ok "$src"; then
         echo "  ERROR: archive checksum mismatch"
-        echo "    expected $expected"; echo "    actual   $actual"
+        echo "    expected $expected"
+        echo "    actual   $(sha256sum "$src" | awk '{print $1}')"
         [[ "$cleanup" == "1" ]] && rm -f "$src"
         exit 1
     fi
@@ -141,7 +179,7 @@ if [[ "$DO_ARCHIVE" == "1" ]]; then
     [[ "$cleanup" == "1" ]] && rm -f "$src"
 
     # Verify extracted per-file checksums (fatal).
-    verify_subset '(protein_vacuum/|protein_solvated/|membrane/)' "extracted files" 1
+    verify_subset '(protein_vacuum/|protein_solvated/|membrane/|capsid/)' "extracted files" 1
     echo ""
 fi
 

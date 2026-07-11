@@ -50,9 +50,14 @@ a4304327f89adfc5e291d9d9483d416f10542e1488ac560d5118f17403feb8b0  baselines/ch4_
 # ===========================================================================
 # Tier 3 — hosted archive + its extracted contents (version-dependent)
 # Built from pdbfixer/OpenMM output; NOT bit-reproducible across tool versions,
-# so distributed as a checksummed archive. download_datasets.sh fetches it.
+# so distributed as a checksummed archive. download_datasets.sh fetches it
+# (shared-dir cache on Delta, else gh/wget). The archive also ships the HIV
+# capsid (below), whose full structure IS a deterministic RCSB parse — pinned
+# here so the shipped copy is verifiable, but a checksum mismatch after an RCSB
+# re-version of 3J3Q is upstream drift, not corruption (regenerate with
+# scripts/07_retrieve_hiv.py).
 # ===========================================================================
-ebac02db20776fe31862509c984a18cc299f46717948977745e3727fe8c32b15  distnnp_exp_datasets_v1.tar.xz
+d7d80a1771222d1ee9a64c0bb28f79cc2ec35090a67222f3b1ee339581378902  distnnp_exp_datasets_v1.tar.xz
 b0ab0549e5ff83e1d38a8659f8b2d817cf55ddd3433938a8a971b55410910cea  protein_vacuum/1aki_vacuum_openmm.xyz
 1d354aea0f49c0535f5594ef8101951f2d0004b83248366746a7f323a2a1f9d0  protein_vacuum/2rik_vacuum_openmm.xyz
 36c4d74b06f83ad0ebd2312aeb33cf5b45a57f0d0d2024f3f400db89a36132e9  protein_vacuum/2w49_vacuum_openmm.xyz
@@ -61,3 +66,8 @@ cc5ca9d0e64b7c18a91184915e744974ea8960996444178e58696d83665754cd  protein_vacuum
 02ed828c65d74d32b1b707b66dec76be620ac263c5e394ba7fbab28d5adee4bb  protein_vacuum/groel_vacuum_openmm.xyz
 e89902240abec93a98a507313fa1d60e6dad3080fe0ee5d0dc7c2678b815de80  membrane/apoa1_92k_openmm.xyz
 8302ca57d65455aab5adb6cec7e892efce21d61b24d1ee0cb0aae4f2277a7ce5  protein_solvated/dhfr_23k_openmm.xyz
+# HIV-1 capsid (PDB 3J3Q, heavy-atom only). Full = deterministic RCSB mmCIF parse;
+# sub150/sub350 = nested shell cubes cut by 07_retrieve_hiv.py (corner 297,216,184).
+d2f5fdd300f1a27f6024e28c90aae1c4d7106dde662f3b8012f033a97bfb7410  capsid/3j3q_capsid.xyz
+3a109dc5e52fd27664c94e39461bcfa69179234c62d2ad212b7fc5b6885a8e72  capsid/3j3q_capsid_sub150.xyz
+871c0cc10ba20f0958123097ecf97a404668954258ca138b3f4a6e65f68e8433  capsid/3j3q_capsid_sub350.xyz

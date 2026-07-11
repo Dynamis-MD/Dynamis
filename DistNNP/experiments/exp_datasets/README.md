@@ -15,8 +15,10 @@ Each dataset is obtained the most reproducible way available (see
   `scripts/03_generate_ch4.py`, **bit-reproducible** on any platform / NumPy
   version (numpy is the only dep). The overlapping `cluster` variant is opt-in.
 - **Tier 2 — raw PDB structures**: downloaded from RCSB by accession.
-- **Tier 3 — protein/membrane XYZ**: downloaded as one SHA256-verified archive
-  (their pdbfixer/OpenMM origin is not reproducible across tool versions).
+- **Tier 3 — protein/membrane/capsid XYZ**: downloaded as one SHA256-verified
+  archive (their pdbfixer/OpenMM origin is not reproducible across tool versions;
+  the HIV capsid rides along for convenience — see below). On Delta the archive
+  is served from a shared cache so the ~23 MB download happens once per team.
 - **Tier 4 — large `*_density.xyz`**: external user data (`../data/` symlinks).
 
 ## Directory Structure
@@ -28,7 +30,8 @@ exp_datasets/
 ├── protein_solvated/    # Protein + explicit water (PBC, liquid density)
 ├── protein_vacuum/      # Protein only, no water (tight box)
 ├── electrochemical/     # Pt(111) slab + explicit water
-└── membrane/            # DPPC lipid bilayer + water
+├── membrane/            # DPPC lipid bilayer + water
+└── capsid/              # HIV-1 capsid (3J3Q, ~2.4 M atoms) + shell subsets
 ```
 
 ## All Datasets
@@ -57,6 +60,17 @@ exp_datasets/
 | 2w49_vacuum_openmm.xyz | 153,456 | PDB 2W49 (DistMLIP) | Filament, sparse |
 | 9gmo_vacuum.xyz | 228,994 | PDB 9GMO | Large complex |
 
+### HIV-1 Capsid (large-scale benchmark, `capsid/`)
+Real, non-synthetic ~2.4 M-atom structure (PDB 3J3Q), heavy atoms only. See
+`capsid/README.md`. The full capsid is a deterministic RCSB parse
+(`scripts/07_retrieve_hiv.py`); the two subsets are nested shell cubes.
+
+| File | Atoms | Source | Type |
+|------|------:|--------|------|
+| 3j3q_capsid.xyz | 2,440,800 | PDB 3J3Q (RCSB) | Full capsid |
+| 3j3q_capsid_sub350.xyz | 175,218 | 3J3Q shell cube L=350 | Mid-scale subset |
+| 3j3q_capsid_sub150.xyz | 33,212 | 3J3Q shell cube L=150 | Small subset (2-GPU repro) |
+
 ### Electrochemical Interface
 | File | Atoms | Source |
 |------|------:|--------|
@@ -74,6 +88,7 @@ exp_datasets/
 | Source | Systems | How obtained |
 |--------|---------|-------------|
 | RCSB PDB | 1AKI, 2RIK, 9GMO, 1GRL, 2W49, 6P9X | wget from https://files.rcsb.org/download/ |
+| RCSB PDB | 3J3Q (HIV-1 capsid) | `07_retrieve_hiv.py` — mmCIF.gz → heavy-atom XYZ |
 | OpenMM/openmmtools | DHFR, ApoA1, DPPC | pip install openmmtools; GitHub download |
 | DistMLIP paper | 2W49, 6P9X | PDB download (benchmark systems from https://arxiv.org/abs/2506.02023) |
 | Self-generated | CH4, Pt slab | ASE build + grid water fill |
