@@ -277,7 +277,7 @@ class GPUDirectExchanger(Exchanger):
         dist.all_gather(all_halo_exchanger_handles_tensor, halo_exchanger_handle_tensor)
         dist.all_gather(all_grad_handles_tensor, grad_handle_tensor)
 
-        all_halo_echanger_handles = [t.cpu().tolist() for t in all_halo_exchanger_handles_tensor]
+        all_halo_exchanger_handles = [t.cpu().tolist() for t in all_halo_exchanger_handles_tensor]
         all_grad_handles = [t.cpu().tolist() for t in all_grad_handles_tensor]
 
         # Gather recv_offsets and num_local from all ranks
@@ -309,7 +309,7 @@ class GPUDirectExchanger(Exchanger):
         self.exchanger.setup_ipc(
             halo_exchanger_buffer,
             grad_recv_buffer,
-            all_halo_echanger_handles,
+            all_halo_exchanger_handles,
             all_grad_handles,
             send_offsets,
             send_local_indices,
