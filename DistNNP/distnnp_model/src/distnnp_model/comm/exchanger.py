@@ -239,7 +239,7 @@ class GPUDirectExchanger(Exchanger):
         # is only populated for this rank's own row (it is never all-reduced in the
         # pipeline), so sum(dim=0)[rank] wrongly returns num_local instead of the
         # true ghost-recv count — under-sizing the ghost region and causing IPC
-        # peers to overflow x_buffer (and, at W=1, appending num_local phantom
+        # peers to overflow halo_exchanger_buffer (and, at W=1, appending num_local phantom
         # rows that corrupt the graph).
         total_recv = int(recv_offsets[-1].item())  # ghost atoms this rank receives
         total_send = int(send_offsets[-1].item())  # atoms this rank sends to peers
@@ -248,23 +248,24 @@ class GPUDirectExchanger(Exchanger):
         # cudaIpcGetMemHandle rejects a 0-byte allocation, so allocate at least
         # one row for the handle; CSR offsets bound all real reads/writes, so the
         # padding row is never touched (matters at W=1 where total_send == 0).
-        x_buffer = FeatureExchanger.allocate_ipc_buffer(
+        halo_exchanger_buffer = FeatureExchanger.allocate_ipc_buffer(
             max(1, n_local + total_recv), feature_dim, rank
         )
+        self.send_buffer = halo_exchanger_buffer
         grad_recv_buffer = FeatureExchanger.allocate_ipc_buffer(
             max(1, total_send), feature_dim, rank
         )
         self.grad_recv_buffer = grad_recv_buffer
 
         # --- Exchange IPC handles via NCCL broadcast ---
-        x_handle = self.exchanger.export_ipc_handle(x_buffer)
+        halo_exchanger_handle = self.exchanger.export_ipc_handle(halo_exchanger_buffer)
         grad_handle = self.exchanger.export_ipc_handle(grad_recv_buffer)
 
-        handle_size = len(x_handle)
-        x_handle_tensor = torch.tensor(x_handle, dtype=torch.uint8, device=device)
+        handle_size = len(halo_exchanger_handle)
+        halo_exchanger_handle_tensor = torch.tensor(halo_exchanger_handle, dtype=torch.uint8, device=device)
         grad_handle_tensor = torch.tensor(grad_handle, dtype=torch.uint8, device=device)
 
-        all_x_handles_tensor = [
+        all_halo_exchanger_handles_tensor = [
             torch.zeros(handle_size, dtype=torch.uint8, device=device)
             for _ in range(world_size)
         ]
@@ -273,10 +274,10 @@ class GPUDirectExchanger(Exchanger):
             for _ in range(world_size)
         ]
 
-        dist.all_gather(all_x_handles_tensor, x_handle_tensor)
+        dist.all_gather(all_halo_exchanger_handles_tensor, halo_exchanger_handle_tensor)
         dist.all_gather(all_grad_handles_tensor, grad_handle_tensor)
 
-        all_x_handles = [t.cpu().tolist() for t in all_x_handles_tensor]
+        all_halo_echanger_handles = [t.cpu().tolist() for t in all_halo_exchanger_handles_tensor]
         all_grad_handles = [t.cpu().tolist() for t in all_grad_handles_tensor]
 
         # Gather recv_offsets and num_local from all ranks
@@ -306,9 +307,9 @@ class GPUDirectExchanger(Exchanger):
 
         # --- Setup IPC ---
         self.exchanger.setup_ipc(
-            x_buffer,
+            halo_exchanger_buffer,
             grad_recv_buffer,
-            all_x_handles,
+            all_halo_echanger_handles,
             all_grad_handles,
             send_offsets,
             send_local_indices,
@@ -335,3 +336,4 @@ class GPUDirectExchanger(Exchanger):
         dist.all_gather(all_sync_handles_tensor, sync_handle_tensor)
         all_sync_handles = [t.cpu().tolist() for t in all_sync_handles_tensor]
         self.exchanger.setup_sync(all_sync_handles)
+        self.is_ipc_setup = True
