@@ -64,10 +64,6 @@ struct PartitionMessagePassingInfo {
                              // for trajectory writing
 };
 
-torch::Tensor atom_counts; // [world_size] atom counts for each rank, needed
-                           // for trajectory writing
-};
-
 struct DistNNPState {
   // Distributed environment information
   DistEnvironment dist_env;
