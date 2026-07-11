@@ -127,4 +127,4 @@ class Langevin(DistNNPIntegrator):
             noise2,
             step_size,
         )
-        return energy, new_forces
+        return energy, atom_forces
