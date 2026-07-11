@@ -6,6 +6,8 @@ from distnnp_state import (
     DistEnvironment,
     MolecularInfo,
     SimulationConfig,
+    TrajectoryWriter,
+    TorchDistEnv,
 )
 from distnnp_model import DistNNPModel
 from distnnp.simulatorState import SimState
@@ -21,6 +23,7 @@ from dataclasses import dataclass
 import torch
 from torch import distributed as dist
 import os
+import uuid
 
 POSSIBLE_INTEGRATOR_TYPES = Union[Euler, Verlet, Langevin]
 
@@ -112,6 +115,14 @@ class Simulator:
         self.config = config
         self.dist_environment = dist_environment
         self.device = device
+        # TODO figure out what author should be
+        self.writer: TrajectoryWriter = TrajectoryWriter(
+            dist_environment.global_rank,
+            uuid.uuid4().bytes,
+            "author",
+            config.output_dir,
+            config.traj_file,
+        )
 
     def _get_partitioner(self) -> POSSIBLE_PARTITIONERS_TYPES:
         partition_algorithm = self.config.partition_algorithm
@@ -148,28 +159,90 @@ class Simulator:
     def initialize_simulator_state(
         self, molecular_system: MolecularInfo, device: Optional[torch.device] = None
     ) -> None:
+        if device is None:
+            device = self.device
         self.state = SimState(
             molecular_system=molecular_system,
             partitioner=self._get_partitioner(),
             simulation_config=self._get_simulation_config(),
             distributed_environment=self._get_dist_environment(),
-            device=device if device else self.device,
+            device=device,
         )
         # Once the state is initialized, we can initialize the model buffers based on the local partition info
 
         self.model.initialize_buffers(
-            self.state.parition_info, device=device if device else self.device
+            self.state.partition_info, device=device
         )
+
+    def setup(self, input_file: str) -> None:
+        # (0) Initialize distributed if not already done.
+        # Single-GPU / single-process runs skip init_process_group entirely —
+        # torchrun sets RANK; SLURM sets SLURM_PROCID. If neither is present we
+        # are running standalone and treat this as a world_size=1 job.
+        torch_dist_env = TorchDistEnv()
+        dist_env = torch_dist_env.dist_env
+
+        sim_config = self._get_simulation_config()
+
+        # (1) initialize from file
+        global_mol_info = self.writer.initialize(input_file, self.config.timestep_fs, self.config.traj_interval)
+
+        # put tensors on device
+        global_mol_info.atom_vertex_numbers = global_mol_info.atom_vertex_numbers.to(device=self.device)
+        global_mol_info.atom_types = global_mol_info.atom_types.to(device=self.device)
+        global_mol_info.atom_positions = global_mol_info.atom_positions.to(
+            device=self.device
+        )
+        global_mol_info.atom_velocities = global_mol_info.atom_velocities.to(
+            device=self.device
+        )
+
+        # (2) initialize simulator state from the global system and partition it.
+        self.initialize_simulator_state(global_mol_info, device=self.device)
+
+        # (3) Repartition if needed and update writer atom-count metadata.
+        self.sync_and_repartition(device=self.device)
+
+        # TODO if velocities are all 0, initialize from Maxwell-Boltzmann dist
 
     def sync_and_repartition(self, device: Optional[torch.device] = None) -> None:
         self.state.sync_and_repartition()
         # TODO: ADD appropriate barriers/synchronization if needed here
         self.model.initialize_buffers(
-            self.state.parition_info, device=device if device else self.device
+            self.state.local_partition_info, device=device if device else self.device
         )
+        self.writer.update_atom_counts(self.state.local_partition_info.atom_counts.to(torch.uint32))
 
     def _set_state(self, state: SimState):
         self.state = state
 
     def step(self, step_size: float):
         self.integrator.step(self.state._state, self.model, step_size)
+
+    def should_write_traj(self, step: int) -> bool:
+        if self.config.traj_interval == 0:
+            return False
+        if step % self.config.traj_interval == 0:
+            return True
+        return False
+
+    def should_rebalance(self, step: int) -> bool:
+        if self.config.rebalance_interval == 0:
+            return False
+        if step % self.config.rebalance_interval == 0:
+            return True
+        return False
+
+    def run(self) -> None:
+        total_done = 0
+        while total_done < self.config.total_steps:
+            if self.should_rebalance(total_done):
+                self.sync_and_repartition()
+            energy = self.step(self.config.timestep_fs)
+            # if should_log(total_done):
+                # _log_energy(total_done, energy)
+            if self.should_write_traj(total_done):
+                self.state.local_state.atom_vertex_numbers = self.state.local_partition_info.partition_indices
+                self.writer.submit(total_done, self.state.local_state)
+            total_done += 1
+        self.writer.flush()

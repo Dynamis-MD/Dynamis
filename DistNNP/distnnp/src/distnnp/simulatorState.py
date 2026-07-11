@@ -42,7 +42,7 @@ class SimState:
         partitioner.build_halo_maps(
             partition_info, molecular_system, self.dist_env_obj, simulation_config
         )
-        self.parition_info = partition_info
+        self.partition_info = partition_info
 
         self.global_molecular_info = molecular_system
 
