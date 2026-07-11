@@ -129,9 +129,18 @@ PYBIND11_MODULE(distnnp_state_impl, m) {
            py::arg("global_rank"), py::arg("run_id"), py::arg("author"),
            py::arg("output_dir") = "./trajectory",
            py::arg("output_file") = "trajectory.distnnp")
-      .def("initialize", &distnnp_state::TrajectoryWriter::initialize,
+      .def("initialize",
+           py::overload_cast<const std::string &, const float, const uint32_t>(
+               &distnnp_state::TrajectoryWriter::initialize),
            "Writes front matter and initializes environment from an xyz file",
            py::arg("input_file_name"), py::arg("time_per_step"),
+           py::arg("steps_per_write"))
+      .def("initialize",
+           py::overload_cast<const distnnp_state::MolecularInfo &, const float,
+                              const uint32_t>(
+               &distnnp_state::TrajectoryWriter::initialize),
+           "Writes front matter and initializes environment from MolecularInfo struct",
+           py::arg("input_system"), py::arg("time_per_step"),
            py::arg("steps_per_write"))
       .def("write_to_xyz", &distnnp_state::TrajectoryWriter::write_to_xyz,
            "Writes state to an xyz file", py::arg("state"),

@@ -13,6 +13,7 @@ public:
 
     // TODO eventually this can be initialize with the custom binary format as a file
     MolecularInfo initialize(const std::string& input_file_name, const float time_per_step, const uint32_t steps_per_write);
+    MolecularInfo initialize(const MolecularInfo& input_system, const float time_per_step, const uint32_t steps_per_write);
 
     void submit(uint32_t step, MolecularInfo state);
     void flush();

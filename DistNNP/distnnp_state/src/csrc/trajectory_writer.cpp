@@ -77,6 +77,10 @@ MolecularInfo TrajectoryWriter::initialize(const std::string& input_file_name, c
 
     return state;
 }
+MolecularInfo TrajectoryWriter::initialize(const MolecularInfo& input_system, const float time_per_step, const uint32_t steps_per_write) {
+    write_front_matter(time_per_step, steps_per_write, input_system, rank);
+    return input_system;
+}
 
 void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state, uint32_t rank) {
     // figure out sizes of header and each rank size
