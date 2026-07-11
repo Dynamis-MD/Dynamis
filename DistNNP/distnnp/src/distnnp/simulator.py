@@ -9,7 +9,6 @@ from distnnp_state import (
     TrajectoryWriter,
     TorchDistEnv,
 )
-from distnnp_state.masses import TORCH_ATOMIC_MASSES
 from distnnp_model import DistNNPModel
 from distnnp.simulatorState import SimState
 from distnnp_integrator import (
@@ -197,9 +196,6 @@ class Simulator:
         global_mol_info.atom_velocities = global_mol_info.atom_velocities.to(
             device=self.device
         )
-        global_mol_info.atom_forces = torch.zeros_like(global_mol_info.atom_positions)
-        atom_masses_on_device = TORCH_ATOMIC_MASSES.to(self.device)
-        global_mol_info.atom_masses = atom_masses_on_device[global_mol_info.atom_types.to(torch.long)].to(self.device)
 
         # (2) initialize simulator state from the global system and partition it.
         self.initialize_simulator_state(global_mol_info, device=self.device)
