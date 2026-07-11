@@ -8,9 +8,11 @@ struct MolecularInfo {
   torch::Tensor atom_vertex_numbers; // Tensor of shape [num_atoms] containing
                                      // atom indices
   torch::Tensor atom_types; // Tensor of shape [num_atoms] containing atom types
-  torch::Tensor atom_positions; // Tensor of shape [num_atoms, 3] containing
-                                // atomic positions
-  torch::Tensor edge_counts;    // [num_atoms], optional per-atom edge cost for
+  torch::Tensor atom_positions;  // Tensor of shape [num_atoms, 3] containing
+                                 // atomic positions
+  torch::Tensor atom_velocities; // Tensor of shape [num_atoms, 3] containing
+                                 // atomic velocities
+  torch::Tensor edge_counts;     // [num_atoms], optional per-atom edge cost for
                              // weighted partitioning. Undefined = unweighted.
 };
 
