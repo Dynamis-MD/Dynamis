@@ -81,7 +81,9 @@ def convert_pdb_to_vacuum_xyz(pdb_path: Path, out_path: Path, buffer: float = 3.
     print(f"  Loading {pdb_path.name} ...")
 
     if suffix == ".cif":
-        fixer = PDBFixer(filename=str(pdb_path))
+        # mmCIF / PDBx must be parsed via pdbxfile=; filename= is PDB-format only.
+        with open(pdb_path) as cif_fh:
+            fixer = PDBFixer(pdbxfile=cif_fh)
     else:
         fixer = PDBFixer(filename=str(pdb_path))
 

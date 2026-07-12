@@ -78,7 +78,7 @@ echo ""
 echo "======================================================"
 echo "  Dataset summary"
 echo "======================================================"
-for d in baselines pdb protein_vacuum protein_solvated membrane electrochemical; do
+for d in baselines pdb protein_vacuum protein_solvated membrane electrochemical capsid; do
     dir="$DATASETS_DIR/$d"
     if [[ -d "$dir" ]]; then
         n=$(find "$dir" \( -name '*.xyz' -o -name '*.pdb' -o -name '*.cif' \) 2>/dev/null | wc -l)

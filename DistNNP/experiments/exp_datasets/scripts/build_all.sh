@@ -52,12 +52,18 @@ echo ">>> Step 6: Generate Pt slab + water"
 _py 06_generate_electrochemical.py ${OVERWRITE:+--overwrite}
 echo ""
 
+# ── Step 7: Retrieve HIV-1 capsid (3J3Q) + shell subsets ──────────────
+echo ">>> Step 7: Retrieve HIV-1 capsid (3J3Q, ~2.4 M atoms)"
+echo "    NOTE: downloads ~40 MB from RCSB and parses ~2.4 M atoms (~1 min)"
+_py 07_retrieve_hiv.py --subsets ${OVERWRITE:+--overwrite}
+echo ""
+
 echo "======================================================"
 echo "  Done. Dataset summary:"
 echo "======================================================"
 
 # Print file count and total size per subdirectory
-for d in baselines protein_vacuum protein_solvated membrane electrochemical pdb; do
+for d in baselines protein_vacuum protein_solvated membrane electrochemical capsid pdb; do
     dir="$SCRIPT_DIR/../$d"
     if [[ -d "$dir" ]]; then
         n=$(find "$dir" -name "*.xyz" -o -name "*.pdb" 2>/dev/null | wc -l)
