@@ -259,7 +259,7 @@ def main():
         np.savez(
             out_dir / "solvated_capsid.npz",
             positions=result["positions"],
-            atom_types=result["atom_types"],
+            atom_types=result["atom_types"].astype(np.uint8),
             box_vectors=result["box_vectors"],
         )
         print(f"Saved solvated capsid data to {out_dir / 'solvated_capsid.npz'}")
