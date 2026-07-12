@@ -2,6 +2,8 @@
 
 This document is the plan of record for adding performance timing to DistNNP. It exists so the work can be **split across several people** — each workstream in [Workstreams](#workstreams) is independently ownable once the core `Timer` (W1) lands.
 
+**Phasing is deliberate: timing before writing.** The whole timing infrastructure — the core timer and every component's instrumentation, producing a correct in-memory compute/comm/iteration breakdown — must be working end-to-end before persistence to disk is built at all. The output/writer design further down ([Output](#output), [Writer atomicity](#writer-atomicity)) is recorded now so it doesn't have to be re-derived later, but it is **Phase 2** work and does not start until Phase 1 is done; see [Workstreams](#workstreams).
+
 Status: **proposal — nothing implemented yet.** Open questions are collected at the bottom; they should be settled before W2+ starts.
 
 ---
@@ -230,22 +232,29 @@ What this buys, and what it rules out:
 
 ## Workstreams
 
-Ordered by dependency. **W1 blocks everything; W2–W5 are parallel** once its header lands — which is the point of settling this design first.
+Ordered by dependency, and split into two **phases on purpose**: the whole timing infrastructure (core timer + every component instrumented + the compute/comm/iteration breakdown actually working) must be done and correct with an **in-memory-only** registry before any persistence format is built. Writing to disk is a separate, later concern — it must not gate or shape the design of the timer itself.
+
+**Phase 1 — Timing (no writer).** W1 blocks everything; W2–W5 are parallel once its header lands.
 
 - [ ] **W1 — Core timer (`distnnp_state`)** *(blocking; one owner)*
   - [ ] `Timer` + `TimerClass` + level switch in `include/distnnp_state/timing.hpp`
-  - [ ] Registry: identity capture, thread-local parent stack, CUDA event pool, deferred harvest
+  - [ ] Registry: identity capture, thread-local parent stack, CUDA event pool, deferred harvest — **in-memory only, no disk I/O**
   - [ ] `DISTNNP_TIME(...)` RAII macro; compiles out when off
-  - [ ] JSONL writer + flush-every-N: build-line-then-single-`write()`, `O_APPEND`, per-rank file by default
-  - [ ] Writer test: N threads hammering one fd produce N well-formed lines, zero splices
-  - [ ] pybind11 bindings: `Timer`, `set_level`, `set_step`, `dump` — the Python side is a *binding*, not a reimplementation
+  - [ ] A trivial debug accessor (e.g. print the registry to stdout) so W2–W5 can sanity-check their own timers without the real writer existing yet. This is scaffolding, not the output design.
+  - [ ] pybind11 bindings: `Timer`, `set_level`, `set_step` — the Python side is a *binding*, not a reimplementation
   - [ ] Unit tests: off = zero records and no CUDA calls; nesting produces correct parent chains; harvest is correct
 - [ ] **W2 — `distnnp_state` instrumentation** — `partition` (all three partitioners), `build_graph`, `build_halo_maps`
 - [ ] **W3 — `distnnp_model` instrumentation** — `halo_exchange` (fwd + bwd), `model_forward`, `COMM` tagging, and the `WAIT`-barrier at `detail` level
 - [ ] **W4 — `distnnp_integrator` instrumentation** — `integrator_step` in Euler / Verlet / Langevin
-- [ ] **W5 — `distnnp` wiring** — `SimulatorConfig.timing_level`, `DISTNNP_TIMING` env override, `set_step()` per iteration, `iteration` timer, flush on shutdown
-- [ ] **W6 — Post-processing** — merge per-rank JSONL; per-phase breakdown; compute-vs-comm split; rank-imbalance view. Lives in `post_processing/`.
-- [ ] **W7 — Validation** — overhead measurement (`off` vs `basic` must be within noise); cross-check a known phase against `nsys` so we trust the numbers.
+- [ ] **W5 — `distnnp` wiring** — `SimulatorConfig.timing_level`, `DISTNNP_TIMING` env override, `set_step()` per iteration, `iteration` timer
+- [ ] **Phase 1 exit criterion** — with every component from W2–W5 instrumented, the in-memory registry must show a correct compute/comm/other breakdown of a real `iteration` (self-time, summing to the iteration per [Nesting](#nesting-and-double-counting)), inspected via the W1 debug accessor. Nothing in Phase 2 starts until this is true.
+
+**Phase 2 — Writing (starts only once Phase 1's exit criterion holds).**
+
+- [ ] **W6 — Writer** — JSONL writer + flush-every-N: build-line-then-single-`write()`, `O_APPEND`, per-rank file by default (see [Writer atomicity](#writer-atomicity)); replaces W1's debug accessor as the real `dump`; flush on `Simulator` shutdown.
+  - [ ] Writer test: N threads hammering one fd produce N well-formed lines, zero splices
+- [ ] **W7 — Post-processing** — merge per-rank JSONL; per-phase breakdown; compute-vs-comm split; rank-imbalance view. Lives in `post_processing/`.
+- [ ] **W8 — Validation** — overhead measurement (`off` vs `basic` must be within noise); cross-check a known phase against `nsys` so we trust the numbers.
 
 ---
 
