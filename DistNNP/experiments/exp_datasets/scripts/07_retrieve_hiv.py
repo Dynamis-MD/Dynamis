@@ -92,6 +92,8 @@ def download_and_convert(out_path: Path):
     print(f"  CIF downloaded to: {cif_path}")
     print(f"  Written: {out_path}")
 
+    return cif_path
+
 
 def protonate_and_solvate(cif_path: Path):
     import openmm
@@ -221,17 +223,24 @@ def main():
         help="Only cut subsets from an existing full xyz (no download)",
     )
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument(
+        "--solvate", action="store_true", help="Protonate and solvate the capsid subset"
+    )
     args = ap.parse_args()
 
     out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     full_path = out_dir / FULL_NAME
 
+    cif_path = None
     if not args.subsets_only:
         if full_path.exists() and not args.overwrite:
             print(f"SKIP (exists): {full_path.name} — use --overwrite to refetch")
+            cif_path = out_dir / f"{PDB_ID}.cif.gz"
+            if not cif_path.exists():
+                cif_path = None
         else:
-            download_and_convert(full_path)
+            cif_path = download_and_convert(full_path)
 
     if args.subsets or args.subsets_only:
         if not full_path.exists():
@@ -242,6 +251,18 @@ def main():
                 print(f"SKIP (exists): {name} — use --overwrite to recut")
                 continue
             cut_subset(full_path, out_path, SHELL_CORNER, side)
+
+    if args.solvate and cif_path is not None:
+        print("Protonating and solvating the HIV-1 capsid subset...")
+        result = protonate_and_solvate(cif_path)
+        print("Protonation and solvation complete. Extracted data:")
+        np.savez(
+            out_dir / "solvated_capsid.npz",
+            positions=result["positions"],
+            atom_types=result["atom_types"],
+            box_vectors=result["box_vectors"],
+        )
+        print(f"Saved solvated capsid data to {out_dir / 'solvated_capsid.npz'}")
 
 
 if __name__ == "__main__":
