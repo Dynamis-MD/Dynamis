@@ -174,7 +174,7 @@ class Simulator:
             self.state.partition_info, device=device
         )
 
-    def setup(self, system_input: str | MolecularInfo) -> None:
+    def setup(self, system_input: Union[str , MolecularInfo]) -> None:
         # (0) Initialize distributed if not already done.
         # Single-GPU / single-process runs skip init_process_group entirely —
         # torchrun sets RANK; SLURM sets SLURM_PROCID. If neither is present we
@@ -184,7 +184,9 @@ class Simulator:
 
         sim_config = self._get_simulation_config()
 
-        # (1) initialize from file
+        # (1) initialize from system
+        if is_pathlike(system_input):
+            assert os.path.exists(system_input), f"{system_input} could not be found"
         global_mol_info = self.writer.initialize(system_input, self.config.timestep_fs, self.config.traj_interval)
 
         # put tensors on device
