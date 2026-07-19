@@ -2,7 +2,7 @@
 
 This document is the plan of record for adding performance timing to DistNNP. It exists so the work can be **split across several people** — each workstream in [Workstreams](#workstreams) is independently ownable once the core `Timer` (W1) lands.
 
-**Phasing is deliberate: timing before writing.** The whole timing infrastructure — the core timer and every component's instrumentation, producing a correct in-memory compute/comm/iteration breakdown — must be working end-to-end before persistence to disk is built at all. The output/writer design further down ([Output](#output), [Writer atomicity](#writer-atomicity)) is recorded now so it doesn't have to be re-derived later, but it is **Phase 2** work and does not start until Phase 1 is done; see [Workstreams](#workstreams).
+**Phasing is deliberate: timing before writing.** The whole timing infrastructure — the core timer and every component's instrumentation, producing a correct in-memory compute/comm/iteration breakdown — must be working end-to-end before persistence to disk is built at all. The output/writer design further down ([Output](#output), [Writing the file](#writing-the-file)) is recorded now so it doesn't have to be re-derived later, but it is **Phase 2** work and does not start until Phase 1 is done; see [Workstreams](#workstreams).
 
 Status: **proposal — nothing implemented yet.** Open questions are collected at the bottom; they should be settled before W2+ starts.
 
@@ -218,7 +218,9 @@ Plus the **call order** of the timed keys — the sequence of regions as they we
 
 ## Output
 
-**Accumulate in memory, write once after the run.** Timing is processed *after* the run is done — never live — so the registry aggregates in memory and the `Simulator` writes the file at shutdown. This also sidesteps the async problem: emitting a *device* duration mid-run would force a block on the CUDA event and measure a pipeline it has itself destroyed. (A stream-per-`stop()` mode is only useful as a host-only debug/crash-resilience aid; it is not the default.) For long runs, a **flush every N steps** keeps most of the data if a job is killed, without paying I/O per region.
+**Analyze after the run; writing may be incremental.** What happens *after* the run is the **processing** — merging the per-rank files, computing the breakdown, drawing timelines. That is never live. Writing the raw records to disk, on the other hand, can happen incrementally during the run: a **flush every N steps** bounds memory and keeps most of the data if a job is killed, without paying I/O per region. Records may also just be held in memory and written once at shutdown — both are fine; the flush cadence is a tuning knob, not a design commitment.
+
+The one constraint is on the **device** path: reading a `cudaEvent_t` elapsed time (`cudaEventElapsedTime`) blocks on the event, so device durations are read **at the flush boundary** (every N steps, or end of run) — never at each `stop()`, where it would sync the very pipeline being measured. Host durations have no such constraint.
 
 **Format: JSON**, so it is trivially parsable and self-describing. Each file carries one **metadata header** (the identity + run metadata + call order from [Identity](#identity-and-run-metadata)) followed by the per-region records. One file per rank (`timing_rank{N}.jsonl`), merged in post-processing.
 
@@ -234,33 +236,27 @@ Records are **JSON Lines** (one object per line) so a file from a killed job is 
 
 Each record reports a single `time_us` from whichever mechanism was used (`where` says host or device), so there is no ambiguity about what was measured. The `call_order` in the header is what lets post-processing rebuild the nesting and draw timelines without knowing the pipeline in advance.
 
-### Writer atomicity
+### Writing the file
 
-The requirement: **one or more writers must be able to append to the same place without producing a half-and-half line.** A record from rank 3 spliced into the middle of a record from rank 5 is not merely ugly — it is unparseable, and it corrupts the two records on either side of the splice.
+**Each rank writes its own file** — so there is no cross-rank contention to defend against in the first place. Rank 3 and rank 5 never touch the same file; a record from one can't splice into a record from the other. This is deliberate, and it's the same reason `TrajectoryWriter` avoids a shared append cursor: a single shared append target *would* need atomic cross-process appends, and `O_APPEND` **is not atomic on NFS** — the client implements it as fetch-size-then-write-at-offset, which races between nodes, and **Delta's `/u` is NFS** (verified on the box). Per-rank files sidestep that entirely, at the cost of a merge step post-processing wants anyway.
 
-**The rule that makes it work: build the entire line into a buffer, then emit it in exactly one `write(2)` call.**
+That leaves only one real concern: **multiple threads within a single rank** writing to the same fd. If that happens, the rule is **build the whole line into a buffer, then emit it in exactly one `write(2)` call** — a single `write()` to a shared fd is atomic against other writes to the same inode, so two threads can't interleave a line and no mutex is needed.
 
 ```cpp
 // Build the whole record — including the trailing '\n' — into one buffer.
-std::string line = format_record(rec);   // thread-local, reused across records
+std::string line = format_record(rec);
 
 // One syscall. Loop, because write() may legally return a short count.
 const char* p = line.data();
 size_t remaining = line.size();
 while (remaining > 0) {
-    ssize_t n = ::write(fd, p, remaining);   // fd opened O_WRONLY|O_APPEND|O_CREAT
+    ssize_t n = ::write(fd, p, remaining);
     if (n < 0) { if (errno == EINTR) continue; break; }
     p += n; remaining -= n;
 }
 ```
 
-What this buys, and what it rules out:
-
-- **`std::ofstream` and `operator<<` are disqualified.** Streaming a record piecewise (`os << key << "," << time`) issues *multiple* write calls, and another writer can land between any two of them. Same for `printf`-per-field. The build-then-emit-whole discipline **is** the mechanism. A "pass an `iostream`" API is fine to *offer* — but internally it must assemble the line and emit it in one call, not stream fields through.
-- **`O_APPEND` is what makes the append race-free** on a local filesystem: the kernel takes the inode lock, so the seek-to-end and the write are one indivisible step. Without `O_APPEND`, two writers compute the same end offset and clobber each other.
-- **Threads within one process** need nothing further — a single `write()` on a shared fd is atomic against other writes to that inode, so no mutex is required *provided nobody buffers*.
-
-**The catch that decides the design — `O_APPEND` is not atomic on NFS.** The NFS protocol has no append operation; the client implements `O_APPEND` by fetching the file size and then writing at that offset, and that read-modify-write races between processes on different nodes. **Delta's `/u` is NFS** (verified on the box). Lustre is better but carries its own caveats under concurrent append. So a single shared append target across ranks cannot be relied on — on exactly the cluster we run on.
+This is why **`std::ofstream` / `operator<<` are disqualified for the record path**: streaming a record piecewise (`os << key << "," << time`) issues *multiple* write calls, and a second thread can land between any two of them. Build the line, emit it whole.
 
 **Therefore: one file per rank is the default** (`timing_rank{N}.jsonl`), merged in post-processing. This sidesteps cross-process atomicity entirely — no shared cursor, no NFS append race — and costs only a merge step we want anyway. Within a rank, threads share the fd and the single-`write()` rule keeps them safe. The shared-file path stays available and correct on a local filesystem (node-local scratch, `/tmp`), but it is not the default. This mirrors `TrajectoryWriter`, which already avoids a shared append cursor by `pwrite`-ing at pre-computed disjoint offsets.
 
@@ -287,7 +283,7 @@ Ordered by dependency, and split into two **phases on purpose**: the whole timin
 
 **Phase 2 — Writing (starts only once Phase 1's exit criterion holds).**
 
-- [ ] **W6 — Writer** — JSONL writer + flush-every-N: build-line-then-single-`write()`, `O_APPEND`, per-rank file by default (see [Writer atomicity](#writer-atomicity)); replaces W1's debug accessor as the real `dump`; flush on `Simulator` shutdown.
+- [ ] **W6 — Writer** — JSONL writer + flush-every-N: per-rank file, build-line-then-single-`write()` for thread safety (see [Writing the file](#writing-the-file)); replaces W1's debug accessor as the real `dump`; flush on `Simulator` shutdown.
   - [ ] Writer test: N threads hammering one fd produce N well-formed lines, zero splices
 - [ ] **W7 — Post-processing** — merge per-rank JSONL; per-phase breakdown; compute-vs-comm split; rank-imbalance view. Lives in `post_processing/`.
 - [ ] **W8 — Validation** — overhead measurement (`off` vs `basic` must be within noise); cross-check a known phase against `nsys` so we trust the numbers.
