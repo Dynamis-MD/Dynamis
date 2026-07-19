@@ -14,7 +14,7 @@ Status: **proposal — nothing implemented yet.** Open questions are collected a
 - Timing is a **library-level facility, not an opt-in the caller bolts on.** A user running a simulation should get timings by flipping one switch — not by wrapping their own code in timer blocks.
 - Instrumentation lives **as close to the work as possible**, which in this codebase means **C++ over Python wherever the work is in C++**. Python-side timers around a C++ call measure the wrong thing (see [Why C++](#why-c-and-not-python)).
 - **Near-zero cost when off**, and *honest* when on: the act of measuring must not serialize a pipeline that is asynchronous by design.
-- Every record is attributable: **rank, process ID, device ID, hostname**.
+- Output is **self-describing**: every file carries version, run date, full identity (rank, pid, device id, hostname), and the call order of timed regions — so it is readable later with no external context.
 
 ### Non-goals
 
@@ -62,7 +62,7 @@ iteration      12.4 ms   100%
 
 The three classes sum to the iteration by construction, so any time that isn't attributed to a timed region shows up as an `unaccounted` remainder rather than silently vanishing. If that remainder is large, the instrumentation has a hole in it — which is itself worth knowing.
 
-**One subtlety that must not be glossed over:** a collective's measured duration is *not* pure network time. A rank that reaches an all-reduce early sits inside the collective waiting for the slowest rank — so a naive `COMM` bucket silently absorbs **load imbalance** and reports it as network cost. That is a misleading number to optimize against: it says "reduce halo volume" when the real fix may be "partition better."
+A collective's measured duration is *not* pure network time: a rank that reaches an all-reduce early sits inside the collective waiting for the slowest rank, so a naive `COMM` bucket silently absorbs **load imbalance** and reports it as network cost. That is a misleading number to optimize against — it says "reduce halo volume" when the real fix may be "partition better."
 
 Proposal: split it out. Record a `WAIT` class by timing a barrier immediately *before* each collective; the barrier absorbs the imbalance, and the collective that follows measures something much closer to real transport. This costs an extra barrier per collective, so it belongs behind the `detail` level rather than always on. At `basic`, `COMM` means "comm + imbalance" and must be documented as such.
 
@@ -74,7 +74,7 @@ One knob, three settings, so the cost of measuring scales with how much you aske
 |---|---|---|
 | `off` (default) | nothing | none |
 | `basic` | `iteration` + the component timers | none beyond what the code already does |
-| `detail` | adds `WAIT` barriers, per-rank per-step records | yes — perturbs, use deliberately |
+| `detail` | adds `WAIT` barriers (pre-collective sync) | yes — perturbs, use deliberately |
 
 ---
 
@@ -99,15 +99,15 @@ Python-side timers remain appropriate for the handful of things that genuinely *
 ### The timer
 
 Explicit `start()` / `stop()`, **not** RAII. A single `Timer` can be reused for many
-start/stop pairs, and results accumulate in the registry keyed by name — so the same
-component timed many times across an iteration or a run groups under one key.
+start/stop pairs. Each `stop()` appends one record — `{step, key, class, where, time}` —
+to the in-memory registry, stamped with the current step. Records are **not** merged in
+C++; summing by key (or by step) is a post-processing step. This keeps the core trivial
+and leaves the raw per-occurrence data intact for timelines.
 
-> **Design note (from review).** An earlier draft used an RAII "time a scope" object
-> (start on construction, stop on destruction). The team rejected it: it forces every
-> timed region into its own block scope — which fights the normal practice of declaring
-> variables where they are initialized — and it silently folds any destructors that run
-> at end-of-scope into the measured time. Explicit `start()`/`stop()` is simpler and
-> measures exactly the lines between the two calls.
+> **Why not RAII?** An earlier draft timed a *scope* (start in the constructor, stop in
+> the destructor). Rejected: it forces every region into its own block and silently folds
+> end-of-scope destructors into the measurement. Explicit start/stop measures exactly the
+> lines between the two calls.
 
 ```cpp
 namespace distnnp_state {
@@ -155,11 +155,10 @@ When a key needs to be formatted (e.g. `"build_graph for graph {}"`), build it w
 `std::format` (C++20) or `vsnprintf` over a `va_list` — **not** `stream << a << b`,
 which is not thread-safe and is hard to make so.
 
-**Repeated calls.** For now we do **not** distinguish separate calls to the same key
-within a run — they just accumulate (or are logged as separate records) under that key.
-Disambiguating "the 3rd `halo_exchange` of step 12" is deliberately out of scope for the
-first version and can be added later if a need appears; keeping it out now keeps the
-core small.
+**Repeated calls.** If a key fires several times in one step, each occurrence is just
+another record with the same `key` and `step` — we do **not** number them or tell them
+apart. Disambiguating "the 3rd `halo_exchange` of step 12" is out of scope for v1;
+post-processing sums the occurrences. Keeping it out keeps the core small.
 
 **Compiling timing out entirely.** The runtime `off` level makes timing cheap; a
 production build can make it *free* by compiling the timing code away completely behind
@@ -189,7 +188,7 @@ The caller picks the mechanism per region via `Where`:
 
 **The one rule for device timers: the elapsed time is not read at `stop()`.** `cudaEventElapsedTime` blocks until the events complete; reading it inside the step loop would sync the very pipeline we are measuring. So `stop()` only *records* the end event; the (start, stop) pairs are **read later** — at end of run (or the every-N-steps flush) — when the data is being written out anyway.
 
-That deferred read is the only real complexity on the device path. Everything else stays simple: one `time_us` per region, host or device, whichever the caller asked for. (If you ever want to see whether a GPU region is launch-bound vs. GPU-bound, wrap it with *both* a host and a device timer and compare — but that's opt-in, not something the core has to do for you.)
+That deferred read is the only real complexity on the device path; everything else is one `time_us` per region, host or device, whichever the caller asked for.
 
 ### Nesting and double-counting
 
@@ -299,9 +298,8 @@ Ordered by dependency, and split into two **phases on purpose**: the whole timin
 
 1. **Which side of the `COMPUTE` line does each region fall on?** The classes only mean something if we agree on the boundary. Proposed: force/energy eval, graph build, and integrator kernels are `COMPUTE`; halo exchange and collectives are `COMM`; partitioning bookkeeping, allocation, and Python orchestration are `OTHER`. The debatable one is **partitioning** — it does real math (SFC keys, KD-tree bisection) but exists only to serve the distribution, so an argument exists for either bucket. Suggest `COMPUTE` for the kernel work with the surrounding bookkeeping as `OTHER`, but this should be a group call.
 2. **Is the `WAIT` barrier worth its cost?** It is the only way to stop load imbalance from masquerading as network time, but it perturbs the run. Proposed as `detail`-only. Alternative: skip it and accept that `COMM` is really "comm + imbalance", documented as such.
-3. **Per-step records, or aggregate-only?** Per-step is far more useful (you see the first-step warmup, the repartition spikes, the drift) but the file grows as `steps × keys × ranks`. At `basic`, do we keep per-step or only running totals? Suggest: per-step, since ~10 keys × 1000 steps × 8 ranks is still a small file.
-4. **Where does the Python-level `Timer` binding stop?** The `Simulator` loop clearly needs one. Does anything else in Python want one, or is everything else reachable from C++?
-5. **`run_id` sharing with `TrajectoryWriter`** — needs a small refactor so both take the same UUID. Worth doing, and cheap, but it touches the writer.
-6. **Key type — string or enum?** (Pending: the team will provide a target usage example.) Strings dump straight into readable JSON and plots; enums are cheaper and typo-proof but need a name table for output. Leaning string for v1 simplicity.
+3. **Where does the Python-level `Timer` binding stop?** The `Simulator` loop clearly needs one. Does anything else in Python want one, or is everything else reachable from C++?
+4. **`run_id` sharing with `TrajectoryWriter`** — needs a small refactor so both take the same UUID. Worth doing, and cheap, but it touches the writer.
+5. **Key type — string or enum?** (Pending: the team will provide a target usage example.) Strings dump straight into readable JSON and plots; enums are cheaper and typo-proof but need a name table for output. Leaning string for v1 simplicity.
 
-**Resolved (this revision):** timers are explicit `start`/`stop`, not RAII; host vs. device is a per-region choice (`Where`), device timing is `cudaEvent_t`-based with a deferred read; we do **not** disambiguate repeated calls to the same key for now; output is post-run JSON with a self-describing metadata header (version, date, identity, call order).
+**Resolved (this revision):** timers are explicit `start`/`stop`, not RAII; host vs. device is a per-region choice (`Where`), device timing is `cudaEvent_t`-based with a deferred read; we do **not** disambiguate repeated calls to the same key; records are **per-occurrence, stamped with the step** (summed by key in post-processing, not merged in C++); output is post-run JSON with a self-describing metadata header (version, date, identity, call order).
