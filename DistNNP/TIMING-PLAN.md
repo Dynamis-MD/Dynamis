@@ -94,109 +94,146 @@ Python-side timers remain appropriate for the handful of things that genuinely *
 
 ## Core design
 
+**Guiding principle: the simplest thing that works, easy to change later.** The first version deliberately does the least it can — explicit start/stop, one time per region, accumulate by key, write JSON after the run. Anything fancier (per-call disambiguation, in-C++ nesting resolution, live streaming) is left out until a concrete need forces it in. This keeps the core small and the design cheap to revise as requirements shift.
+
 ### The timer
+
+Explicit `start()` / `stop()`, **not** RAII. A single `Timer` can be reused for many
+start/stop pairs, and results accumulate in the registry keyed by name — so the same
+component timed many times across an iteration or a run groups under one key.
+
+> **Design note (from review).** An earlier draft used an RAII "time a scope" object
+> (start on construction, stop on destruction). The team rejected it: it forces every
+> timed region into its own block scope — which fights the normal practice of declaring
+> variables where they are initialized — and it silently folds any destructors that run
+> at end-of-scope into the measured time. Explicit `start()`/`stop()` is simpler and
+> measures exactly the lines between the two calls.
 
 ```cpp
 namespace distnnp_state {
 
 enum class TimerClass : uint8_t { Compute, Comm, Wait, Other };
+enum class Where      : uint8_t { Host, Device };   // Host = std::chrono; Device = CUDA events
 
 class Timer {
+    enum class State { Stopped, Started };
 public:
-    // Records into the global registry under `key`. Non-copyable, RAII:
-    // the destructor stops it, so an early return or a throw cannot leak
-    // a half-open timer.
-    Timer(std::string_view key, TimerClass cls, cudaStream_t stream = nullptr);
-    ~Timer();
+    // Explicit and reusable. start() saves the key + start time; stop() computes
+    // the delta and records it under `key`. Supports many start/stop pairs.
+    //
+    // `where` chooses the mechanism:
+    //   Host   — std::chrono around a CPU function.
+    //   Device — a cudaEvent_t pair recorded on `stream`, for a GPU kernel; the
+    //            elapsed time is read later, not at stop() (see below).
+    void start(std::string key, TimerClass cls,
+               Where where = Where::Host, cudaStream_t stream = nullptr);
+    void stop();
 
     static void set_level(Level lvl);
-    static bool enabled();          // inlined; the whole class no-ops when off
+    static bool enabled();
     static void set_step(uint64_t step);   // stamps subsequent records
 };
 
 } // namespace distnnp_state
 ```
 
-Usage inside the library — one line, no ceremony, no way to forget to stop it:
+Usage inside the library — the caller picks host vs. device per region:
 
 ```cpp
-PartitionMessagePassingInfo SFCPartitioner::partition(const MolecularInfo &state,
-                                                     const DistEnvironment &env)
-{
-    DISTNNP_TIME("partition", TimerClass::Compute);   // macro → compiles to nothing when disabled
-    ...
-}
+Timer t;
+
+t.start("build_halo_maps", TimerClass::Compute);            // Host: pure CPU work
+// ... work ...
+t.stop();
+
+t.start("build_graph", TimerClass::Compute, Where::Device); // Device: times the kernels
+// ... launch kernels ...
+t.stop();
 ```
 
-### The high-precision host clock — use `steady_clock`, *not* `high_resolution_clock`
+When a key needs to be formatted (e.g. `"build_graph for graph {}"`), build it with
+`std::format` (C++20) or `vsnprintf` over a `va_list` — **not** `stream << a << b`,
+which is not thread-safe and is hard to make so.
 
-This is the C++ high-precision timer, and there is a trap in the naming worth stating plainly, because the obvious choice is the wrong one.
+**Repeated calls.** For now we do **not** distinguish separate calls to the same key
+within a run — they just accumulate (or are logged as separate records) under that key.
+Disambiguating "the 3rd `halo_exchange` of step 12" is deliberately out of scope for the
+first version and can be added later if a need appears; keeping it out now keeps the
+core small.
 
-The clock actually *called* "high resolution" is `std::chrono::high_resolution_clock` — but it is only a typedef, and **on libstdc++ (our toolchain) it is an alias for `system_clock`**. `system_clock` is wall-clock time, subject to NTP discipline, and can jump **backwards** mid-run — which produces *negative* durations in a long job on a cluster whose nodes are NTP-corrected. The clock with "high resolution" in its name is the one that can silently corrupt our measurements.
+**Compiling timing out entirely.** The runtime `off` level makes timing cheap; a
+production build can make it *free* by compiling the timing code away completely behind
+a build flag (e.g. `-DDISTNNP_NO_TIMING`), so there is no chance of the measurement
+perturbing a benchmark. `off` is the runtime default; the build flag is the
+belt-and-suspenders for shipping a release.
 
-Use **`std::chrono::steady_clock`**:
+> The exact call-site ergonomics — string keys vs. an enum — are still being settled by
+> the team, who will provide a target usage example. This section will be updated to
+> match; the shape above (explicit start/stop, host-or-device, accumulate by key) is the
+> agreed foundation.
 
-- **Identical precision.** On Linux/libstdc++, `steady_clock` is `clock_gettime(CLOCK_MONOTONIC)` — the same nanosecond representation as `high_resolution_clock`, and in practice sub-100 ns real resolution via the vDSO (no syscall on the fast path). That is one to two orders of magnitude finer than the regions we time — the margin we want. Nothing is given up on precision.
-- **Monotonic.** It only ever moves forward. This is the property `high_resolution_clock` fails to guarantee.
-- Statically assert `steady_clock::is_steady` so a platform that violates this fails loudly at compile time rather than reporting garbage at runtime.
+### The host clock
 
-Store durations as **integer nanoseconds** (`duration_cast<nanoseconds>`), not `double` seconds; convert to a display unit only at output. Accumulating floating-point at ns scale over millions of regions loses precision exactly where we care about it.
+Use a `std::chrono` clock — `high_resolution_clock` is fine. At the millisecond-to-
+sub-microsecond granularity we time, the choice of standard clock does not matter for
+our benchmarking. Store durations as **integer nanoseconds** (`duration_cast<nanoseconds>`)
+and convert to a display unit only at output, so accumulation over many regions doesn't
+lose precision.
 
-`rdtsc` is deliberately **not** used: it requires calibration and is unreliable across cores and frequency/power states.
+### Host vs. device time
 
-### Host vs. device time — the central mechanic
+The caller picks the mechanism per region via `Where`:
 
-A host clock alone is not sufficient, and a `cudaDeviceSynchronize()`-per-timer is not acceptable. The timer holds **both**:
+- **`Where::Host`** — the `std::chrono` clock above. Right for CPU work (`build_halo_maps`, host-side algorithm, launch overhead).
+- **`Where::Device`** — a `cudaEvent_t` pair recorded on the work's stream. Right for a GPU kernel, because a host clock around a kernel launch measures the *launch*, not the GPU execution.
 
-- **Host time** — `steady_clock`, as above. Measures the CPU-side cost: launch overhead, allocation, any host-side algorithm.
-- **Device time** — a pair of `cudaEvent_t` recorded on the work's stream. This measures when the GPU actually did the work.
+**The one rule for device timers: the elapsed time is not read at `stop()`.** `cudaEventElapsedTime` blocks until the events complete; reading it inside the step loop would sync the very pipeline we are measuring. So `stop()` only *records* the end event; the (start, stop) pairs are **read later** — at end of run (or the every-N-steps flush) — when the data is being written out anyway.
 
-Crucially, **the elapsed time is not read at `stop()`.** `cudaEventElapsedTime` blocks until the event completes; calling it inside the step loop would sync the very pipeline we are measuring. Instead `stop()` only *records* the event and pushes the (start, stop) pair onto a pending queue. The pairs are **harvested later** — at end of iteration, or end of run — when a sync is happening anyway. Events come from a **pool** so the hot path never calls `cudaEventCreate`.
-
-The gap between host and device time is itself the most useful signal in the whole system: `host >> device` means the GPU is starved and you are launch-bound; `device >> host` means the GPU is the bottleneck and the CPU is racing ahead.
+That deferred read is the only real complexity on the device path. Everything else stays simple: one `time_us` per region, host or device, whichever the caller asked for. (If you ever want to see whether a GPU region is launch-bound vs. GPU-bound, wrap it with *both* a host and a device timer and compare — but that's opt-in, not something the core has to do for you.)
 
 ### Nesting and double-counting
 
 `build_graph` is called *inside* auto-weighted `partition()`, and `model_forward` contains `halo_exchange`. So timers nest, and naively summing all keys will exceed wall-clock time.
 
-Each record therefore stores its **parent key** (a thread-local timer stack, pushed/popped by the RAII ctor/dtor). Post-processing can then present either an inclusive tree or exclusive self-time. **No arithmetic that assumes the keys are disjoint** should appear anywhere — the sum of all keys is meaningless; the sum of all *self-times* equals the iteration.
+To keep the core simple, the timer does **not** try to resolve this itself — no thread-local parent stack, no self-time arithmetic in C++. It just records each region with its key and its start/stop, plus the **call order** in which regions were entered (see [Output](#output)). Reconstructing the inclusive tree vs. exclusive self-time is a **post-processing** job — the recorded order is exactly what a breakdown plot or timeline needs. The one rule the consumers must respect: **the raw sum of all keys is meaningless** because they overlap; only self-times (computed in post-processing) sum to the iteration.
 
-### Identity
+### Identity and run metadata
 
-Every record carries the full identity required to reassemble a distributed run:
+The file should be **self-describing** — readable months later with no external context, the way `TrajectoryWriter` stamps its output. This metadata is captured **once** at registry init and written as a header block (see [Output](#output)), not repeated per record:
 
 | Field | Source |
 |---|---|
+| `version` | DistNNP version / git commit, like the trajectory writer |
+| `date` | wall-clock timestamp the run started |
 | `rank` | `DistEnvironment::global_rank` |
 | `local_rank` | `DistEnvironment::local_rank` |
+| `world_size` | `DistEnvironment::world_size` |
 | `pid` | `getpid()` |
 | `device_id` | `cudaGetDevice()` |
 | `hostname` | `gethostname()` |
 | `run_id` | reuse the `TrajectoryWriter` run UUID so a timing file can be joined to its trajectory |
 
-Captured **once** at registry init, not per record.
+Plus the **call order** of the timed keys — the sequence of regions as they were first entered — so a consumer can rebuild breakdown plots and timelines without hard-coding the pipeline. Writing it into the file keeps the log self-contained.
 
 ---
 
 ## Output
 
-Two shapes were proposed in the meeting. They are not equivalent, and the difference matters more than it looks:
+**Accumulate in memory, write once after the run.** Timing is processed *after* the run is done — never live — so the registry aggregates in memory and the `Simulator` writes the file at shutdown. This also sidesteps the async problem: emitting a *device* duration mid-run would force a block on the CUDA event and measure a pipeline it has itself destroyed. (A stream-per-`stop()` mode is only useful as a host-only debug/crash-resilience aid; it is not the default.) For long runs, a **flush every N steps** keeps most of the data if a job is killed, without paying I/O per region.
 
-**Option A — accumulate, then write.** The registry aggregates in memory; the caller (or the `Simulator` at shutdown) queries it and writes once.
+**Format: JSON**, so it is trivially parsable and self-describing. Each file carries one **metadata header** (the identity + run metadata + call order from [Identity](#identity-and-run-metadata)) followed by the per-region records. One file per rank (`timing_rank{N}.jsonl`), merged in post-processing.
 
-**Option B — stream to an `ostream`; each `stop()` emits a line.**
-
-**Recommendation: A as the primary path, with B available as a debug mode.** The reason is the async issue above: to emit a *device* duration at `stop()` you must first block on the CUDA event — so Option B, applied to GPU work, forces a synchronization on every single timed region and measures a pipeline it has itself destroyed. It also puts file I/O in the step loop. Option B is genuinely useful for host-only timers and for crash-resilience (you keep the records written before the hang), so it should exist — but it cannot be the default for device timing.
-
-Middle ground worth adopting: accumulate in memory, **flush every N steps**, so a crashed run still yields most of its data without paying I/O per region.
-
-Format: **JSON Lines**, one record per line, one file per rank (`timing_rank{N}.jsonl`), merged in post-processing. Line-oriented so a truncated file from a killed job is still parseable up to the last complete line — a single JSON object is not.
+Records are **JSON Lines** (one object per line) so a file from a killed job is still readable up to its last complete line — a single giant JSON object is not. The header is the first line:
 
 ```json
-{"run_id":"...","rank":3,"pid":12904,"device_id":3,"host":"gpu-042","step":17,
- "key":"halo_exchange","parent":"model_forward","class":"comm",
- "host_us":812.4,"device_us":774.1}
+{"type":"meta","version":"0.3.1+g60df325","date":"2026-07-19T14:02:11Z","run_id":"...",
+ "rank":3,"local_rank":3,"world_size":8,"pid":12904,"device_id":3,"host":"gpu-042",
+ "call_order":["iteration","model_forward","halo_exchange","build_graph","integrator_step"]}
+{"type":"rec","step":17,"key":"halo_exchange","class":"comm","where":"device","time_us":774.1}
+{"type":"rec","step":17,"key":"build_graph","class":"compute","where":"device","time_us":133.7}
 ```
+
+Each record reports a single `time_us` from whichever mechanism was used (`where` says host or device), so there is no ambiguity about what was measured. The `call_order` in the header is what lets post-processing rebuild the nesting and draw timelines without knowing the pipeline in advance.
 
 ### Writer atomicity
 
@@ -237,12 +274,12 @@ Ordered by dependency, and split into two **phases on purpose**: the whole timin
 **Phase 1 — Timing (no writer).** W1 blocks everything; W2–W5 are parallel once its header lands.
 
 - [ ] **W1 — Core timer (`distnnp_state`)** *(blocking; one owner)*
-  - [ ] `Timer` + `TimerClass` + level switch in `include/distnnp_state/timing.hpp`
-  - [ ] Registry: identity capture, thread-local parent stack, CUDA event pool, deferred harvest — **in-memory only, no disk I/O**
-  - [ ] `DISTNNP_TIME(...)` RAII macro; compiles out when off
+  - [ ] `Timer` (host `start`/`stop` + device via `Where`) + `TimerClass` + level switch in `include/distnnp_state/timing.hpp`
+  - [ ] Registry: identity + run metadata capture, call-order tracking, deferred read of device (`cudaEvent_t`) timers — **in-memory only, no disk I/O**
+  - [ ] Compile-time `-DDISTNNP_NO_TIMING` build flag that removes timing code entirely; runtime `off` level otherwise
   - [ ] A trivial debug accessor (e.g. print the registry to stdout) so W2–W5 can sanity-check their own timers without the real writer existing yet. This is scaffolding, not the output design.
   - [ ] pybind11 bindings: `Timer`, `set_level`, `set_step` — the Python side is a *binding*, not a reimplementation
-  - [ ] Unit tests: off = zero records and no CUDA calls; nesting produces correct parent chains; harvest is correct
+  - [ ] Unit tests: off = zero records and no CUDA calls; host and device timers both record; deferred device read is correct
 - [ ] **W2 — `distnnp_state` instrumentation** — `partition` (all three partitioners), `build_graph`, `build_halo_maps`
 - [ ] **W3 — `distnnp_model` instrumentation** — `halo_exchange` (fwd + bwd), `model_forward`, `COMM` tagging, and the `WAIT`-barrier at `detail` level
 - [ ] **W4 — `distnnp_integrator` instrumentation** — `integrator_step` in Euler / Verlet / Langevin
@@ -265,3 +302,6 @@ Ordered by dependency, and split into two **phases on purpose**: the whole timin
 3. **Per-step records, or aggregate-only?** Per-step is far more useful (you see the first-step warmup, the repartition spikes, the drift) but the file grows as `steps × keys × ranks`. At `basic`, do we keep per-step or only running totals? Suggest: per-step, since ~10 keys × 1000 steps × 8 ranks is still a small file.
 4. **Where does the Python-level `Timer` binding stop?** The `Simulator` loop clearly needs one. Does anything else in Python want one, or is everything else reachable from C++?
 5. **`run_id` sharing with `TrajectoryWriter`** — needs a small refactor so both take the same UUID. Worth doing, and cheap, but it touches the writer.
+6. **Key type — string or enum?** (Pending: the team will provide a target usage example.) Strings dump straight into readable JSON and plots; enums are cheaper and typo-proof but need a name table for output. Leaning string for v1 simplicity.
+
+**Resolved (this revision):** timers are explicit `start`/`stop`, not RAII; host vs. device is a per-region choice (`Where`), device timing is `cudaEvent_t`-based with a deferred read; we do **not** disambiguate repeated calls to the same key for now; output is post-run JSON with a self-describing metadata header (version, date, identity, call order).
