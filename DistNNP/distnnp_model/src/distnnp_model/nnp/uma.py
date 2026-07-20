@@ -125,14 +125,14 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                         local_sum_cuda = local_sum.cuda()
                         local_count_cuda = local_count.cuda()
                         
-                        dist_nn.all_reduce(local_sum_cuda)
-                        dist_nn.all_reduce(local_count_cuda)
+                        local_sum_cuda = dist_nn.all_reduce(local_sum_cuda)
+                        dist.all_reduce(local_count_cuda)
                         
                         local_sum = local_sum_cuda.cpu()
                         local_count = local_count_cuda.cpu()
                     else:
-                        dist_nn.all_reduce(local_sum)
-                        dist_nn.all_reduce(local_count)
+                        local_sum = dist_nn.all_reduce(local_sum)
+                        dist.all_reduce(local_count)
                     
                     # Match eSCNMDMoeBackbone behavior for include_self
                     # Default version 1.0 uses include_self=True
@@ -235,7 +235,6 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             batch_full=data_dict["batch_full"],
             csd_mixed_emb=csd_mixed_emb,
         )
-
         if not self.regress_config.direct_forces:
             if self.regress_config.forces or self.regress_config.stress:
                 data_dict["pos"].requires_grad_(True)
@@ -378,7 +377,7 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         local_dest_mask = graph_dict["edge_index"][1] < effective_num_local
 
         local_edge_index = graph_dict["edge_index"][:, local_dest_mask]
-        
+
         # === OVERLAP OPTIMIZATION (Area 3) ===
         # Check config flag first to avoid any overhead when disabled
         use_overlap = getattr(self, 'enable_overlap', False)
@@ -548,6 +547,7 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             batch_full=data["batch"],
             csd_mixed_emb=csd_mixed_emb,
         )
+
         if self.mole_type != "so2":
             raise ValueError("Only mole_type=so2 supported for merging")
 
@@ -781,6 +781,7 @@ class UMAModel(DistNNPModel):
         spin: torch.Tensor | None = None,
         device: Literal["cuda", "cpu"] | None = None,
     ):
+        self.main_model.eval()
         device = device or self.device
         self.main_model.backbone._distributed_state = distributed_state
         num_systems = int(batch.max().item()) + 1 

@@ -49,8 +49,8 @@ def test_uma_distributed_parity():
     # ==========================================
     # 2. Setup Global Data (Ground Truth)
     # ==========================================
-    total_atoms = 20
-    cell_length = 10
+    total_atoms = 200
+    cell_length = 20
     torch.manual_seed(42)
     # Give enough spatial spread to ensure cutoffs divide the space reasonably
     global_positions = torch.rand((total_atoms, 3), device=device) * cell_length
@@ -58,7 +58,7 @@ def test_uma_distributed_parity():
     print(f"global_positions: {global_positions}, global_atomic_numbers: {global_atomic_numbers}")
     global_cell = torch.eye(3, device=device) * cell_length
     global_pbc = torch.tensor([True, True, True], device=device)
-    cutoff = 5.0
+    cutoff = dist_model.main_model.backbone.cutoff
 
     # ==========================================
     # 3. Setup Distributed State (Partitioning)
@@ -184,7 +184,7 @@ def test_uma_distributed_parity():
         print(f"Energy from distributed model: {local_energy.item()}, global energy: {global_energy}")
         torch.testing.assert_close(
             local_energy.item(), global_energy.item(),
-            rtol=1e-3, atol=1e-3, # Use generous tolerance for reduction ordering differences
+            rtol=1e-4, atol=1e-4, # Use generous tolerance for reduction ordering differences
             msg="Distributed total energy does not match Standard model energy!"
         )
         print("Energy Parity Passed!")
@@ -211,7 +211,7 @@ def test_uma_distributed_parity():
 
         torch.testing.assert_close(
             reconstructed_global_forces, global_forces,
-            rtol=1e0, atol=1e0,
+            rtol=1e-4, atol=1e-4,
             msg="Distributed forces do not match Standard model forces!"
         )
         print("Forces Parity Passed!")
