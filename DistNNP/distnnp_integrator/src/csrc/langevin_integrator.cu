@@ -45,10 +45,7 @@ namespace
       float c3 = 1.0f / (1.0f + 0.5f * gamma * dt);
       float c2 = sqrtf(gamma * kT * dt / m);
 
-      for (int d = 0; d < 3; ++d) {
-          int offset = atom_idx * 3 + d;
-          velocities[offset] = (velocities[offset] + 0.5f * (forces[offset] / m) * dt + c2 * noise[offset]) * c3;
-      }
+      velocities[idx] = (velocities[idx] + 0.5f * (forces[idx] / m) * dt + c2 * noise[idx]) * c3;
     }
   }
 }
