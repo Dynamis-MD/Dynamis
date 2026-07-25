@@ -8,7 +8,10 @@ version = "0.0.1"
 description = "A Python package for distributed neural network potentials (NNPs) in molecular dynamics simulations, providing tools for model management, state handling, and integration with MD engines."
 readme = "README.md"
 requires-python = ">=3.8"
-dependencies = []
+dependencies = ["torch>=2.0.0"]
+
+[project.optional-dependencies]
+test = ["pytest", "scipy"]
 
 [tool.scikit-build]
 build-dir = "skbuild"
