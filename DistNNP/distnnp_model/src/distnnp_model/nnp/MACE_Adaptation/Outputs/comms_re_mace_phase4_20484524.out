@@ -1,0 +1,142 @@
+W0725 12:17:26.149921 483128 torch/distributed/run.py:774] 
+W0725 12:17:26.149921 483128 torch/distributed/run.py:774] *****************************************
+W0725 12:17:26.149921 483128 torch/distributed/run.py:774] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0725 12:17:26.149921 483128 torch/distributed/run.py:774] *****************************************
+/u/jsaravananindira/.local/lib/python3.9/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/u/jsaravananindira/.local/lib/python3.9/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+cuequivariance or cuequivariance_torch is not available. Cuequivariance acceleration will be disabled.cuequivariance or cuequivariance_torch is not available. Cuequivariance acceleration will be disabled.
+
+Initializing distributed environment...
+Initializing distributed environment...
+[Gloo] Rank [Gloo] Rank 0 is connected to 11 is connected to  peer ranks. 1Expected number of connected peer ranks is :  peer ranks. 1Expected number of connected peer ranks is : 
+1
+Using medium MPA-0 model as default MACE-MP model, to use previous (before 3.10) default model please specify 'medium' as model argumentUsing medium MPA-0 model as default MACE-MP model, to use previous (before 3.10) default model please specify 'medium' as model argument
+
+Using Materials Project MACE for MACECalculator with /u/jsaravananindira/.cache/mace/macempa0mediummodel
+Using Materials Project MACE for MACECalculator with /u/jsaravananindira/.cache/mace/macempa0mediummodelUsing float32 for MACECalculator, which is faster but less accurate. Recommended for MD. Use float64 for geometry optimization.
+
+Using float32 for MACECalculator, which is faster but less accurate. Recommended for MD. Use float64 for geometry optimization.
+/u/jsaravananindira/.local/lib/python3.9/site-packages/mace/calculators/foundations_models.py:297: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  return torch.load(model_path, map_location=device)
+/u/jsaravananindira/.local/lib/python3.9/site-packages/mace/calculators/foundations_models.py:297: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  return torch.load(model_path, map_location=device)
+============================================================
+Phase 4 Internal Feature-Exchange MACE Prototype
+============================================================
+model_family: mp
+model: medium-mpa-0
+device: cuda
+feature_exchange_layer: 1
+
+------------------------------------------------------------
+Global Input
+------------------------------------------------------------
+source_path: /u/jsaravananindira/DistNNP/DistNNP/distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/sample_halo_boundary.xyz
+num_atoms: 8
+atomic_numbers: [20, 35, 1, 8, 6, 1, 1, 7]
+positions_A: [[1.0, 1.0, 1.0], [3.2, 1.0, 1.0], [5.4, 1.0, 1.0], [7.6, 1.0, 1.0], [9.8, 1.0, 1.0], [12.0, 1.0, 1.0], [14.2, 1.0, 1.0], [16.4, 1.0, 1.0]]
+
+------------------------------------------------------------
+Structure Diagnostics
+------------------------------------------------------------
+min_pair_distance_A: 2.1999999999999993
+min_pair_pair: [2, 3]
+has_duplicate_positions: False
+duplicate_pairs: []
+
+------------------------------------------------------------
+Feature Exchange Checks
+------------------------------------------------------------
+all_expected_halo_counts_match: True
+all_owned_energies_finite: True
+all_raw_energies_finite: True
+all_recovered_force_shapes_match_owned_atoms: True
+all_local_grads_finite: True
+all_exchanged_grads_finite: True
+all_internal_exchange_shapes_consistent: True
+all_internal_exchange_used_ipc: True
+any_halo_gradient_active: True
+feature_exchange_boundary: ['post_linear_up_pre_conv_tp']
+feature_exchange_layers: [1]
+summed_owned_local_energy: -15.529325164252512
+summed_raw_total_energy: -22.749402429852744
+
+------------------------------------------------------------
+Per-Rank Observation Points
+------------------------------------------------------------
+rank: 0
+  n_local: 4
+  n_total_after_exchange: 6
+  n_halo: 2
+  expected_total_recv: 2
+  exchange_mode: ipc
+  exchange_reason: CUDA IPC halo exchange setup succeeded.
+  total_send: 2
+  total_recv: 2
+  send_counts_by_peer: [0, 2]
+  recv_counts_by_peer: [0, 2]
+  edge_count_after_atomic_data: 18
+  local_atomic_numbers: [20, 35, 1, 8]
+  halo_atomic_numbers: [6, 1]
+  feature_exchange_boundary: post_linear_up_pre_conv_tp
+  feature_exchange_layer: 1
+  feature_exchange_used_ipc: True
+  input_feature_shape: [6, 512]
+  owned_local_feature_shape: [4, 512]
+  exchanged_feature_shape: [6, 512]
+  ownership_boundary: public_node_energy
+  ownership_rule: owned_local_energy = outputs['node_energy'][:num_local].sum()
+  force_rule: owned_local_forces = -grad(owned_local_energy, local_positions)
+  node_energy_shape: [6]
+  owned_node_energy_shape: [4]
+  recovered_force_shape: [4, 3]
+  raw_total_energy: -11.016421348517765
+  owned_local_energy: -8.048176174669873
+  raw_minus_owned_energy: -2.968245173847892
+  local_grad_is_finite: True
+  exchanged_grad_is_finite: True
+  local_grad_norm: 8.421568870544434
+  halo_grad_norm: 2.5168426036834717
+  local_force_norm: 8.421568870544434
+  halo_gradient_active: True
+  backward_depends_on_halo: True
+
+rank: 1
+  n_local: 4
+  n_total_after_exchange: 6
+  n_halo: 2
+  expected_total_recv: 2
+  exchange_mode: ipc
+  exchange_reason: CUDA IPC halo exchange setup succeeded.
+  total_send: 2
+  total_recv: 2
+  send_counts_by_peer: [2, 0]
+  recv_counts_by_peer: [2, 0]
+  edge_count_after_atomic_data: 18
+  local_atomic_numbers: [6, 1, 1, 7]
+  halo_atomic_numbers: [1, 8]
+  feature_exchange_boundary: post_linear_up_pre_conv_tp
+  feature_exchange_layer: 1
+  feature_exchange_used_ipc: True
+  input_feature_shape: [6, 512]
+  owned_local_feature_shape: [4, 512]
+  exchanged_feature_shape: [6, 512]
+  ownership_boundary: public_node_energy
+  ownership_rule: owned_local_energy = outputs['node_energy'][:num_local].sum()
+  force_rule: owned_local_forces = -grad(owned_local_energy, local_positions)
+  node_energy_shape: [6]
+  owned_node_energy_shape: [4]
+  recovered_force_shape: [4, 3]
+  raw_total_energy: -11.73298108133498
+  owned_local_energy: -7.48114898958264
+  raw_minus_owned_energy: -4.25183209175234
+  local_grad_is_finite: True
+  exchanged_grad_is_finite: True
+  local_grad_norm: 4.095677375793457
+  halo_grad_norm: 2.281280517578125
+  local_force_norm: 4.095677375793457
+  halo_gradient_active: True
+  backward_depends_on_halo: True
+

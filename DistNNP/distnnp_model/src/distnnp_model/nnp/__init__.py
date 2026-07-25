@@ -36,10 +36,18 @@ try:
 except Exception:  # pragma: no cover - optional dependency import
     MACEPotentialModelWithOwnedEnergyForces = None
 
+try:
+    from distnnp_model.nnp.MACE_Adaptation.phase4_internal_feature_exchange_adapter import (
+        MACEPotentialModelWithInternalFeatureExchange,
+    )
+except Exception:  # pragma: no cover - optional dependency import
+    MACEPotentialModelWithInternalFeatureExchange = None
+
 __all__ = [
     "MACEPotentialModel",
     "MACEPotentialModelWithRawExchange",
     "MACEPotentialModelWithOwnedEnergy",
     "MACEPotentialModelWithOwnedEnergyForces",
+    "MACEPotentialModelWithInternalFeatureExchange",
     "load_raw_mace_model",
 ]
