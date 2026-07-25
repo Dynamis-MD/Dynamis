@@ -101,6 +101,20 @@ BUILTIN_SYSTEMS: Dict[str, Dict[str, Any]] = {
         "kind": "file",
         "description": "6-atom non-overlapping xyz fixture stored inside the adaptation folder.",
     },
+    "adapter_boundary_halo": {
+        "kind": "file",
+        "description": (
+            "8-atom boundary-straddling xyz fixture laid out to create cross-partition "
+            "neighbors and therefore nonzero halo traffic in a 2-rank run."
+        ),
+    },
+    "adapter_xyz6_halo": {
+        "kind": "file",
+        "description": (
+            "Compatibility alias for the boundary-straddling halo fixture. "
+            "Prefer --builtin-system adapter_boundary_halo in new runs."
+        ),
+    },
     "distnnp_xyz6": {
         "kind": "file",
         "description": "6-atom DistNNP xyz fixture with overlapping coordinates.",
@@ -108,6 +122,7 @@ BUILTIN_SYSTEMS: Dict[str, Dict[str, Any]] = {
 }
 
 DEFAULT_ADAPTER_STRUCTURE_PATH = Path(__file__).resolve().with_name("sample_nonoverlap.xyz")
+DEFAULT_HALO_STRUCTURE_PATH = Path(__file__).resolve().with_name("sample_halo_boundary.xyz")
 DEFAULT_REAL_STRUCTURE_PATH = (
     Path(__file__).resolve().parents[5] / "distnnp_state" / "tests" / "xyz.xyz"
 )
@@ -162,8 +177,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--builtin-system",
         choices=sorted(BUILTIN_SYSTEMS.keys()),
-        default="adapter_xyz6",
-        help="Built-in structure to use when --xyz-path is not provided.",
+        default="adapter_boundary_halo",
+        help=(
+            "Built-in structure to use when --xyz-path is not provided. "
+            "Defaults to the halo-producing Phase 1 verification fixture."
+        ),
     )
     parser.add_argument(
         "--xyz-path",
@@ -257,6 +275,10 @@ def parse_raw_structure(args: argparse.Namespace) -> Dict[str, Any]:
         return parse_xyz_file(Path(args.xyz_path))
     if args.builtin_system == "adapter_xyz6":
         return parse_xyz_file(DEFAULT_ADAPTER_STRUCTURE_PATH)
+    if args.builtin_system == "adapter_boundary_halo":
+        return parse_xyz_file(DEFAULT_HALO_STRUCTURE_PATH)
+    if args.builtin_system == "adapter_xyz6_halo":
+        return parse_xyz_file(DEFAULT_HALO_STRUCTURE_PATH)
     if args.builtin_system == "distnnp_xyz6":
         return parse_xyz_file(DEFAULT_REAL_STRUCTURE_PATH)
     raise ValueError(f"Unsupported built-in system: {args.builtin_system}")

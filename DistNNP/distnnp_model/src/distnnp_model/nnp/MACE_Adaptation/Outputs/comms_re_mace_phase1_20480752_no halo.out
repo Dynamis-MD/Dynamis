@@ -1,0 +1,103 @@
+W0725 09:26:22.735925 312919 torch/distributed/run.py:774] 
+W0725 09:26:22.735925 312919 torch/distributed/run.py:774] *****************************************
+W0725 09:26:22.735925 312919 torch/distributed/run.py:774] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0725 09:26:22.735925 312919 torch/distributed/run.py:774] *****************************************
+/u/jsaravananindira/.local/lib/python3.9/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+/u/jsaravananindira/.local/lib/python3.9/site-packages/e3nn/o3/_wigner.py:10: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  _Jd, _W3j_flat, _W3j_indices = torch.load(os.path.join(os.path.dirname(__file__), 'constants.pt'))
+cuequivariance or cuequivariance_torch is not available. Cuequivariance acceleration will be disabled.cuequivariance or cuequivariance_torch is not available. Cuequivariance acceleration will be disabled.
+
+Initializing distributed environment...
+Initializing distributed environment...
+[Gloo] Rank [Gloo] Rank 0 is connected to 11 is connected to  peer ranks. 1Expected number of connected peer ranks is :  peer ranks. 1Expected number of connected peer ranks is : 
+1
+Using medium MPA-0 model as default MACE-MP model, to use previous (before 3.10) default model please specify 'medium' as model argument
+Using Materials Project MACE for MACECalculator with /u/jsaravananindira/.cache/mace/macempa0mediummodel
+Using float32 for MACECalculator, which is faster but less accurate. Recommended for MD. Use float64 for geometry optimization.
+Using medium MPA-0 model as default MACE-MP model, to use previous (before 3.10) default model please specify 'medium' as model argument
+Using Materials Project MACE for MACECalculator with /u/jsaravananindira/.cache/mace/macempa0mediummodel
+Using float32 for MACECalculator, which is faster but less accurate. Recommended for MD. Use float64 for geometry optimization.
+/u/jsaravananindira/.local/lib/python3.9/site-packages/mace/calculators/foundations_models.py:297: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  return torch.load(model_path, map_location=device)
+/u/jsaravananindira/.local/lib/python3.9/site-packages/mace/calculators/foundations_models.py:297: UserWarning: Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected, since the`weights_only` argument was not explicitly passed to `torch.load`, forcing weights_only=False.
+  return torch.load(model_path, map_location=device)
+============================================================
+Phase 1 Raw-Exchange MACE Adapter
+============================================================
+model_family: mp
+model: medium-mpa-0
+device: cuda
+
+------------------------------------------------------------
+Global Input
+------------------------------------------------------------
+source_path: /u/jsaravananindira/DistNNP/DistNNP/distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/sample_nonoverlap.xyz
+num_atoms: 6
+atomic_numbers: [20, 35, 1, 6, 1, 1]
+positions_A: [[1.0, 1.0, 1.0], [4.0, 4.0, 4.0], [7.0, 7.0, 7.0], [10.0, 1.0, 10.0], [13.0, 4.0, 13.0], [16.0, 7.0, 16.0]]
+
+------------------------------------------------------------
+Structure Diagnostics
+------------------------------------------------------------
+min_pair_distance_A: 5.196152422706632
+min_pair_pair: [0, 1]
+has_duplicate_positions: False
+duplicate_pairs: []
+
+------------------------------------------------------------
+Per-Rank Observation Points
+------------------------------------------------------------
+all_expected_halo_counts_match: True
+all_force_shapes_match_owned_atoms: True
+all_energies_finite: True
+exchange_modes: ['no_halo_identity', 'no_halo_identity']
+
+rank: 0
+  n_local: 3
+  n_total_after_exchange: 3
+  n_halo: 0
+  expected_total_recv: 0
+  local_position_shape: [3, 3]
+  exchanged_position_shape: [3, 3]
+  local_atom_type_shape: [3]
+  exchanged_atom_type_shape: [3]
+  cutoff: 6.0
+  exchange_mode: no_halo_identity
+  exchange_reason: No halo traffic was requested by build_halo_maps.
+  total_send: 0
+  total_recv: 0
+  send_counts_by_peer: [0, 0]
+  recv_counts_by_peer: [0, 0]
+  pbc: [True, True, True]
+  edge_count_after_atomic_data: 4
+  local_atomic_numbers: [20, 35, 1]
+  halo_atomic_numbers: []
+  position_min: [1.0, 1.0, 1.0]
+  position_max: [7.0, 7.0, 7.0]
+  energy: -2.038239865561109
+
+rank: 1
+  n_local: 3
+  n_total_after_exchange: 3
+  n_halo: 0
+  expected_total_recv: 0
+  local_position_shape: [3, 3]
+  exchanged_position_shape: [3, 3]
+  local_atom_type_shape: [3]
+  exchanged_atom_type_shape: [3]
+  cutoff: 6.0
+  exchange_mode: no_halo_identity
+  exchange_reason: No halo traffic was requested by build_halo_maps.
+  total_send: 0
+  total_recv: 0
+  send_counts_by_peer: [0, 0]
+  recv_counts_by_peer: [0, 0]
+  pbc: [True, True, True]
+  edge_count_after_atomic_data: 4
+  local_atomic_numbers: [6, 1, 1]
+  halo_atomic_numbers: []
+  position_min: [10.0, 1.0, 10.0]
+  position_max: [16.0, 7.0, 16.0]
+  energy: -3.502261157767263
+
