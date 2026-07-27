@@ -21,8 +21,6 @@ from distnnp_integrator import (
 from typing import Union, Literal, Optional
 from dataclasses import dataclass
 import torch
-from torch import distributed as dist
-import os
 import uuid
 
 POSSIBLE_INTEGRATOR_TYPES = Union[Euler, Verlet, Langevin]
@@ -216,7 +214,7 @@ class Simulator:
     def _set_state(self, state: SimState):
         self.state = state
 
-    def step(self, step_size: float = None):
+    def step(self, step_size: Optional[float] = None):
         return self.integrator.step(self.state._state, self.model, step_size)
 
     def should_write_traj(self, step: int) -> bool:
