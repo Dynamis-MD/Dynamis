@@ -119,7 +119,7 @@ class LennardJonesPotentialModel(DistNNPModel):
             # next integrator step and overflows the radius-graph grid size.
             atom_types = (
                 FeaturePushToExchange.apply(
-                    local_atom_types.float(), distributed_state, self.atom_type_exchanger
+                    local_atom_types.float().unsqueeze(1), distributed_state, self.atom_type_exchanger
                 )
                 .long()
                 .reshape(-1)
