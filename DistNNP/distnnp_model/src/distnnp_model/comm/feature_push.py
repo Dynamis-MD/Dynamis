@@ -33,6 +33,21 @@ class FeaturePushToExchange(Function):
 
         partition_info: PartitionMessagePassingInfo = state.local_partition_info
 
+        # The exchanger operates on a 2-D [n_local, feature_dim] tensor, one row
+        # per local atom. A 1-D [n_local] input (e.g. atom types) would otherwise
+        # be accepted silently, leaving feature_dim ambiguous. The row count must
+        # match partition_indices because setup_exchanger sizes its IPC buffers
+        # off exactly that count.
+        assert features_to_push.dim() == 2, (
+            "features_to_push must be 2-D [n_local, feature_dim], got shape "
+            f"{tuple(features_to_push.shape)}"
+        )
+        n_local = len(partition_info.partition_indices)
+        assert features_to_push.shape[0] == n_local, (
+            "features_to_push must have one row per local atom: expected "
+            f"{n_local} rows, got {features_to_push.shape[0]}"
+        )
+
         received_features = exchanger.feature_push_forward(
             features_to_push, partition_info
         )
