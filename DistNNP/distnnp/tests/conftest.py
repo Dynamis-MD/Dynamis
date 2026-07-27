@@ -109,8 +109,8 @@ def simulation_factory(request):
         molecular_info = _make_global_state(16, 100, device)
         env = _make_env(rank, world_size, local_rank)
 
-        epsilon = torch.tensor([1.0], dtype=torch.float32, device=device)
-        sigma = torch.tensor([1.0], dtype=torch.float32, device=device)
+        epsilon = torch.ones(100, dtype=torch.float32, device=device)
+        sigma = torch.ones(100, dtype=torch.float32, device=device)
         lj_model = LennardJonesPotentialModel(epsilon, sigma)
 
         if integrator_name == "euler":

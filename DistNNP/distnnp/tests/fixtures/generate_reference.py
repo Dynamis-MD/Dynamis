@@ -81,8 +81,8 @@ def _make_env(rank: int, world_size: int, local_rank: int) -> DistEnvironment:
     return env
 
 def _build_simulator(molecular_info, env, integrator, device):
-    epsilon = torch.tensor([1.0], dtype=torch.float32, device=device)
-    sigma = torch.tensor([1.0], dtype=torch.float32, device=device)
+    epsilon = torch.ones(100, dtype=torch.float32, device=device)
+    sigma = torch.ones(100, dtype=torch.float32, device=device)
     lj_model = LennardJonesPotentialModel(epsilon, sigma)
 
     # Constants are fairly arbitrary
@@ -144,7 +144,7 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
 
             ke_acc, pe_acc = [], []
             for step in range(1, N_STEPS + 1):
-                energy, _ = simulator.step()
+                energy, _ = simulator.step(integrator.dt)
                 if step > N_EQUIL:
                     local = simulator.state.local_state
                     local_masses = TORCH_MASSES.to(local.atom_positions.device)[local.atom_types.reshape(-1)]
@@ -174,7 +174,7 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
 
         snapshots = {}
         for step in range(1, max(SNAPSHOT_STEPS) + 1):
-            energy, forces = simulator.step()
+            energy, forces = simulator.step(integrator.dt)
             if step in SNAPSHOT_STEPS:
                 snapshots[step] = {
                     "positions": simulator.state.pos.clone(),

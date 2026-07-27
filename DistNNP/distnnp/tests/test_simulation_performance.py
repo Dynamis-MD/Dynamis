@@ -10,7 +10,6 @@ Run via:
 """
 
 import torch
-import torch.distributed as dist
 import pytest
 
 
@@ -18,17 +17,17 @@ import pytest
 # The data is noisy and it shows that it can fail 
 # sometimes when nothing is necessarily wrong.
 
-# Euler    per_step:  Mean = 15.1 ms,  Std Dev = 3.06 ms,  Bound = 19.690 ms
-# Euler    N100:      Mean = 1.641 s,  Std Dev = 0.066 s,  Bound = 1.740 s
-# Verlet   per_step:  Mean = 33.4 ms,  Std Dev = 5.47 ms,  Bound = 41.605 ms
-# Verlet   N100:      Mean = 3.288 s,  Std Dev = 0.150 s,  Bound = 3.513 s
-# Langevin per_step:  Mean = 31.7 ms,  Std Dev = 7.52 ms,  Bound = 42.98 ms
-# Langevin N100:      Mean = 3.307 s,  Std Dev = 0.128 s,  Bound = 3.499 s
+# Euler    per_step:  Mean = 16.661 ms,  Std Dev = 4.125 ms,  Bound = 22.849 ms
+# Euler    N100:      Mean = 1.972 s,  Std Dev = 0.067 s,  Bound = 2.073 s
+# Verlet   per_step:  Mean = 19.791 ms,  Std Dev = 2.517 ms,  Bound = 23.567 ms
+# Verlet   N100:      Mean = 1.961 s,  Std Dev = 0.103 s,  Bound = 2.115 s
+# Langevin per_step:  Mean = 20.242 ms,  Std Dev = 6.058 ms,  Bound = 29.329 ms
+# Langevin N100:      Mean = 2.012 s,  Std Dev = 0.113 s,  Bound = 2.181 s
 
 PERF_BOUNDS = {
-    "euler":    {"per_step_ms": 19.69, "N100_total_s": 1.74},
-    "verlet":   {"per_step_ms": 41.605, "N100_total_s": 3.513},
-    "langevin": {"per_step_ms": 42.98,  "N100_total_s": 3.499},
+    "euler":    {"per_step_ms": 22.849, "N100_total_s": 2.073},
+    "verlet":   {"per_step_ms": 23.567, "N100_total_s": 2.115},
+    "langevin": {"per_step_ms": 29.329,  "N100_total_s": 2.181},
 }
 
 
