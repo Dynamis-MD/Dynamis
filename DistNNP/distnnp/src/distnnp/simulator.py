@@ -216,8 +216,8 @@ class Simulator:
     def _set_state(self, state: SimState):
         self.state = state
 
-    def step(self, step_size: float):
-        self.integrator.step(self.state._state, self.model, step_size)
+    def step(self, step_size: float = None):
+        return self.integrator.step(self.state._state, self.model, step_size)
 
     def should_write_traj(self, step: int) -> bool:
         if self.config.traj_interval == 0:
