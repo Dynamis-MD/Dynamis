@@ -110,6 +110,13 @@ class LennardJonesPotentialModel(DistNNPModel):
         )  # type: ignore
 
         local_atom_types = distributed_state.local_molecular_info.atom_types
+        # The unsqueeze/reshape pair below assumes 1-D [N] type indices. If this
+        # ever arrives as [N, 1], unsqueeze(1) makes it [N, 1, 1] and the pushed
+        # feature dim silently stops being 1.
+        assert local_atom_types.dim() == 1, (
+            "local_atom_types must be 1-D [n_local], got shape "
+            f"{tuple(local_atom_types.shape)}"
+        )
 
         with torch.no_grad():
             # exchanger needs a 2D [N, 1] feature; the LJ energy needs 1D [N]
