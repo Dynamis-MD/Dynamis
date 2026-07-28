@@ -33,6 +33,15 @@ class FeaturePushToExchange(Function):
 
         partition_info: PartitionMessagePassingInfo = state.local_partition_info
 
+        # Callers must push a 2-D [n_local, feature_dim] tensor, one row per local
+        # atom. feature_push_forward reads feature_dim off the last axis to size
+        # the IPC buffers, so any other rank silently mis-sizes them instead of
+        # failing here.
+        assert features_to_push.dim() == 2, (
+            "features_to_push must be 2-D [n_local, feature_dim], got shape "
+            f"{tuple(features_to_push.shape)}"
+        )
+
         received_features = exchanger.feature_push_forward(
             features_to_push, partition_info
         )
