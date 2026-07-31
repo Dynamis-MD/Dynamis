@@ -171,7 +171,7 @@ class Simulator:
         # Single-GPU / single-process runs skip init_process_group entirely —
         # torchrun sets RANK; SLURM sets SLURM_PROCID. If neither is present we
         # are running standalone and treat this as a world_size=1 job.
-        torch_dist_env = torch_dist_env or TorchDistEnv()
+        torch_dist_env = torch_dist_env or TorchDistEnv(backend=self.config.backend)
         self.device = self.device or torch_dist_env.device
         dist_env = torch_dist_env.dist_env
 
