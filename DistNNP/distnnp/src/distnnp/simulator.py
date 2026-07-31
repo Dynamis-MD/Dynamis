@@ -10,13 +10,13 @@ from distnnp_state import (
     TorchDistEnv,
 )
 from distnnp_model import DistNNPModel
-from distnnp.simulatorState import SimState
+from distnnp.simulator_state import SimState
 from distnnp_integrator import (
     Euler,
     Verlet,
     Langevin,
     DistNNPIntegrator,
-    AVALIABLE_INTEGRATORS,
+    AVAILABLE_INTEGRATORS,
 )
 from typing import Union, Literal, Optional
 from dataclasses import dataclass
@@ -36,7 +36,7 @@ VALID_PARTITION_ALGORITHMS = ["simple", "kdtree", "sfc_morton", "sfc_hilbert"]
 def check_integrator(integrator):
     if type(integrator) not in [Euler, Verlet, Langevin]:
         raise ValueError(
-            f"Integrator {integrator} is not available. Choose from {AVALIABLE_INTEGRATORS}."
+            f"Integrator {integrator} is not available. Choose from {AVAILABLE_INTEGRATORS}."
         )
 
 
@@ -103,26 +103,18 @@ class Simulator:
         self,
         model: DistNNPModel,
         integrator: POSSIBLE_INTEGRATOR_TYPES,
-        dist_environment: DistEnvironment,
         config: SimulatorConfig,
-        device,
+        torch_dist_env: TorchDistEnv | None = None,
     ):
         self.model = model
         check_integrator(integrator)
         self.integrator: DistNNPIntegrator = integrator
         self.config = config
-        self.dist_environment = dist_environment
-        self.device = device
-        # TODO figure out what author should be
-        self.writer: TrajectoryWriter = TrajectoryWriter(
-            dist_environment.global_rank,
-            uuid.uuid4().bytes,
-            "author",
-            config.output_dir,
-            config.traj_file,
-        )
+        self.torch_dist_env = torch_dist_env
+        self.device = torch_dist_env.device if torch_dist_env is not None else None
 
-    def _get_partitioner(self) -> POSSIBLE_PARTITIONERS_TYPES:
+    @property
+    def partitioner(self) -> POSSIBLE_PARTITIONERS_TYPES:
         partition_algorithm = self.config.partition_algorithm
         if partition_algorithm not in VALID_PARTITION_ALGORITHMS:
             raise ValueError(
@@ -141,10 +133,12 @@ class Simulator:
                 f"Partition algorithm {partition_algorithm} is not recognized."
             )
 
-    def _get_dist_environment(self) -> DistEnvironment:
-        return self.dist_environment
+    @property
+    def dist_env(self) -> DistEnvironment:
+        return self.torch_dist_env.dist_env
 
-    def _get_simulation_config(self) -> SimulationConfig:
+    @property
+    def sim_config(self) -> SimulationConfig:
         sim_config = SimulationConfig()
 
         sim_config.cutoff = self.config.cutoff_angstrom
@@ -161,9 +155,9 @@ class Simulator:
             device = self.device
         self.state = SimState(
             molecular_system=molecular_system,
-            partitioner=self._get_partitioner(),
-            simulation_config=self._get_simulation_config(),
-            distributed_environment=self._get_dist_environment(),
+            partitioner=self.partitioner,
+            simulation_config=self.sim_config,
+            distributed_environment=self.dist_env,
             device=device,
         )
         # Once the state is initialized, we can initialize the model buffers based on the local partition info
@@ -177,10 +171,11 @@ class Simulator:
         # Single-GPU / single-process runs skip init_process_group entirely —
         # torchrun sets RANK; SLURM sets SLURM_PROCID. If neither is present we
         # are running standalone and treat this as a world_size=1 job.
-        torch_dist_env = TorchDistEnv()
+        torch_dist_env = torch_dist_env or TorchDistEnv()
+        self.device = self.device or torch_dist_env.device
         dist_env = torch_dist_env.dist_env
 
-        sim_config = self._get_simulation_config()
+        sim_config = self.sim_config
 
         # (1) initialize from file
         global_mol_info = self.writer.initialize(input_file, self.config.timestep_fs, self.config.traj_interval)
@@ -203,6 +198,15 @@ class Simulator:
 
         # TODO if velocities are all 0, initialize from Maxwell-Boltzmann dist
 
+        # TODO figure out what author should be
+        self.writer: TrajectoryWriter = TrajectoryWriter(
+            torch_dist_env.dist_env.global_rank,
+            uuid.uuid4().bytes,
+            "author",
+            config.output_dir,
+            config.traj_file,
+        )
+
     def sync_and_repartition(self, device: Optional[torch.device] = None) -> None:
         self.state.sync_and_repartition()
         # TODO: ADD appropriate barriers/synchronization if needed here
@@ -212,6 +216,7 @@ class Simulator:
         self.writer.update_atom_counts(self.state.local_partition_info.atom_counts.to(torch.uint32))
 
     def _set_state(self, state: SimState):
+        # TODO do we even need this?
         self.state = state
 
     def step(self, step_size: Optional[float] = None):

@@ -121,7 +121,7 @@ class SimState:
 
     def sync_and_repartition(
         self,
-        paritioner: Optional[ABSTRACT_PARTITIONERS] = None,
+        partitioner: Optional[ABSTRACT_PARTITIONERS] = None,
         comm_backend: Union[Literal["nccl"], Literal["gloo"]] = "nccl",
     ) -> None:
         dist_env = self.dist_env
@@ -168,7 +168,7 @@ class SimState:
             global_mol_info.atom_positions = all_positions[sort_order].to(self.device)
             global_mol_info.atom_velocities = all_velocities[sort_order].to(self.device)
 
-        self.partitioner = paritioner if paritioner is not None else self.partitioner
+        self.partitioner = partitioner if partitioner is not None else self.partitioner
         # Re-partition on the updated positions and rebuild halo maps.
         new_partition_info = self.partitioner.partition(global_mol_info, dist_env)
         self.partitioner.build_halo_maps(
@@ -177,7 +177,7 @@ class SimState:
 
         self._state.local_partition_info = new_partition_info
         self._state.global_molecular_info = global_mol_info
-        self.parition_info = new_partition_info
+        self.partition_info = new_partition_info
 
         self._state.local_molecular_info = self.setup_mass_and_forces(
             partition_info=new_partition_info, molecular_system=global_mol_info
