@@ -175,6 +175,15 @@ class Simulator:
         sim_config = self._get_simulation_config()
 
         # (1) initialize from file
+        # TODO figure out what author should be
+        self.writer: TrajectoryWriter = TrajectoryWriter(
+            torch_dist_env.dist_env.global_rank,
+            uuid.uuid4().bytes,
+            "author",
+            config.output_dir,
+            config.traj_file,
+        )
+
         global_mol_info = self.writer.initialize(input_file, self.config.timestep_fs, self.config.traj_interval)
 
         # put tensors on device
@@ -185,15 +194,6 @@ class Simulator:
         )
         global_mol_info.atom_velocities = global_mol_info.atom_velocities.to(
             device=self.device
-        )
-
-        # TODO figure out what author should be
-        self.writer: TrajectoryWriter = TrajectoryWriter(
-            torch_dist_env.dist_env.global_rank,
-            uuid.uuid4().bytes,
-            "author",
-            config.output_dir,
-            config.traj_file,
         )
 
         # (2) initialize simulator state from the global system and partition it.
