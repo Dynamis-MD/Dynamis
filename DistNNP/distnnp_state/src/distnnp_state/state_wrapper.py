@@ -29,7 +29,7 @@ class TorchDistEnv:
     This is used by SimState but can also be used by users directly if they want to create their own DistNNPState outside of SimState.
     """
 
-    def __init__(self, is_distributed: bool | None = None, backend="cuda:nccl,cpu:gloo", **kwargs) -> None:
+    def __init__(self, is_distributed: bool | None = None, **kwargs) -> None:
         if is_distributed is None:
             is_distributed = _infer_is_distributed()
             print(f"is_distributed inferred as {is_distributed} from env")
@@ -37,25 +37,16 @@ class TorchDistEnv:
         if is_distributed:
             if not dist.is_initialized():
                 print("Initializing distributed environment...")
-                dist.init_process_group(backend=backend, **kwargs)
+                dist.init_process_group(backend="cuda:nccl,cpu:gloo", **kwargs)
             global_rank = dist.get_rank()
             world_size = dist.get_world_size()
         else:
             global_rank = 0
             world_size = 1
-
-        local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", -1)))
-        num_nodes = int(os.environ.get("SLURM_NNODES", -1))
-
-        if local_rank == -1 or num_nodes == -1:
-            num_gpus = torch.cuda.device_count()
-            gpus_per_node = num_gpus if num_gpus > 0 else 1
-            if local_rank == -1:
-                local_rank = global_rank % gpus_per_node
-            if num_nodes == -1:
-                num_nodes = max(1, (world_size + gpus_per_node - 1) // gpus_per_node)
-        else:
-            gpus_per_node = max(1, world_size // num_nodes)
+        num_gpus = torch.cuda.device_count()
+        gpus_per_node = num_gpus if num_gpus > 0 else 1
+        local_rank = global_rank % gpus_per_node
+        num_nodes = max(1, (world_size + gpus_per_node - 1) // gpus_per_node)
 
         if num_gpus > 0:
             torch.cuda.set_device(local_rank)

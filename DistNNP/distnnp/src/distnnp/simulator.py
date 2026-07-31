@@ -113,8 +113,7 @@ class Simulator:
         self.torch_dist_env = torch_dist_env
         self.device = torch_dist_env.device if torch_dist_env is not None else None
 
-    @property
-    def partitioner(self) -> POSSIBLE_PARTITIONERS_TYPES:
+    def _get_partitioner(self) -> POSSIBLE_PARTITIONERS_TYPES:
         partition_algorithm = self.config.partition_algorithm
         if partition_algorithm not in VALID_PARTITION_ALGORITHMS:
             raise ValueError(
@@ -133,12 +132,10 @@ class Simulator:
                 f"Partition algorithm {partition_algorithm} is not recognized."
             )
 
-    @property
-    def dist_env(self) -> DistEnvironment:
+    def _get_dist_environment(self) -> DistEnvironment:
         return self.torch_dist_env.dist_env
 
-    @property
-    def sim_config(self) -> SimulationConfig:
+    def _get_simulation_config(self) -> SimulationConfig:
         sim_config = SimulationConfig()
 
         sim_config.cutoff = self.config.cutoff_angstrom
@@ -155,9 +152,9 @@ class Simulator:
             device = self.device
         self.state = SimState(
             molecular_system=molecular_system,
-            partitioner=self.partitioner,
-            simulation_config=self.sim_config,
-            distributed_environment=self.dist_env,
+            partitioner=self._get_partitioner(),
+            simulation_config=self._get_simulation_config(),
+            distributed_environment=self._get_dist_environment(),
             device=device,
         )
         # Once the state is initialized, we can initialize the model buffers based on the local partition info
@@ -171,11 +168,11 @@ class Simulator:
         # Single-GPU / single-process runs skip init_process_group entirely —
         # torchrun sets RANK; SLURM sets SLURM_PROCID. If neither is present we
         # are running standalone and treat this as a world_size=1 job.
-        torch_dist_env = torch_dist_env or TorchDistEnv(backend=self.config.backend)
+        torch_dist_env = torch_dist_env or TorchDistEnv()
         self.device = self.device or torch_dist_env.device
         dist_env = torch_dist_env.dist_env
 
-        sim_config = self.sim_config
+        sim_config = self._get_simulation_config()
 
         # (1) initialize from file
         global_mol_info = self.writer.initialize(input_file, self.config.timestep_fs, self.config.traj_interval)
@@ -190,14 +187,6 @@ class Simulator:
             device=self.device
         )
 
-        # (2) initialize simulator state from the global system and partition it.
-        self.initialize_simulator_state(global_mol_info, device=self.device)
-
-        # (3) Repartition if needed and update writer atom-count metadata.
-        self.sync_and_repartition(device=self.device)
-
-        # TODO if velocities are all 0, initialize from Maxwell-Boltzmann dist
-
         # TODO figure out what author should be
         self.writer: TrajectoryWriter = TrajectoryWriter(
             torch_dist_env.dist_env.global_rank,
@@ -206,6 +195,14 @@ class Simulator:
             config.output_dir,
             config.traj_file,
         )
+
+        # (2) initialize simulator state from the global system and partition it.
+        self.initialize_simulator_state(global_mol_info, device=self.device)
+
+        # (3) Repartition if needed and update writer atom-count metadata.
+        self.sync_and_repartition(device=self.device)
+
+        # TODO if velocities are all 0, initialize from Maxwell-Boltzmann dist
 
     def sync_and_repartition(self, device: Optional[torch.device] = None) -> None:
         self.state.sync_and_repartition()
@@ -216,7 +213,6 @@ class Simulator:
         self.writer.update_atom_counts(self.state.local_partition_info.atom_counts.to(torch.uint32))
 
     def _set_state(self, state: SimState):
-        # TODO do we even need this?
         self.state = state
 
     def step(self, step_size: Optional[float] = None):
