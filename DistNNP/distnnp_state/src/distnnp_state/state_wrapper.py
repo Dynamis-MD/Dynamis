@@ -7,10 +7,21 @@ from distnnp_state import (
 import torch
 import torch.distributed as dist
 from typing import Union
+import os
 
 ABSTRACT_PARTITIONERS = Union[
     SFCPartitioner, SimpleSpatialPartitioner, KDTreePartitioner
 ]
+
+
+def _infer_is_distributed() -> bool:
+    if dist.is_initialized():
+        return True
+    launcher_markers = (
+        "WORLD_SIZE", "RANK", "LOCAL_RANK",
+        "SLURM_PROCID", "SLURM_NTASKS", "MASTER_ADDR",
+    )
+    return any(m in os.environ for m in launcher_markers)
 
 
 class TorchDistEnv:
@@ -18,7 +29,11 @@ class TorchDistEnv:
     This is used by SimState but can also be used by users directly if they want to create their own DistNNPState outside of SimState.
     """
 
-    def __init__(self, is_distributed: bool = True, **kwargs) -> None:
+    def __init__(self, is_distributed: bool | None = None, **kwargs) -> None:
+        if is_distributed is None:
+            is_distributed = _infer_is_distributed()
+            print(f"is_distributed inferred as {is_distributed} from env")
+
         if is_distributed:
             if not dist.is_initialized():
                 print("Initializing distributed environment...")
@@ -32,6 +47,7 @@ class TorchDistEnv:
         gpus_per_node = num_gpus if num_gpus > 0 else 1
         local_rank = global_rank % gpus_per_node
         num_nodes = max(1, (world_size + gpus_per_node - 1) // gpus_per_node)
+
         if num_gpus > 0:
             torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}" if num_gpus > 0 else "cpu")

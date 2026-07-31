@@ -10,13 +10,13 @@ from distnnp_state import (
     TorchDistEnv,
 )
 from distnnp_model import DistNNPModel
-from distnnp.simulatorState import SimState
+from distnnp.simulator_state import SimState
 from distnnp_integrator import (
     Euler,
     Verlet,
     Langevin,
     DistNNPIntegrator,
-    AVALIABLE_INTEGRATORS,
+    AVAILABLE_INTEGRATORS,
 )
 from typing import Union, Literal, Optional
 from dataclasses import dataclass
@@ -36,7 +36,7 @@ VALID_PARTITION_ALGORITHMS = ["simple", "kdtree", "sfc_morton", "sfc_hilbert"]
 def check_integrator(integrator):
     if type(integrator) not in [Euler, Verlet, Langevin]:
         raise ValueError(
-            f"Integrator {integrator} is not available. Choose from {AVALIABLE_INTEGRATORS}."
+            f"Integrator {integrator} is not available. Choose from {AVAILABLE_INTEGRATORS}."
         )
 
 
@@ -103,24 +103,15 @@ class Simulator:
         self,
         model: DistNNPModel,
         integrator: POSSIBLE_INTEGRATOR_TYPES,
-        dist_environment: DistEnvironment,
         config: SimulatorConfig,
-        device,
+        torch_dist_env: TorchDistEnv | None = None,
     ):
         self.model = model
         check_integrator(integrator)
         self.integrator: DistNNPIntegrator = integrator
         self.config = config
-        self.dist_environment = dist_environment
-        self.device = device
-        # TODO figure out what author should be
-        self.writer: TrajectoryWriter = TrajectoryWriter(
-            dist_environment.global_rank,
-            uuid.uuid4().bytes,
-            "author",
-            config.output_dir,
-            config.traj_file,
-        )
+        self.torch_dist_env = torch_dist_env
+        self.device = torch_dist_env.device if torch_dist_env is not None else None
 
     def _get_partitioner(self) -> POSSIBLE_PARTITIONERS_TYPES:
         partition_algorithm = self.config.partition_algorithm
@@ -142,7 +133,7 @@ class Simulator:
             )
 
     def _get_dist_environment(self) -> DistEnvironment:
-        return self.dist_environment
+        return self.torch_dist_env.dist_env
 
     def _get_simulation_config(self) -> SimulationConfig:
         sim_config = SimulationConfig()
@@ -177,12 +168,22 @@ class Simulator:
         # Single-GPU / single-process runs skip init_process_group entirely —
         # torchrun sets RANK; SLURM sets SLURM_PROCID. If neither is present we
         # are running standalone and treat this as a world_size=1 job.
-        torch_dist_env = TorchDistEnv()
+        torch_dist_env = torch_dist_env or TorchDistEnv()
+        self.device = self.device or torch_dist_env.device
         dist_env = torch_dist_env.dist_env
 
         sim_config = self._get_simulation_config()
 
         # (1) initialize from file
+        # TODO figure out what author should be
+        self.writer: TrajectoryWriter = TrajectoryWriter(
+            torch_dist_env.dist_env.global_rank,
+            uuid.uuid4().bytes,
+            "author",
+            config.output_dir,
+            config.traj_file,
+        )
+
         global_mol_info = self.writer.initialize(input_file, self.config.timestep_fs, self.config.traj_interval)
 
         # put tensors on device

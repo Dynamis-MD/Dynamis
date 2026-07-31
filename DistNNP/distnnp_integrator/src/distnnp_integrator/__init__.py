@@ -3,6 +3,6 @@ from distnnp_integrator.verlet import Verlet
 from distnnp_integrator.langevin import Langevin
 from distnnp_integrator.integrator import DistNNPIntegrator
 
-AVALIABLE_INTEGRATORS = ["Euler", "Verlet", "Langevin"]
+AVAILABLE_INTEGRATORS = ["Euler", "Verlet", "Langevin"]
 
 __all__ = ["Euler", "Verlet", "Langevin"]
