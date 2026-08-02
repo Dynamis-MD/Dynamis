@@ -43,11 +43,30 @@ try:
 except Exception:  # pragma: no cover - optional dependency import
     MACEPotentialModelWithInternalFeatureExchange = None
 
+try:
+    from distnnp_model.nnp.MACE_Adaptation.final_adapter import (
+        DistMACEAdapter,
+        FeatureExchangePolicy,
+    )
+except Exception:  # pragma: no cover - optional dependency import
+    DistMACEAdapter = None
+    FeatureExchangePolicy = None
+
+try:
+    from distnnp_model.nnp.MACE_Adaptation.mace_subclass_boundary import (
+        DistMACEModelSubclassBoundary,
+    )
+except Exception:  # pragma: no cover - optional dependency import
+    DistMACEModelSubclassBoundary = None
+
 __all__ = [
     "MACEPotentialModel",
     "MACEPotentialModelWithRawExchange",
     "MACEPotentialModelWithOwnedEnergy",
     "MACEPotentialModelWithOwnedEnergyForces",
     "MACEPotentialModelWithInternalFeatureExchange",
+    "DistMACEAdapter",
+    "FeatureExchangePolicy",
+    "DistMACEModelSubclassBoundary",
     "load_raw_mace_model",
 ]

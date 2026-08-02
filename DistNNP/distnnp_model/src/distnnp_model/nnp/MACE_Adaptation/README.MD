@@ -57,3 +57,17 @@ Step 1 is considered successful if:
 - baseline responsibilities are explicit,
 - the prototype target is fixed and easy to reference,
 - and future changes can be judged against the baseline/prototype split.
+
+## Final adapter
+
+The consolidated final-adapter documentation now lives in:
+
+- `FINAL_ADAPTER_README.md`
+
+That document covers:
+
+- how the prototype phases built up to the final adapter
+- the subclass boundary and exchanged layer
+- the role of the `handle_lammps(...)` hook
+- ownership-aware energy and autograd-based force recovery
+- current milestone validation and execution commands
