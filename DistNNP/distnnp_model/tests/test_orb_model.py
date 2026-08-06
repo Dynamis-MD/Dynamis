@@ -1,9 +1,24 @@
 """
 Distributed parity test for ORBModel — mirrors test_uma_model.
 
-Place at: distnnp_model/tests/test_orb_model.py
-Run:
+Needs the orb extra, on Python 3.12: orb-models 0.7.0 hard-pins dm-tree==0.1.8,
+which ships no cp313 wheel and fails to build from source on 3.13.
+
+    pip install -e ./distnnp_model[orb]
+
+Run from the DistNNP/ directory, 2 GPUs:
+
     torchrun --nproc_per_node=2 distnnp_model/tests/test_orb_model.py
+
+Single-rank diagnostic — no ghosts, exchange is identity, interaction split /1.
+A failure here is the ORB energy composition itself, not distribution:
+
+    ORB_ALLOW_SINGLE_RANK=1 torchrun --nproc_per_node=1 \
+        distnnp_model/tests/test_orb_model.py
+
+ORB_DEBUG=1 adds a per-rank breakdown of interaction / zbl / reference and the
+edge-length summary. Expect energy and force rel diff ~1e-7. One fp32 ULP at
+this magnitude is 3.8e-06, so a 1-ULP energy offset is the floor, not a bug.
 
 KEY FACTS (verified against orb-models source):
   * orb_v3_conservative_inf_omat energy =
@@ -119,7 +134,6 @@ def test_orb_distributed_parity():
     global_mol.atom_types = global_atom_types
     global_mol.atom_positions = global_positions
     global_mol.atom_velocities = torch.zeros((total_atoms, 3), device=device)
-    global_mol.atom_forces = torch.zeros((total_atoms, 3), device=device)
 
     sim_config = SimulationConfig()
     sim_config.cell = global_cell
@@ -138,7 +152,6 @@ def test_orb_distributed_parity():
     local_mol.atom_positions = global_mol.atom_positions[partition_info.partition_indices]
     local_mol.atom_velocities = global_mol.atom_velocities[partition_info.partition_indices]
     local_mol.atom_types = global_mol.atom_types[partition_info.partition_indices]
-    local_mol.atom_forces = global_mol.atom_forces[partition_info.partition_indices]
     n_local = local_mol.atom_positions.shape[0]
     local_mol.num_atoms = n_local
 
