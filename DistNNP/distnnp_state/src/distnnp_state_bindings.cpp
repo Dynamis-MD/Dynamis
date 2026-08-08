@@ -4,6 +4,7 @@
 #include "distnnp_state/radius_graph.hpp"
 #include "distnnp_state/trajectory_writer.hpp"
 #include <torch/extension.h>
+#include <pybind11/stl.h>
 
 PYBIND11_MODULE(distnnp_state_impl, m) {
   py::class_<distnnp_state::MolecularInfo>(m, "MolecularInfo")
@@ -130,21 +131,24 @@ PYBIND11_MODULE(distnnp_state_impl, m) {
            py::arg("output_dir") = "./trajectory",
            py::arg("output_file") = "trajectory.distnnp")
       .def("initialize",
-           py::overload_cast<const std::string &, const float, const uint32_t>(
+           py::overload_cast<const std::string &, const float, const uint32_t,
+                              std::vector<std::string>>(
                &distnnp_state::TrajectoryWriter::initialize),
            "Writes front matter and initializes environment from an xyz file",
            py::arg("input_file_name"), py::arg("time_per_step"),
-           py::arg("steps_per_write"))
+           py::arg("steps_per_write"),
+           py::arg("opts") = std::vector<std::string>{})
       .def("initialize",
            py::overload_cast<const distnnp_state::MolecularInfo &, const float,
-                              const uint32_t>(
+                              const uint32_t, std::vector<std::string>>(
                &distnnp_state::TrajectoryWriter::initialize),
            "Writes front matter and initializes environment from MolecularInfo struct",
            py::arg("input_system"), py::arg("time_per_step"),
-           py::arg("steps_per_write"))
+           py::arg("steps_per_write"),
+           py::arg("opts") = std::vector<std::string>{})
       .def("write_to_xyz", &distnnp_state::TrajectoryWriter::write_to_xyz,
            "Writes state to an xyz file", py::arg("state"),
-           py::arg("file_name"))
+           py::arg("file_name"), py::arg("opts") = std::vector<std::string>{})
       .def("update_atom_counts",
            &distnnp_state::TrajectoryWriter::update_atom_counts,
            "Update the rank offsets. Should be called after every repartition",
