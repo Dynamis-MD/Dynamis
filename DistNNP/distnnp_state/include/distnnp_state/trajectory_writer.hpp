@@ -1,29 +1,35 @@
 #pragma once
 #include "distnnp_state.hpp"
-#include <c10/util/Optional.h>
 #include <cstdint>
 #include <vector>
 #include <unordered_map>
 
 namespace distnnp_state {
 
+// Canonical per-atom field order used for both the on-disk field_descriptors
+// block and the frame layout. Order matters: readers/writers must agree on it.
+struct FieldSpec {
+    const char* opt_name;        // name accepted in the Python-facing opts list
+    const char* descriptor_name; // name written into the file's field_descriptors block
+    uint32_t bytes_per_atom;     // per-atom byte size of this field
+};
+
+static const std::vector<FieldSpec> kFieldOrder = {
+    { "indices",   "id",       sizeof(int64_t) },
+    { "positions", "position", 3 * sizeof(float) },
+    { "velocities","velocity", 3 * sizeof(float) },
+};
+
 class TrajectoryWriter {
 public:
     explicit TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, const std::string& output_dir = "./trajectory", const std::string& output_file = "trajectory.distnnp");
     ~TrajectoryWriter();
 
-    // TODO eventually this can be initialize with the custom binary format as a file
-    MolecularInfo initialize(const std::string& input_file_name, const float time_per_step, const uint32_t steps_per_write);
-    MolecularInfo initialize(const MolecularInfo& input_system, const float time_per_step, const uint32_t steps_per_write);
+    MolecularInfo initialize(const std::string& input_file_name, const float time_per_step, const uint32_t steps_per_write, std::vector<std::string> opts = {});
+    MolecularInfo initialize(const MolecularInfo& input_system, const float time_per_step, const uint32_t steps_per_write, std::vector<std::string> opts = {});
 
-    // cell/pbc are optional and carried forward from the last value seen
-    // (either from initialize() or a previous submit()) if not provided,
-    // so a static-box simulation only needs to pass them once.
-    void submit(uint32_t step, MolecularInfo state, c10::optional<torch::Tensor> cell = c10::nullopt, c10::optional<torch::Tensor> pbc = c10::nullopt);
+    void submit(uint32_t step, MolecularInfo state);
     void flush();
-
-    torch::Tensor get_cell() const { return current_cell; }
-    torch::Tensor get_pbc() const { return current_pbc; }
 
     void update_atom_counts(torch::Tensor counts) {
         // Must save to a named variable before calling data_ptr — the temporary
@@ -38,13 +44,14 @@ public:
         }
     }
 
-    void write_to_xyz(const MolecularInfo& state, const std::string& file_name = "output.xyz");
+    void write_to_xyz(const MolecularInfo& state, const std::string& file_name = "output.xyz", std::vector<std::string> opts = {});
 
 private:
     std::string output_file;
     MolecularInfo load_xyz_file(const std::string& xyz_file_name);
     MolecularInfo load_distnnp_file(const std::string& xyz_file_name);
     void write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state, uint32_t rank);
+    void parse_opts(std::vector<std::string> opts);
 
     // only set to true if the file has been closed
     bool flushed{ false };
@@ -52,19 +59,20 @@ private:
     py::bytes run_id;
     std::string author;
 
-    uint64_t total_atoms;
-    uint32_t bytes_per_atom;
-    uint32_t front_matter_size;
+    uint64_t total_atoms{ 0 };
+    uint32_t bytes_per_atom{ 0 };
+    uint32_t front_matter_size{ 0 }; // 0 until initialize()/write_front_matter() runs
 
     int fd; // fd of the output file
     uint32_t rank; // rank of the current process
     std::vector<uint32_t> rank_atom_counts; // atom offsets
     std::string output_dir;
 
-    // last known simulation cell / pbc flags, written into every submitted
-    // frame's pbc_cell block; updated whenever submit() is given new values
-    torch::Tensor current_cell; // [3, 3] float32
-    torch::Tensor current_pbc;  // [3] uint8 (0 or 1)
+    // TODO needs merge with #85
+    bool has_pbc{ false };
+    bool has_indices{ false };
+    bool has_positions{ false };
+    bool has_velocities{ false };
 };
 
 

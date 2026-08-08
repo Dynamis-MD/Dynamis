@@ -1,33 +1,46 @@
-from distnnp_state import MolecularInfo
-import os.path as osp
+import os
+import tempfile
+
 import torch
 
+from distnnp_state import MolecularInfo, TrajectoryWriter
 
-class XYZParser:
+
+def is_pathlike(file_path) -> bool:
+    return isinstance(file_path, (str, os.PathLike))
+
+
+class MolecularInfoWriter:
     @staticmethod
-    def parse(file_path: str) -> MolecularInfo:
+    def write_struct(info: MolecularInfo, file_path: str, opts: list[str] | None = None):
+        """Writes a MolecularInfo struct to a .distnnp file in a single call.
+
+        opts: which fields to write, from {"indices", "positions", "velocities"}.
+        None or an empty list writes everything; otherwise only the listed fields
+        are written.
         """
-        Parses an XYZ file and returns a MolecularInfo object containing the atom indices, positions, velocities, and edge counts.
+        directory, filename = os.path.split(file_path)
+        with TrajectoryWriter(0, bytes(16), "MolInfoWriter", directory or ".", filename) as writer:
+            writer.initialize(info, 1.0, 1, opts or [])
+            # Single standalone writer, so all atoms belong to rank 0.
+            writer.update_atom_counts(torch.tensor([info.num_atoms], dtype=torch.uint32))
+            writer.submit(0, info)
+            writer.flush()
 
-        Args:
-            file_path (str): Path to the XYZ file.
-        Returns:
-            MolecularInfo: An object containing the parsed molecular information.
+
+class MolecularInfoReader:
+    @staticmethod
+    def read_struct(file_path: str) -> MolecularInfo:
+        """Reads a MolecularInfo struct from a .xyz or .distnnp file in a single call.
+
+        Missing indices are assumed sequential and missing velocities default to
+        zero; see TrajectoryWriter for the full self-describing read behavior.
         """
-
-        # TODO: THis is a placeholder and will be replaced with more performance-optimized C++ code that directly fills the MolecularInfo struct.
-
-        assert osp.isfile(file_path), f"File not found: {file_path}"
-        assert file_path.endswith(".xyz"), f"Expected an XYZ file, got: {file_path}"
-
-        with open(file_path, "r") as f:
-            lines = f.readlines()
-
-        num_atoms = int(lines[0].strip())
-        assert (
-            len(lines) >= num_atoms + 2
-        ), f"File {file_path} does not contain enough lines for {num_atoms} atoms."
-
-        atom_indices = torch.arange(num_atoms, dtype=torch.long)
-        atom_positions = torch.zeros((num_atoms, 3), dtype=torch.float)
-        atom_velocities = torch.zeros((num_atoms, 3), dtype=torch.float)
+        assert is_pathlike(file_path) and os.path.exists(file_path), f"{file_path} could not be found"
+        with tempfile.TemporaryDirectory() as scratch_dir:
+            # TrajectoryWriter always opens/truncates an output file on
+            # construction, so reading goes through a throwaway scratch file
+            # rather than the path being read.
+            with TrajectoryWriter(0, bytes(16), "MolInfoReader", scratch_dir, "_scratch.distnnp") as writer:
+                # make paths a string
+                return writer.initialize(os.fspath(file_path), 1.0, 1)
