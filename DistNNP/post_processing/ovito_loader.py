@@ -62,6 +62,8 @@ def _read_header(f):
         f.seek(OFFSET_FIELD_DESCRIPTORS + i * FIELD_DESCRIPTOR_SIZE)
         raw = f.read(FIELD_DESCRIPTOR_SIZE)
         name = raw.split(b"\x00", 1)[0].decode("ascii")
+        if name == "pbc_cell":
+            continue  # per-frame block, not a per-atom field
         if name not in FIELD_LAYOUT:
             raise ValueError(f"unknown field descriptor '{name}' in distnnp file")
         field_names.append(name)
@@ -93,7 +95,12 @@ class BinaryReader(FileReaderInterface):
     def scan(self, filename: str, register_frame: Callable[..., None]):
         with open(filename, "rb") as f:
             num_atoms, bytes_per_atom, front_matter_size, _ = _read_header(f)
-            bytes_per_frame = num_atoms * bytes_per_atom
+
+            # every frame starts with a fixed 40 byte pbc_cell block (9
+            # float32 cell + 3 uint8 pbc + 1 padding byte) before the
+            # per-atom field data
+            pbc_cell_block_size = 40
+            bytes_per_frame = pbc_cell_block_size + (num_atoms * bytes_per_atom)
 
             # Loop through the file to register frames
             file_size = os.path.getsize(filename)
@@ -134,40 +141,55 @@ class BinaryReader(FileReaderInterface):
                 types_prop.types.append(ParticleType(id=int(atomic_num), name=name))
             types_prop[...] = atom_types
 
-            # 2. Walk the field descriptors (in file order) to find each active
-            # field's byte offset within this frame; fields absent from
-            # field_names simply aren't in the map. Mirrors the cursor logic in
-            # TrajectoryWriter::load_distnnp_file.
+            # 2. Read the pbc_cell block for this frame (9 float32 cell + 3
+            # uint8 pbc + 1 padding byte = 40 bytes).
+            f.seek(frame_offset)
+            frame_cell = np.fromfile(f, dtype=np.float32, count=9).reshape(3, 3)
+            frame_pbc = np.fromfile(f, dtype=np.uint8, count=3)
+            pbc_cell_block_size = 40
+
+            # 3. Walk the field descriptors (in file order) to find each active
+            # field's byte offset within the rest of the frame; fields absent
+            # from field_names simply aren't in the map. Mirrors the cursor
+            # logic in TrajectoryWriter::load_distnnp_file.
             field_offsets = {}
-            cursor = frame_offset
+            cursor = frame_offset + pbc_cell_block_size
             for name in field_names:
                 _, _, size = FIELD_LAYOUT[name]
                 field_offsets[name] = cursor
                 cursor += num_atoms * size
 
-            # 3. Indices default to sequential order if the field is absent.
+            # 4. Indices default to sequential order if the field is absent.
             if "id" in field_offsets:
                 f.seek(field_offsets["id"])
                 frame_indices = np.fromfile(f, dtype=np.int64, count=num_atoms)
             else:
                 frame_indices = np.arange(num_atoms, dtype=np.int64)
 
-            # 4. Positions are mandatory (already validated by _read_header).
+            # 5. Positions are mandatory (already validated by _read_header).
             f.seek(field_offsets["position"])
             frame_positions = np.fromfile(f, dtype=np.float32, count=num_atoms * 3).reshape(num_atoms, 3)
 
-            # 5. Velocities default to zero if the field is absent.
+            # 6. Velocities default to zero if the field is absent.
             if "velocity" in field_offsets:
                 f.seek(field_offsets["velocity"])
                 frame_velocities = np.fromfile(f, dtype=np.float32, count=num_atoms * 3).reshape(num_atoms, 3)
             else:
                 frame_velocities = np.zeros((num_atoms, 3), dtype=np.float32)
 
-            # 6. Create a sorting map based on the particle indices
+            # 7. Create a sorting map based on the particle indices
             # This finds the permutation needed to sort frame_indices into [0, 1, 2, ... num_atoms-1]
             sort_map = np.argsort(frame_indices)
 
-            # 7. Assign sorted data to OVITO so everything aligns with atom_types
+            # 8. Assign sorted data to OVITO so everything aligns with atom_types
             indices_prop[...] = frame_indices[sort_map]
             positions_prop[...] = frame_positions[sort_map]
             velocities_prop[...] = frame_velocities[sort_map]
+
+            # 9. Surface the simulation cell / periodicity for this frame.
+            # frame_cell is row-major (each row is a lattice vector, the
+            # ASE/extxyz convention); OVITO's cell matrix stores lattice
+            # vectors as columns, hence the transpose.
+            cell_matrix = np.zeros((3, 4), dtype=np.float32)
+            cell_matrix[:, :3] = frame_cell.T
+            data.create_cell(cell_matrix, tuple(bool(x) for x in frame_pbc))

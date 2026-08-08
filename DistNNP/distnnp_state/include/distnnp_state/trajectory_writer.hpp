@@ -1,5 +1,6 @@
 #pragma once
 #include "distnnp_state.hpp"
+#include <c10/util/Optional.h>
 #include <cstdint>
 #include <vector>
 #include <unordered_map>
@@ -28,8 +29,14 @@ public:
     MolecularInfo initialize(const std::string& input_file_name, const float time_per_step, const uint32_t steps_per_write, std::vector<std::string> opts = {});
     MolecularInfo initialize(const MolecularInfo& input_system, const float time_per_step, const uint32_t steps_per_write, std::vector<std::string> opts = {});
 
-    void submit(uint32_t step, MolecularInfo state);
+    // cell/pbc are optional and carried forward from the last value seen
+    // (either from initialize() or a previous submit()) if not provided,
+    // so a static-box simulation only needs to pass them once.
+    void submit(uint32_t step, MolecularInfo state, c10::optional<torch::Tensor> cell = c10::nullopt, c10::optional<torch::Tensor> pbc = c10::nullopt);
     void flush();
+
+    torch::Tensor get_cell() const { return current_cell; }
+    torch::Tensor get_pbc() const { return current_pbc; }
 
     void update_atom_counts(torch::Tensor counts) {
         // Must save to a named variable before calling data_ptr — the temporary
@@ -68,11 +75,14 @@ private:
     std::vector<uint32_t> rank_atom_counts; // atom offsets
     std::string output_dir;
 
-    // TODO needs merge with #85
-    bool has_pbc{ false };
     bool has_indices{ false };
     bool has_positions{ false };
     bool has_velocities{ false };
+
+    // last known simulation cell / pbc flags, written into every submitted
+    // frame's pbc_cell block; updated whenever submit() is given new values
+    torch::Tensor current_cell; // [3, 3] float32
+    torch::Tensor current_pbc;  // [3] uint8 (0 or 1)
 };
 
 

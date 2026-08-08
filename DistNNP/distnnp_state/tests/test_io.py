@@ -310,7 +310,7 @@ def test_opts_reduced_fields_round_trip():
     with open("./opts_reduced.distnnp", "rb") as f:
         vals = struct.unpack(fixed_format, f.read(fixed_size))
         assert vals[7] == 20  # bytes_per_atom
-        assert vals[8] == 2   # field_count
+        assert vals[8] == 3   # field_count (pbc_cell + id + position)
 
     writer2 = TrajectoryWriter(1, b"1234", "author", "./")
     env2 = writer2.initialize("./opts_reduced.distnnp", 1.0, 1)
@@ -539,8 +539,10 @@ def _read_raw_frame(path, frame_index, num_atoms, has_indices, has_velocities):
         f.seek(116 + field_count * 32)
         front_matter_size, = struct.unpack("<Q", f.read(8))
 
+    pbc_cell_block_size = 40
     bytes_per_atom = (8 if has_indices else 0) + 12 + (12 if has_velocities else 0)
-    cursor = front_matter_size + frame_index * num_atoms * bytes_per_atom
+    frame_size = pbc_cell_block_size + num_atoms * bytes_per_atom
+    cursor = front_matter_size + frame_index * frame_size + pbc_cell_block_size
 
     with open(path, "rb") as f:
         ids = None

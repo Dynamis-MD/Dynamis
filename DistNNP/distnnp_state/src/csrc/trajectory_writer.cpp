@@ -1,7 +1,9 @@
 #include "distnnp_state/trajectory_writer.hpp"
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <fcntl.h>
@@ -81,6 +83,13 @@ MolecularInfo TrajectoryWriter::initialize(const std::string& input_file_name, c
 MolecularInfo TrajectoryWriter::initialize(const MolecularInfo& input_system, const float time_per_step, const uint32_t steps_per_write, std::vector<std::string> opts) {
     parse_opts(opts);
     write_front_matter(time_per_step, steps_per_write, input_system, rank);
+    // a bare MolecularInfo carries no cell/pbc; default to no box/no
+    // periodicity, consistent with load_xyz_file's fallback for xyz input
+    // that lacks Lattice=/pbc=
+    if (!current_cell.defined())
+        current_cell = torch::zeros({3, 3}, torch::kFloat32);
+    if (!current_pbc.defined())
+        current_pbc = torch::zeros({3}, torch::kUInt8);
     return input_system;
 }
 
@@ -120,7 +129,9 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
         if (opt == "velocities" && !has_velocities) continue;
         active_fields.push_back(&f);
     }
-    const uint32_t field_count = static_cast<uint32_t>(active_fields.size());
+    // +1 for the pbc_cell block, which is always written as a field
+    // descriptor even though it isn't a per-atom field (see submit())
+    const uint32_t field_count = static_cast<uint32_t>(active_fields.size()) + 1;
 
     uint64_t front_matter_size = sizeof(uint8_t) * 8  // magic
                                + sizeof(uint32_t)  // version
@@ -207,6 +218,15 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
     offset += sizeof(field_count);
 
     // fields
+    // pbc_cell — the per-frame cell/pbc block (not a per-atom field, but
+    // listed here for self-description; its layout is fixed, see submit())
+    {
+        const char* pbc_cell_str = "pbc_cell";
+        uint32_t pbc_cell_size = strlen(pbc_cell_str);
+        memcpy(buf.data() + offset, pbc_cell_str, pbc_cell_size);
+        memset(buf.data() + offset + pbc_cell_size, 0, 32 - pbc_cell_size);
+        offset += 32;
+    }
     for (const auto* f : active_fields) {
         std::string name(f->descriptor_name);
         memcpy(buf.data() + offset, name.data(), name.size());
@@ -244,26 +264,50 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
     }
 }
 
-void TrajectoryWriter::submit(uint32_t step, MolecularInfo state) {
+void TrajectoryWriter::submit(uint32_t step, MolecularInfo state, c10::optional<torch::Tensor> cell, c10::optional<torch::Tensor> pbc) {
 
     // to make this easier, i think im going to write each tensor one after the other
     // so it will be
+    // pbc_cell | 9 x float32 (cell) + 3 x uint8 (pbc) + 1 byte padding, written once per frame by rank 0
     // vertex_ids | uint8 x frame_size
     // atom_positions | 3 x float32 x frame_size
     // atom_velocities | 3 x float32 x frame_size
+
+    // cell/pbc are optional; if not provided, keep writing whatever was last
+    // known (seeded by initialize(), or a previous submit() call)
+    if (cell.has_value())
+        current_cell = cell->to(torch::kCPU).contiguous().toType(torch::kFloat32);
+    if (pbc.has_value())
+        current_pbc = pbc->to(torch::kCPU).contiguous().toType(torch::kUInt8);
+
+    // pbc_cell block: 9 x float32 (cell, 36 bytes) + 3 x uint8 (pbc, 3 bytes) +
+    // 1 byte padding to stay on an 8-byte boundary = 40 bytes, fixed for this version
+    const uint32_t pbc_cell_block_size = 40;
 
     // TODO make sure the step will calculate the correct offset
     if (front_matter_size == 0)
         throw std::runtime_error("submit() called before initialize()");
 
-    uint32_t offset = front_matter_size + (step * total_atoms * bytes_per_atom);
+    uint32_t offset = front_matter_size + (step * (pbc_cell_block_size + total_atoms * bytes_per_atom));
 
+    if (rank == 0) {
+        std::vector<uint8_t> pbc_cell_buf(pbc_cell_block_size, 0);
+        torch::Tensor cell_cpu = current_cell.contiguous();
+        memcpy(pbc_cell_buf.data(), cell_cpu.data_ptr(), 9 * sizeof(float));
+        torch::Tensor pbc_cpu = current_pbc.contiguous();
+        memcpy(pbc_cell_buf.data() + 9 * sizeof(float), pbc_cpu.data_ptr(), 3 * sizeof(uint8_t));
+
+        ssize_t written = pwrite(fd, pbc_cell_buf.data(), pbc_cell_block_size, offset);
+        if (written < 0) throw std::runtime_error("pwrite failed: " + std::string(strerror(errno)));
+        if (static_cast<size_t>(written) != pbc_cell_block_size) throw std::runtime_error("partial write");
+    }
+
+    uint32_t atom_block_offset = offset + pbc_cell_block_size;
 
     uint64_t atom_count = 0;
     for (int i = 0; i < rank; i++) {
         atom_count += rank_atom_counts.at(i);
     }
-    std::cout << "Rank " << rank << " writing " << rank_atom_counts.at(rank) << " atoms at offset " << offset << std::endl;
 
     auto write_tensor = [&](torch::Tensor t, uint32_t off) {
         torch::Tensor cpu_tensor = t.to(torch::kCPU).contiguous();
@@ -274,8 +318,9 @@ void TrajectoryWriter::submit(uint32_t step, MolecularInfo state) {
         if (static_cast<size_t>(written) != tensor_bytes) throw std::runtime_error("partial write");
     };
 
-    // doing sizeof here to be more explicit about the calculations
-    uint32_t cursor = offset;
+    // doing sizeof here to be more explicit about the calculations; atom data
+    // starts after the pbc_cell block, at atom_block_offset
+    uint32_t cursor = atom_block_offset;
     if (has_indices) {
         uint32_t field_offset = cursor + (atom_count * sizeof(int64_t));
         write_tensor(state.atom_vertex_numbers, field_offset);
@@ -337,8 +382,8 @@ MolecularInfo TrajectoryWriter::load_distnnp_file(const std::string& distnnp_fil
     if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
     if (n != sizeof(field_count)) throw std::runtime_error("unexpected end of file");
 
-    // Field count can never be more than 3
-    if (field_count > 3) {
+    // Field count can never be more than 4 (pbc_cell + id + position + velocity)
+    if (field_count > 4) {
         throw std::runtime_error("implausible field_count (" + std::to_string(field_count) + ") in " + distnnp_file_name);
     }
 
@@ -368,14 +413,34 @@ MolecularInfo TrajectoryWriter::load_distnnp_file(const std::string& distnnp_fil
     if (n != types.size()) throw std::runtime_error("unexpected end of file");
     atoms.atom_types = torch::from_blob(types.data(), {atoms.num_atoms}, torch::kUInt8).clone().to(torch::kInt64);
 
-    uint64_t frame_size = bytes_per_atom * atoms.num_atoms;
+    // pbc_cell block: 9 x float32 (cell, 36 bytes) + 3 x uint8 (pbc, 3 bytes) +
+    // 1 byte padding to stay on an 8-byte boundary = 40 bytes, fixed for this version
+    const uint32_t pbc_cell_block_size = 40;
+
+    uint64_t frame_size = pbc_cell_block_size + (bytes_per_atom * atoms.num_atoms);
 
     uint32_t size = lseek(dist_fd, 0, SEEK_END);
-    uint32_t loc = size - frame_size; // start of frame
+    uint32_t loc = size - frame_size; // start of frame (pbc_cell block)
+
+    // pbc_cell
+    float cell_buf[9];
+    n = pread(dist_fd, cell_buf, sizeof(cell_buf), loc);
+    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    if (n != sizeof(cell_buf)) throw std::runtime_error("unexpected end of file");
+    current_cell = torch::from_blob(cell_buf, {3, 3}, torch::kFloat32).clone();
+
+    uint8_t pbc_buf[3];
+    n = pread(dist_fd, pbc_buf, sizeof(pbc_buf), loc + sizeof(cell_buf));
+    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+    if (n != sizeof(pbc_buf)) throw std::runtime_error("unexpected end of file");
+    current_pbc = torch::from_blob(pbc_buf, {3}, torch::kUInt8).clone();
+
+    loc += pbc_cell_block_size; // new loc is at the start of the id/position/velocity block
 
     std::unordered_map<std::string, uint64_t> field_offsets;
     uint64_t cursor = loc;
     for (const auto& name : field_names) {
+        if (name == "pbc_cell") continue; // already read above; not part of the per-atom block
         field_offsets[name] = cursor;
         if (name == "id") cursor += atoms.num_atoms * sizeof(int64_t);
         else if (name == "position") cursor += atoms.num_atoms * 3 * sizeof(float);
@@ -441,35 +506,88 @@ MolecularInfo TrajectoryWriter::load_xyz_file(const std::string& xyz_file_name) 
     int velocity_index = -1;
 
     std::getline(xyz_file, line);
-    std::stringstream options(line);
-    uint32_t current_index = 0;
-    while (options >> line) {
-        // Extra options if there is some
-        // Although we only care about Properties, and in that species, pos, and vel
-        if (line.find("Properties") != 0) continue;
 
-        int property_start = line.find('=');
-        if (property_start == std::string::npos) {
-            std::cerr << "Properties is set up wrong" << std::endl;
-            return atoms;
-        }
-        property_start += 1; // to go past the =
-        line = line.substr(property_start, line.size() - property_start);
-        std::string name, ty, count;
-        std::stringstream opt(line);
-        while (std::getline(opt, name, ':')) {
-            std::getline(opt, ty, ':');
-            std::getline(opt, count, ':');
-            std::cerr << name << " : " << ty << " : " << count << std::endl;
-
-            // only care about velocity
-            if (name == "vel" || name == "momenta") {
-                velocity_index = current_index;
+    // Tokenize on whitespace, but treat a "..." span (which may contain
+    // embedded spaces, e.g. Lattice="15.0 0.0 0.0 ...") as a single token.
+    std::vector<std::string> tokens;
+    {
+        bool in_quotes = false;
+        std::string current_token;
+        for (char c : line) {
+            if (c == '"') {
+                in_quotes = !in_quotes;
+                continue;
             }
+            if (std::isspace(static_cast<unsigned char>(c)) && !in_quotes) {
+                if (!current_token.empty()) {
+                    tokens.push_back(current_token);
+                    current_token.clear();
+                }
+            } else {
+                current_token += c;
+            }
+        }
+        if (!current_token.empty()) tokens.push_back(current_token);
+    }
 
-            current_index += std::stoi(count);
+    uint32_t current_index = 0;
+    std::vector<float> cell_values;
+    std::vector<uint8_t> pbc_values;
+
+    for (std::string token : tokens) {
+        // Extra options if there is some
+        // Although we only care about Properties, Lattice, and pbc
+        if (token.find("Properties") == 0) {
+            int property_start = token.find('=');
+            if (property_start == std::string::npos) {
+                std::cerr << "Properties is set up wrong" << std::endl;
+                return atoms;
+            }
+            property_start += 1; // to go past the =
+            token = token.substr(property_start, token.size() - property_start);
+            std::string name, ty, count;
+            std::stringstream opt(token);
+            while (std::getline(opt, name, ':')) {
+                std::getline(opt, ty, ':');
+                std::getline(opt, count, ':');
+                std::cerr << name << " : " << ty << " : " << count << std::endl;
+
+                // only care about velocity
+                if (name == "vel" || name == "momenta") {
+                    velocity_index = current_index;
+                }
+
+                current_index += std::stoi(count);
+            }
+        } else if (token.find("Lattice=") == 0) {
+            std::stringstream ls(token.substr(strlen("Lattice=")));
+            float v;
+            while (ls >> v) cell_values.push_back(v);
+            if (cell_values.size() != 9) {
+                std::cerr << "Lattice must have 9 values" << std::endl;
+                cell_values.clear();
+            }
+        } else if (token.find("pbc=") == 0) {
+            std::stringstream ps(token.substr(strlen("pbc=")));
+            std::string flag;
+            while (ps >> flag) {
+                pbc_values.push_back((flag == "T" || flag == "True" || flag == "1") ? 1 : 0);
+            }
+            if (pbc_values.size() != 3) {
+                std::cerr << "pbc must have 3 values" << std::endl;
+                pbc_values.clear();
+            }
         }
     }
+
+    // row-major [3, 3] cell, [3] pbc flags; default to no box/no periodicity
+    // when the comment line doesn't carry Lattice=/pbc= (e.g. plain xyz)
+    current_cell = (cell_values.size() == 9)
+        ? torch::from_blob(cell_values.data(), {3, 3}, torch::kFloat32).clone()
+        : torch::zeros({3, 3}, torch::kFloat32);
+    current_pbc = (pbc_values.size() == 3)
+        ? torch::from_blob(pbc_values.data(), {3}, torch::kUInt8).clone()
+        : torch::zeros({3}, torch::kUInt8);
 
     // read in all of the positions
     std::vector<uint8_t> types;
