@@ -25,7 +25,9 @@ class BinaryReader(FileReaderInterface):
         try:
             # Check file extension to ensure it doesn't grab random files
             is_correct_ext = os.path.splitext(filename)[1].lower() == ".distnnp"
-            return is_correct_ext and os.path.getsize(filename) >= 244
+            # 264 bytes minimum front matter (id/position/velocity/pbc_cell
+            # field descriptors) + a 40 byte pbc_cell block for one frame
+            return is_correct_ext and os.path.getsize(filename) >= 304
         except OSError:
             return False
 
@@ -36,16 +38,22 @@ class BinaryReader(FileReaderInterface):
             # file position is now at 100
             bytes_per_atom = np.fromfile(f, dtype=np.uint32, count=1, offset=8)[0]
             # file position is now at 112
-            front_matter_size = np.fromfile(f, dtype=np.uint64, count=1, offset=100)[0]
-            # file position is now at 220
-            
-            bytes_per_frame = num_atoms * bytes_per_atom
-            
+            # front_matter_size is at absolute offset 244 now that the field
+            # descriptor list has 4 entries (pbc_cell, id, position, velocity)
+            front_matter_size = np.fromfile(f, dtype=np.uint64, count=1, offset=132)[0]
+            # file position is now at 252
+
+            # every frame starts with a fixed 40 byte pbc_cell block (9
+            # float32 cell + 3 uint8 pbc + 1 padding byte) before the
+            # id/position/velocity per-atom data
+            pbc_cell_block_size = 40
+            bytes_per_frame = pbc_cell_block_size + (num_atoms * bytes_per_atom)
+
             # Loop through the file to register frames
             file_size = os.path.getsize(filename)
             current_offset = front_matter_size
             frame_index = 0
-            
+
             while current_offset + bytes_per_frame <= file_size:
                 label = f"Frame {frame_index}"
                 # Pass the exact byte offset and atom count to the parse method
@@ -65,7 +73,7 @@ class BinaryReader(FileReaderInterface):
 
         with open(filename, "rb") as f:
             # 1. Read Atom Types (Global list, located right after front matter)
-            f.seek(224) # atom types always start at 224
+            f.seek(256) # atom types always start at 256
             atom_types = np.fromfile(f, dtype=np.uint8, count=num_atoms)
             for atomic_num in np.unique(atom_types):
                 name = ELEMENT_SYMBOLS.get(int(atomic_num), str(atomic_num))
@@ -74,8 +82,13 @@ class BinaryReader(FileReaderInterface):
 
             # 2. Jump straight to this specific frame's chunk
             f.seek(frame_offset)
-            
-            # 3. Read the frame data sequentially
+
+            # 3. Read the pbc_cell block (9 float32 cell + 3 uint8 pbc + 1
+            # padding byte = 40 bytes), then the rest of the frame data
+            frame_cell = np.fromfile(f, dtype=np.float32, count=9).reshape(3, 3)
+            frame_pbc = np.fromfile(f, dtype=np.uint8, count=3)
+            f.seek(frame_offset + 40)
+
             frame_indices = np.fromfile(f, dtype=np.uint64, count=num_atoms)
             frame_positions = np.fromfile(f, dtype=np.float32, count=num_atoms * 3).reshape(num_atoms, 3)
             frame_velocities = np.fromfile(f, dtype=np.float32, count=num_atoms * 3).reshape(num_atoms, 3)
@@ -88,4 +101,12 @@ class BinaryReader(FileReaderInterface):
             indices_prop[...] = frame_indices[sort_map]
             positions_prop[...] = frame_positions[sort_map]
             velocities_prop[...] = frame_velocities[sort_map]
+
+            # 6. Surface the simulation cell / periodicity for this frame.
+            # frame_cell is row-major (each row is a lattice vector, the
+            # ASE/extxyz convention); OVITO's cell matrix stores lattice
+            # vectors as columns, hence the transpose.
+            cell_matrix = np.zeros((3, 4), dtype=np.float32)
+            cell_matrix[:, :3] = frame_cell.T
+            data.create_cell(cell_matrix, tuple(bool(x) for x in frame_pbc))
             
