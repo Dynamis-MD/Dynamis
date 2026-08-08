@@ -1,46 +1,81 @@
 import os
-import tempfile
+from typing import Optional
 
 import torch
 
-from distnnp_state import MolecularInfo, TrajectoryWriter
+import distnnp_state.distnnp_state_impl as distnnp_state_impl
+from distnnp_state.distnnp_state_impl import MolecularInfo
 
 
 def is_pathlike(file_path) -> bool:
     return isinstance(file_path, (str, os.PathLike))
 
 
-class MolecularInfoWriter:
+class TrajectoryReader:
+    """Stateless reader for .xyz and .distnnp trajectory files."""
+
     @staticmethod
-    def write_struct(info: MolecularInfo, file_path: str, opts: list[str] | None = None):
-        """Writes a MolecularInfo struct to a .distnnp file in a single call.
+    def read(path, frame_index: int = -1):
+        """Reads one frame from a .xyz or .distnnp file.
 
-        opts: which fields to write, from {"indices", "positions", "velocities"}.
-        None or an empty list writes everything; otherwise only the listed fields
-        are written.
+        Dispatches on extension. frame_index defaults to -1 (the last frame)
+        and indexes real frames uniformly for both formats; an out-of-range
+        index raises RuntimeError. Missing indices are assumed sequential and
+        missing velocities default to zero.
+
+        Returns (MolecularInfo, cell, pbc).
         """
-        directory, filename = os.path.split(file_path)
-        with TrajectoryWriter(0, bytes(16), "MolInfoWriter", directory or ".", filename) as writer:
-            writer.initialize(info, 1.0, 1, opts or [])
-            # Single standalone writer, so all atoms belong to rank 0.
-            writer.update_atom_counts(torch.tensor([info.num_atoms], dtype=torch.uint32))
-            writer.submit(0, info)
-            writer.flush()
+        return distnnp_state_impl.read_molecular_info(os.fspath(path), frame_index)
 
 
-class MolecularInfoReader:
-    @staticmethod
-    def read_struct(file_path: str) -> MolecularInfo:
-        """Reads a MolecularInfo struct from a .xyz or .distnnp file in a single call.
+class TrajectoryWriter:
+    """Thin wrapper around TrajectoryWriterImpl: opens/truncates the output
+    file and writes front matter on construction, then accepts submit() calls."""
 
-        Missing indices are assumed sequential and missing velocities default to
-        zero; see TrajectoryWriter for the full self-describing read behavior.
-        """
-        assert is_pathlike(file_path) and os.path.exists(file_path), f"{file_path} could not be found"
-        with tempfile.TemporaryDirectory() as scratch_dir:
-            # TrajectoryWriter always opens/truncates an output file on
-            # construction, so reading goes through a throwaway scratch file
-            # rather than the path being read.
-            with TrajectoryWriter(0, bytes(16), "MolInfoReader", scratch_dir, "_scratch.distnnp") as writer:
-                # make paths a string
-                return writer.initialize(os.fspath(file_path), 1.0, 1)
+    def __init__(
+        self,
+        global_rank: int,
+        run_id: bytes,
+        author: str,
+        output_dir,
+        output_file,
+        molecular_info: MolecularInfo,
+        cell: torch.Tensor,
+        pbc: torch.Tensor,
+        time_per_step: float,
+        steps_per_write: int,
+        opts: Optional[list] = None,
+    ):
+        self._impl = distnnp_state_impl.TrajectoryWriterImpl(
+            global_rank, run_id, author,
+            os.fspath(output_dir), os.fspath(output_file),
+            molecular_info, cell, pbc,
+            time_per_step, steps_per_write,
+            opts or [],
+        )
+
+    def submit(self, step, state, cell=None, pbc=None):
+        self._impl.submit(step, state, cell, pbc)
+
+    def flush(self):
+        self._impl.flush()
+
+    def update_atom_counts(self, counts):
+        self._impl.update_atom_counts(counts)
+
+    def get_cell(self):
+        return self._impl.get_cell()
+
+    def get_pbc(self):
+        return self._impl.get_pbc()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.flush()
+
+
+def translate_distnnp_to_xyz(distnnp_path, xyz_path, opts: Optional[list] = None) -> None:
+    """Translates every frame of a .distnnp file into a multi-frame extended-xyz file."""
+    distnnp_state_impl.translate_distnnp_to_xyz(os.fspath(distnnp_path), os.fspath(xyz_path), opts or [])

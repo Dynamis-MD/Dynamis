@@ -6,6 +6,7 @@ from distnnp_state import (
     DistEnvironment,
     MolecularInfo,
     SimulationConfig,
+    TrajectoryReader,
     TrajectoryWriter,
     TorchDistEnv,
     Timer,
@@ -142,14 +143,6 @@ class Simulator:
         self.device = device
 
         run_uuid = uuid.uuid4()
-        # TODO figure out what author should be
-        self.writer: TrajectoryWriter = TrajectoryWriter(
-            dist_environment.global_rank,
-            run_uuid.bytes,
-            "author",
-            config.output_dir,
-            config.traj_file,
-        )
 
         # Drift watchdog: flags live in the process-wide registry so the model's
         # exchangers carry them without the model knowing (see drift_flags.py).
@@ -245,7 +238,28 @@ class Simulator:
         # (1) initialize from system
         if is_pathlike(system_input):
             assert os.path.exists(system_input), f"{system_input} could not be found"
-        global_mol_info = self.writer.initialize(system_input, self.config.timestep_fs, self.config.traj_interval)
+            molecular_info, cell, pbc = TrajectoryReader.read(system_input)
+        else:
+            # in-memory MolecularInfo: no file, so no cell/pbc to read —
+            # default to no box/no periodicity.
+            molecular_info = system_input
+            cell, pbc = torch.zeros(3, 3), torch.zeros(3, dtype=torch.uint8)
+
+        # TODO figure out what author should be
+        self.writer: TrajectoryWriter = TrajectoryWriter(
+            dist_env.global_rank,
+            uuid.uuid4().bytes,
+            "author",
+            self.config.output_dir,
+            self.config.traj_file,
+            molecular_info,
+            cell,
+            pbc,
+            self.config.timestep_fs,
+            self.config.traj_interval,
+        )
+
+        global_mol_info = molecular_info
 
         # put tensors on device
         global_mol_info.atom_vertex_numbers = global_mol_info.atom_vertex_numbers.to(device=self.device)

@@ -1,37 +1,31 @@
 #pragma once
 #include "distnnp_state.hpp"
+#include "trajectory_format.hpp"
 #include <c10/util/Optional.h>
 #include <cstdint>
+#include <string>
 #include <vector>
-#include <unordered_map>
 
 namespace distnnp_state {
 
-// Canonical per-atom field order used for both the on-disk field_descriptors
-// block and the frame layout. Order matters: readers/writers must agree on it.
-struct FieldSpec {
-    const char* opt_name;        // name accepted in the Python-facing opts list
-    const char* descriptor_name; // name written into the file's field_descriptors block
-    uint32_t bytes_per_atom;     // per-atom byte size of this field
-};
-
-static const std::vector<FieldSpec> kFieldOrder = {
-    { "indices",   "id",       sizeof(int64_t) },
-    { "positions", "position", 3 * sizeof(float) },
-    { "velocities","velocity", 3 * sizeof(float) },
-};
-
-class TrajectoryWriter {
+class TrajectoryWriterImpl {
 public:
-    explicit TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, const std::string& output_dir = "./trajectory", const std::string& output_file = "trajectory.distnnp");
-    ~TrajectoryWriter();
+    TrajectoryWriterImpl(
+            uint32_t global_rank,
+            py::bytes run_id,
+            const std::string& author,
+            const std::string& output_dir,
+            const std::string& output_file,
+            const MolecularInfo& molecular_info,
+            torch::Tensor cell,
+            torch::Tensor pbc,
+            float time_per_step,
+            uint32_t steps_per_write,
+            std::vector<std::string> opts = {}
+    );
+    ~TrajectoryWriterImpl();
 
-    MolecularInfo initialize(const std::string& input_file_name, const float time_per_step, const uint32_t steps_per_write, std::vector<std::string> opts = {});
-    MolecularInfo initialize(const MolecularInfo& input_system, const float time_per_step, const uint32_t steps_per_write, std::vector<std::string> opts = {});
-
-    // cell/pbc are optional and carried forward from the last value seen
-    // (either from initialize() or a previous submit()) if not provided,
-    // so a static-box simulation only needs to pass them once.
+    // cell/pbc are carried forward from last seen value if not provided
     void submit(uint32_t step, MolecularInfo state, c10::optional<torch::Tensor> cell = c10::nullopt, c10::optional<torch::Tensor> pbc = c10::nullopt);
     void flush();
 
@@ -51,14 +45,9 @@ public:
         }
     }
 
-    void write_to_xyz(const MolecularInfo& state, const std::string& file_name = "output.xyz", std::vector<std::string> opts = {});
-
 private:
-    std::string output_file;
-    MolecularInfo load_xyz_file(const std::string& xyz_file_name);
-    MolecularInfo load_distnnp_file(const std::string& xyz_file_name);
-    void write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state, uint32_t rank);
-    void parse_opts(std::vector<std::string> opts);
+    void write_front_matter(float time_per_step, uint32_t steps_per_write, const MolecularInfo& state, uint32_t rank);
+    void parse_opts(const std::vector<std::string>& opts);
 
     // only set to true if the file has been closed
     bool flushed{ false };
@@ -68,12 +57,13 @@ private:
 
     uint64_t total_atoms{ 0 };
     uint32_t bytes_per_atom{ 0 };
-    uint32_t front_matter_size{ 0 }; // 0 until initialize()/write_front_matter() runs
+    uint32_t front_matter_size{ 0 };
 
     int fd; // fd of the output file
     uint32_t rank; // rank of the current process
     std::vector<uint32_t> rank_atom_counts; // atom offsets
     std::string output_dir;
+    std::string output_file;
 
     bool has_indices{ false };
     bool has_positions{ false };
@@ -85,91 +75,4 @@ private:
     torch::Tensor current_pbc;  // [3] uint8 (0 or 1)
 };
 
-
-// TODO figure out a better way to do this
-// only doing up to Lead as idk if we need any of the unstable elements
-static const std::unordered_map<std::string, uint8_t> periodic_table = {
-    {"H", 1},
-    {"He", 2},
-    {"Li", 3},
-    {"Be", 4},
-    {"B", 5},
-    {"C", 6},
-    {"N", 7},
-    {"O", 8},
-    {"F", 9},
-    {"Ne", 10},
-    {"Na", 11},
-    {"Mg", 12},
-    {"Al", 13},
-    {"Si", 14},
-    {"P", 15},
-    {"S", 16},
-    {"Cl", 17},
-    {"Ar", 18},
-    {"K", 19},
-    {"Ca", 20},
-    {"Sc", 21},
-    {"Ti", 22},
-    {"V", 23},
-    {"Cr", 24},
-    {"Mn", 25},
-    {"Fe", 26},
-    {"Co", 27},
-    {"Ni", 28},
-    {"Cu", 29},
-    {"Zn", 30},
-    {"Ga", 31},
-    {"Ge", 32},
-    {"As", 33},
-    {"Se", 34},
-    {"Br", 35},
-    {"Kr", 36},
-    {"Rb", 37},
-    {"Sr", 38},
-    {"Y", 39},
-    {"Zr", 40},
-    {"Nb", 41},
-    {"Mo", 42},
-    {"Tc", 43},
-    {"Ru", 44},
-    {"Rh", 45},
-    {"Pd", 46},
-    {"Ag", 47},
-    {"Cd", 48},
-    {"In", 49},
-    {"Sn", 50},
-    {"Sb", 51},
-    {"Te", 52},
-    {"I", 53},
-    {"Xe", 54},
-    {"Cs", 55},
-    {"Ba", 56},
-    {"La", 57},
-    {"Ce", 58},
-    {"Pr", 59},
-    {"Nd", 60},
-    {"Pm", 61},
-    {"Sm", 62},
-    {"Eu", 63},
-    {"Gd", 64},
-    {"Tb", 65},
-    {"Dy", 66},
-    {"Ho", 67},
-    {"Er", 68},
-    {"Tm", 69},
-    {"Yb", 70},
-    {"Lu", 71},
-    {"Hf", 72},
-    {"Ta", 73},
-    {"W", 74},
-    {"Re", 75},
-    {"Os", 76},
-    {"Ir", 77},
-    {"Pt", 78},
-    {"Au", 79},
-    {"Hg", 80},
-    {"Ti", 81},
-    {"Pb", 82}
-};
-}
+} // namespace distnnp_state

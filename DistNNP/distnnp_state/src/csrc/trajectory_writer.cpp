@@ -1,10 +1,7 @@
 #include "distnnp_state/trajectory_writer.hpp"
 #include "distnnp_state/timing.hpp"
-#include <cctype>
+#include <cerrno>
 #include <cstring>
-#include <fstream>
-#include <iostream>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <fcntl.h>
@@ -14,7 +11,19 @@
 
 namespace distnnp_state {
 
-TrajectoryWriter::TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const std::string& author, const std::string& output_dir, const std::string& output_file)
+TrajectoryWriterImpl::TrajectoryWriterImpl(
+        uint32_t global_rank,
+        py::bytes run_id,
+        const std::string& author,
+        const std::string& output_dir,
+        const std::string& output_file,
+        const MolecularInfo& molecular_info,
+        torch::Tensor cell,
+        torch::Tensor pbc,
+        float time_per_step,
+        uint32_t steps_per_write,
+        std::vector<std::string> opts
+)
     : rank(global_rank)
     , output_dir(output_dir)
     , output_file(output_file)
@@ -25,33 +34,35 @@ TrajectoryWriter::TrajectoryWriter(uint32_t global_rank, py::bytes run_id, const
     struct stat st;
     if (stat(output_dir.c_str(), &st) != 0) {
         if (mkdir(output_dir.c_str(), 0755) != 0) {
-            std::cerr << "Failed to create output directory: " << output_dir << std::endl;
-            exit(1);
+            throw std::runtime_error("failed to create output directory '" + output_dir + "': " + strerror(errno));
         }
     } else if (!S_ISDIR(st.st_mode)) {
-        std::cerr << "Output path exists and is not a directory: " << output_dir << std::endl;
-        exit(1);
+        throw std::runtime_error("output path exists and is not a directory: '" + output_dir + "'");
     }
 
     const std::string file_path = output_dir + "/" + output_file;
-    if (global_rank == 0)
-        fd = open(file_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-    else
-        fd = open(file_path.c_str(), O_RDWR | O_CREAT, 0644);
-
+    fd = (global_rank == 0)
+        ? open(file_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644)
+        : open(file_path.c_str(), O_RDWR | O_CREAT, 0644);
     if (fd < 0) {
-        std::cerr << "Failed to open " << file_path << std::endl;
-        exit(1);
+        throw std::runtime_error("failed to open '" + file_path + "': " + strerror(errno));
     }
+
+    parse_opts(opts);
+    write_front_matter(time_per_step, steps_per_write, molecular_info, rank);
+
+    current_cell = cell.to(torch::kCPU).contiguous().toType(torch::kFloat32);
+    current_pbc = pbc.to(torch::kCPU).contiguous().toType(torch::kUInt8);
 }
-TrajectoryWriter::~TrajectoryWriter() {
+
+TrajectoryWriterImpl::~TrajectoryWriterImpl() {
     // only flush and close if not already done
     if (!flushed) {
         auto res = close(fd);
-        if (res != 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+        if (res != 0) throw std::runtime_error("close failed: " + std::string(strerror(errno)));
     }
 }
-void TrajectoryWriter::flush() {
+void TrajectoryWriterImpl::flush() {
     if (!flushed) {
         // Where::Host: closing an fd is host work, and on a networked filesystem
         // (Delta's /u is NFS) it is not necessarily cheap.
@@ -59,47 +70,12 @@ void TrajectoryWriter::flush() {
         t.start("traj_flush", TimerClass::Other, Where::Host);
         auto res = close(fd);
         t.stop();
-        if (res != 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+        if (res != 0) throw std::runtime_error("close failed: " + std::string(strerror(errno)));
         flushed = true;
     }
 }
 
-MolecularInfo TrajectoryWriter::initialize(const std::string& input_file_name, const float time_per_step, const uint32_t steps_per_write, std::vector<std::string> opts) {
-    parse_opts(opts);
-
-    MolecularInfo state;
-    auto len = input_file_name.size();
-    if (len >= 4 && input_file_name.compare(len - 4, 4, ".xyz") == 0) {
-        state = load_xyz_file(input_file_name);
-    } else if (len >= 8 && input_file_name.compare(len - 8, 8, ".distnnp") == 0) {
-        state = load_distnnp_file(input_file_name);
-    } else {
-        std::cerr << input_file_name << " file type is not supported" << std::endl;
-        return state;
-    }
-
-    if (state.num_atoms == 0 || !state.atom_types.defined()) {
-        throw std::runtime_error("TrajectoryWriter::initialize: failed to load '" + input_file_name + "'");
-    }
-
-    write_front_matter(time_per_step, steps_per_write, state, rank);
-
-    return state;
-}
-MolecularInfo TrajectoryWriter::initialize(const MolecularInfo& input_system, const float time_per_step, const uint32_t steps_per_write, std::vector<std::string> opts) {
-    parse_opts(opts);
-    write_front_matter(time_per_step, steps_per_write, input_system, rank);
-    // a bare MolecularInfo carries no cell/pbc; default to no box/no
-    // periodicity, consistent with load_xyz_file's fallback for xyz input
-    // that lacks Lattice=/pbc=
-    if (!current_cell.defined())
-        current_cell = torch::zeros({3, 3}, torch::kFloat32);
-    if (!current_pbc.defined())
-        current_pbc = torch::zeros({3}, torch::kUInt8);
-    return input_system;
-}
-
-void TrajectoryWriter::parse_opts(std::vector<std::string> opts) {
+void TrajectoryWriterImpl::parse_opts(const std::vector<std::string>& opts) {
     if (opts.empty()) {
         has_indices = true;
         has_positions = true;
@@ -120,7 +96,7 @@ void TrajectoryWriter::parse_opts(std::vector<std::string> opts) {
     }
 }
 
-void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_per_write, MolecularInfo state, uint32_t rank) {
+void TrajectoryWriterImpl::write_front_matter(float time_per_step, uint32_t steps_per_write, const MolecularInfo& state, uint32_t rank) {
     // figure out sizes of header and each rank size
     // resize file to the correct size
 
@@ -139,27 +115,19 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
     // descriptor even though it isn't a per-atom field (see submit())
     const uint32_t field_count = static_cast<uint32_t>(active_fields.size()) + 1;
 
-    uint64_t front_matter_size = sizeof(uint8_t) * 8  // magic
-                               + sizeof(uint32_t)  // version
-                               + sizeof(uint8_t) * 16 // run_id
-                               + sizeof(uint8_t) * 64 // author
-                               + sizeof(uint64_t)  // total_atoms
-                               + sizeof(float)  // time_per_step
-                               + sizeof(uint32_t)  // steps_per_write
-                               + sizeof(uint32_t)  // bytes_per_atom
-                               + sizeof(uint32_t)  // field_count
-                               + field_count * sizeof(uint8_t) * 32 // field_count x 32 byte fields
-                               + sizeof(uint64_t); // front_matter_size
+    uint64_t front_matter_size = layout::kFieldDescriptorsOffset
+                               + field_count * layout::kFieldDescriptorSize
+                               + sizeof(uint64_t); // front_matter_size itself
 
     // should pad the front_matter_size so this block is on a 8 byte boundary
-    uint32_t front_matter_padding = 8 - (front_matter_size % 8);
+    uint32_t front_matter_padding = padding_to_8(front_matter_size);
     front_matter_size += front_matter_padding;
 
     // then the atom types start at a 8 byte boundary and then
     // I will insert padding at the end to make sure they stay on the 8 byte boundary
 
     front_matter_size += state.num_atoms; // 8 bit unsigned ints for each atom
-    uint32_t atom_type_padding = 8 - (state.num_atoms % 8);
+    uint32_t atom_type_padding = padding_to_8(state.num_atoms);
     front_matter_size += atom_type_padding;
 
     // all ranks need to know front matter size, bytes per atom, and total atoms
@@ -183,9 +151,8 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
     uint32_t offset = 0;
 
     // magic
-    const char* magic = "DISTNNP\x00";
-    memcpy(buf.data() + offset, magic, 8);
-    offset += 8;
+    memcpy(buf.data() + offset, kMagicBytes, sizeof(kMagicBytes));
+    offset += sizeof(kMagicBytes);
 
     // version
     const uint32_t version = 1;
@@ -195,13 +162,13 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
     // run_id
     std::string r = run_id;
     memcpy(buf.data() + offset, r.data(), r.size());
-    memset(buf.data() + offset + r.size(), 0, 16 - r.size());
-    offset += 16;
+    memset(buf.data() + offset + r.size(), 0, layout::kRunIdSize - r.size());
+    offset += layout::kRunIdSize;
 
     // author
     memcpy(buf.data() + offset, author.data(), author.size());
-    memset(buf.data() + offset + author.size(), 0, 64 - author.size());
-    offset += 64;
+    memset(buf.data() + offset + author.size(), 0, layout::kAuthorSize - author.size());
+    offset += layout::kAuthorSize;
 
     // total_atoms
     memcpy(buf.data() + offset, &state.num_atoms, sizeof(state.num_atoms));
@@ -211,7 +178,7 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
     memcpy(buf.data() + offset, &time_per_step, sizeof(time_per_step));
     offset += sizeof(time_per_step);
 
-    // steps_per_write 
+    // steps_per_write
     memcpy(buf.data() + offset, &steps_per_write, sizeof(steps_per_write));
     offset += sizeof(steps_per_write);
 
@@ -230,14 +197,14 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
         const char* pbc_cell_str = "pbc_cell";
         uint32_t pbc_cell_size = strlen(pbc_cell_str);
         memcpy(buf.data() + offset, pbc_cell_str, pbc_cell_size);
-        memset(buf.data() + offset + pbc_cell_size, 0, 32 - pbc_cell_size);
-        offset += 32;
+        memset(buf.data() + offset + pbc_cell_size, 0, layout::kFieldDescriptorSize - pbc_cell_size);
+        offset += layout::kFieldDescriptorSize;
     }
     for (const auto* f : active_fields) {
         std::string name(f->descriptor_name);
         memcpy(buf.data() + offset, name.data(), name.size());
-        memset(buf.data() + offset + name.size(), 0, 32 - name.size());
-        offset += 32;
+        memset(buf.data() + offset + name.size(), 0, layout::kFieldDescriptorSize - name.size());
+        offset += layout::kFieldDescriptorSize;
     }
 
     // front_matter_size
@@ -262,15 +229,10 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
 
     // write to the file
     ssize_t written = pwrite(fd, buf.data(), front_matter_size, 0);
-    if (written < 0) {
-        throw std::runtime_error("write failed: " + std::string(strerror(errno)));
-    }
-    if (static_cast<size_t>(written) != buf.size()) {
-        throw std::runtime_error("partial write");
-    }
+    CHECK_WRITE(written, buf.size());
 }
 
-void TrajectoryWriter::submit(uint32_t step, MolecularInfo state, c10::optional<torch::Tensor> cell, c10::optional<torch::Tensor> pbc) {
+void TrajectoryWriterImpl::submit(uint32_t step, MolecularInfo state, c10::optional<torch::Tensor> cell, c10::optional<torch::Tensor> pbc) {
 
     // Where::Host, not Device: this launches no asynchronous CUDA work. The
     // .to(kCPU) copies below synchronize internally, so a host clock measures the
@@ -286,38 +248,32 @@ void TrajectoryWriter::submit(uint32_t step, MolecularInfo state, c10::optional<
     // atom_velocities | 3 x float32 x frame_size
 
     // cell/pbc are optional; if not provided, keep writing whatever was last
-    // known (seeded by initialize(), or a previous submit() call)
+    // known (seeded by the constructor, or a previous submit() call)
     if (cell.has_value())
         current_cell = cell->to(torch::kCPU).contiguous().toType(torch::kFloat32);
     if (pbc.has_value())
         current_pbc = pbc->to(torch::kCPU).contiguous().toType(torch::kUInt8);
 
-    // pbc_cell block: 9 x float32 (cell, 36 bytes) + 3 x uint8 (pbc, 3 bytes) +
-    // 1 byte padding to stay on an 8-byte boundary = 40 bytes, fixed for this version
-    const uint32_t pbc_cell_block_size = 40;
-
-    // TODO make sure the step will calculate the correct offset
     if (front_matter_size == 0)
-        throw std::runtime_error("submit() called before initialize()");
+        throw std::runtime_error("submit() called before front matter was written");
 
-    uint32_t offset = front_matter_size + (step * (pbc_cell_block_size + total_atoms * bytes_per_atom));
+    uint32_t offset = front_matter_size + (step * (kPbcCellBlockSize + total_atoms * bytes_per_atom));
 
     if (rank == 0) {
-        std::vector<uint8_t> pbc_cell_buf(pbc_cell_block_size, 0);
+        std::vector<uint8_t> pbc_cell_buf(kPbcCellBlockSize, 0);
         torch::Tensor cell_cpu = current_cell.contiguous();
         memcpy(pbc_cell_buf.data(), cell_cpu.data_ptr(), 9 * sizeof(float));
         torch::Tensor pbc_cpu = current_pbc.contiguous();
         memcpy(pbc_cell_buf.data() + 9 * sizeof(float), pbc_cpu.data_ptr(), 3 * sizeof(uint8_t));
 
-        ssize_t written = pwrite(fd, pbc_cell_buf.data(), pbc_cell_block_size, offset);
-        if (written < 0) throw std::runtime_error("pwrite failed: " + std::string(strerror(errno)));
-        if (static_cast<size_t>(written) != pbc_cell_block_size) throw std::runtime_error("partial write");
+        ssize_t written = pwrite(fd, pbc_cell_buf.data(), kPbcCellBlockSize, offset);
+        CHECK_WRITE(written, kPbcCellBlockSize);
     }
 
-    uint32_t atom_block_offset = offset + pbc_cell_block_size;
+    uint32_t atom_block_offset = offset + kPbcCellBlockSize;
 
     uint64_t atom_count = 0;
-    for (int i = 0; i < rank; i++) {
+    for (uint32_t i = 0; i < rank; i++) {
         atom_count += rank_atom_counts.at(i);
     }
 
@@ -325,9 +281,7 @@ void TrajectoryWriter::submit(uint32_t step, MolecularInfo state, c10::optional<
         torch::Tensor cpu_tensor = t.to(torch::kCPU).contiguous();
         size_t tensor_bytes = cpu_tensor.numel() * cpu_tensor.element_size();
         ssize_t written = pwrite(fd, cpu_tensor.data_ptr(), tensor_bytes, off);
-
-        if (written < 0) throw std::runtime_error("pwrite failed: " + std::string(strerror(errno)));
-        if (static_cast<size_t>(written) != tensor_bytes) throw std::runtime_error("partial write");
+        CHECK_WRITE(written, tensor_bytes);
     };
 
     // doing sizeof here to be more explicit about the calculations; atom data
@@ -350,367 +304,6 @@ void TrajectoryWriter::submit(uint32_t step, MolecularInfo state, c10::optional<
     }
 
     t.stop();
-}
-
-MolecularInfo TrajectoryWriter::load_distnnp_file(const std::string& distnnp_file_name) {
-    // reads the last frame in from the file and returns it as the current state
-    MolecularInfo atoms;
-
-    int dist_fd = open(distnnp_file_name.c_str(), O_RDWR, 0644);
-
-    if (dist_fd < 0) {
-        std::cerr << "Failed to open " << distnnp_file_name << std::endl;
-        exit(1);
-    }
-
-    char magic[8];
-    auto n = pread(dist_fd, magic, 8, 0);
-    if (strcmp(magic, "DISTNNP\0") != 0) {
-        // TODO handle endian mismatch
-        std::cerr << distnnp_file_name << " is not a valid distnnp file" << std::endl;
-        return atoms;
-    }
-    uint32_t version;
-    n = pread(dist_fd, &version, sizeof(version), 8);
-    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-    if (n != sizeof(version)) throw std::runtime_error("unexpected end of file");
-
-    if (version != 1) {
-        std::cerr << version << " not supported. Version 1 is only supported" << std::endl;
-        return atoms;
-    }
-
-    uint32_t bytes_per_atom;
-    uint32_t field_count;
-    uint64_t front_matter_size;
-
-    n = pread(dist_fd, &atoms.num_atoms, sizeof(atoms.num_atoms), 92);
-    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-    if (n != sizeof(atoms.num_atoms)) throw std::runtime_error("unexpected end of file");
-
-    n = pread(dist_fd, &bytes_per_atom, sizeof(bytes_per_atom), 108);
-    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-    if (n != sizeof(bytes_per_atom)) throw std::runtime_error("unexpected end of file");
-
-    n = pread(dist_fd, &field_count, sizeof(field_count), 112);
-    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-    if (n != sizeof(field_count)) throw std::runtime_error("unexpected end of file");
-
-    // Field count can never be more than 4 (pbc_cell + id + position + velocity)
-    if (field_count > 4) {
-        throw std::runtime_error("implausible field_count (" + std::to_string(field_count) + ") in " + distnnp_file_name);
-    }
-
-    // field_descriptors block starts at 116, field_count x 32-byte names
-    std::vector<std::string> field_names(field_count);
-    for (uint32_t i = 0; i < field_count; i++) {
-        char name_buf[32] = {0};
-        n = pread(dist_fd, name_buf, sizeof(name_buf), 116 + i * 32);
-        if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-        if (n != sizeof(name_buf)) throw std::runtime_error("unexpected end of file");
-        field_names[i] = std::string(name_buf, strnlen(name_buf, sizeof(name_buf)));
-    }
-
-    // front_matter_size immediately follows the field_descriptors block
-    n = pread(dist_fd, &front_matter_size, sizeof(front_matter_size), 116 + static_cast<uint64_t>(field_count) * 32);
-    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-    if (n != sizeof(front_matter_size)) throw std::runtime_error("unexpected end of file");
-
-    // atom types sit right before the front_matter_size boundary, padded to an
-    // 8-byte multiple
-    uint32_t atom_type_padding = 8 - (atoms.num_atoms % 8);
-    uint64_t atom_types_offset = front_matter_size - atoms.num_atoms - atom_type_padding;
-
-    std::vector<uint8_t> types(atoms.num_atoms);
-    n = pread(dist_fd, types.data(), types.size(), atom_types_offset);
-    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-    if (n != types.size()) throw std::runtime_error("unexpected end of file");
-    atoms.atom_types = torch::from_blob(types.data(), {atoms.num_atoms}, torch::kUInt8).clone().to(torch::kInt64);
-
-    // pbc_cell block: 9 x float32 (cell, 36 bytes) + 3 x uint8 (pbc, 3 bytes) +
-    // 1 byte padding to stay on an 8-byte boundary = 40 bytes, fixed for this version
-    const uint32_t pbc_cell_block_size = 40;
-
-    uint64_t frame_size = pbc_cell_block_size + (bytes_per_atom * atoms.num_atoms);
-
-    uint32_t size = lseek(dist_fd, 0, SEEK_END);
-    uint32_t loc = size - frame_size; // start of frame (pbc_cell block)
-
-    // pbc_cell
-    float cell_buf[9];
-    n = pread(dist_fd, cell_buf, sizeof(cell_buf), loc);
-    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-    if (n != sizeof(cell_buf)) throw std::runtime_error("unexpected end of file");
-    current_cell = torch::from_blob(cell_buf, {3, 3}, torch::kFloat32).clone();
-
-    uint8_t pbc_buf[3];
-    n = pread(dist_fd, pbc_buf, sizeof(pbc_buf), loc + sizeof(cell_buf));
-    if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-    if (n != sizeof(pbc_buf)) throw std::runtime_error("unexpected end of file");
-    current_pbc = torch::from_blob(pbc_buf, {3}, torch::kUInt8).clone();
-
-    loc += pbc_cell_block_size; // new loc is at the start of the id/position/velocity block
-
-    std::unordered_map<std::string, uint64_t> field_offsets;
-    uint64_t cursor = loc;
-    for (const auto& name : field_names) {
-        if (name == "pbc_cell") continue; // already read above; not part of the per-atom block
-        field_offsets[name] = cursor;
-        if (name == "id") cursor += atoms.num_atoms * sizeof(int64_t);
-        else if (name == "position") cursor += atoms.num_atoms * 3 * sizeof(float);
-        else if (name == "velocity") cursor += atoms.num_atoms * 3 * sizeof(float);
-        else throw std::runtime_error("unknown field descriptor '" + name + "' in " + distnnp_file_name);
-    }
-
-    // ids: default to sequential order if not present
-    if (field_offsets.count("id")) {
-        uint32_t block_size = atoms.num_atoms * sizeof(int64_t);
-        std::vector<int64_t> ids(atoms.num_atoms);
-        n = pread(dist_fd, ids.data(), block_size, field_offsets.at("id"));
-        if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-        if (n != block_size) throw std::runtime_error("unexpected end of file");
-        atoms.atom_vertex_numbers = torch::from_blob(ids.data(), {atoms.num_atoms}, torch::kInt64).clone();
-    } else {
-        atoms.atom_vertex_numbers = torch::arange(0, atoms.num_atoms, 1).to(torch::kInt64);
-    }
-
-    // positions: mandatory
-    if (!field_offsets.count("position")) {
-        throw std::runtime_error("'position' field missing from " + distnnp_file_name + ", cannot load");
-    }
-    {
-        uint32_t block_size = atoms.num_atoms * 3 * sizeof(float);
-        std::vector<float> attribs(atoms.num_atoms * 3);
-        n = pread(dist_fd, attribs.data(), block_size, field_offsets.at("position"));
-        if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-        if (n != block_size) throw std::runtime_error("unexpected end of file");
-        atoms.atom_positions = torch::from_blob(attribs.data(), {atoms.num_atoms, 3}).clone();
-    }
-
-    // velocities: default to zero if not present
-    if (field_offsets.count("velocity")) {
-        uint32_t block_size = atoms.num_atoms * 3 * sizeof(float);
-        std::vector<float> attribs(atoms.num_atoms * 3);
-        n = pread(dist_fd, attribs.data(), block_size, field_offsets.at("velocity"));
-        if (n < 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
-        if (n != block_size) throw std::runtime_error("unexpected end of file");
-        atoms.atom_velocities = torch::from_blob(attribs.data(), {atoms.num_atoms, 3}).clone();
-    } else {
-        atoms.atom_velocities = torch::zeros({static_cast<int64_t>(atoms.num_atoms), 3});
-    }
-
-    return atoms;
-}
-
-MolecularInfo TrajectoryWriter::load_xyz_file(const std::string& xyz_file_name) {
-    MolecularInfo atoms;
-
-    // open the file
-    std::ifstream xyz_file(xyz_file_name);
-    if (!xyz_file.is_open()) {
-        std::cerr << xyz_file_name << " could not be opened" << std::endl;
-        return atoms;
-    }
-    std::string line;
-
-    // read in the atom numbers
-    std::getline(xyz_file, line);
-    int num_atoms = std::stoi(line);
-
-    int velocity_index = -1;
-
-    std::getline(xyz_file, line);
-
-    // Tokenize on whitespace, but treat a "..." span (which may contain
-    // embedded spaces, e.g. Lattice="15.0 0.0 0.0 ...") as a single token.
-    std::vector<std::string> tokens;
-    {
-        bool in_quotes = false;
-        std::string current_token;
-        for (char c : line) {
-            if (c == '"') {
-                in_quotes = !in_quotes;
-                continue;
-            }
-            if (std::isspace(static_cast<unsigned char>(c)) && !in_quotes) {
-                if (!current_token.empty()) {
-                    tokens.push_back(current_token);
-                    current_token.clear();
-                }
-            } else {
-                current_token += c;
-            }
-        }
-        if (!current_token.empty()) tokens.push_back(current_token);
-    }
-
-    uint32_t current_index = 0;
-    std::vector<float> cell_values;
-    std::vector<uint8_t> pbc_values;
-
-    for (std::string token : tokens) {
-        // Extra options if there is some
-        // Although we only care about Properties, Lattice, and pbc
-        if (token.find("Properties") == 0) {
-            int property_start = token.find('=');
-            if (property_start == std::string::npos) {
-                std::cerr << "Properties is set up wrong" << std::endl;
-                return atoms;
-            }
-            property_start += 1; // to go past the =
-            token = token.substr(property_start, token.size() - property_start);
-            std::string name, ty, count;
-            std::stringstream opt(token);
-            while (std::getline(opt, name, ':')) {
-                std::getline(opt, ty, ':');
-                std::getline(opt, count, ':');
-                std::cerr << name << " : " << ty << " : " << count << std::endl;
-
-                // only care about velocity
-                if (name == "vel" || name == "momenta") {
-                    velocity_index = current_index;
-                }
-
-                current_index += std::stoi(count);
-            }
-        } else if (token.find("Lattice=") == 0) {
-            std::stringstream ls(token.substr(strlen("Lattice=")));
-            float v;
-            while (ls >> v) cell_values.push_back(v);
-            if (cell_values.size() != 9) {
-                std::cerr << "Lattice must have 9 values" << std::endl;
-                cell_values.clear();
-            }
-        } else if (token.find("pbc=") == 0) {
-            std::stringstream ps(token.substr(strlen("pbc=")));
-            std::string flag;
-            while (ps >> flag) {
-                pbc_values.push_back((flag == "T" || flag == "True" || flag == "1") ? 1 : 0);
-            }
-            if (pbc_values.size() != 3) {
-                std::cerr << "pbc must have 3 values" << std::endl;
-                pbc_values.clear();
-            }
-        }
-    }
-
-    // row-major [3, 3] cell, [3] pbc flags; default to no box/no periodicity
-    // when the comment line doesn't carry Lattice=/pbc= (e.g. plain xyz)
-    current_cell = (cell_values.size() == 9)
-        ? torch::from_blob(cell_values.data(), {3, 3}, torch::kFloat32).clone()
-        : torch::zeros({3, 3}, torch::kFloat32);
-    current_pbc = (pbc_values.size() == 3)
-        ? torch::from_blob(pbc_values.data(), {3}, torch::kUInt8).clone()
-        : torch::zeros({3}, torch::kUInt8);
-
-    // read in all of the positions
-    std::vector<uint8_t> types;
-    std::vector<float> positions;
-    std::vector<float> velocities;
-    for (int i = 0; i < num_atoms; i++) {
-	// only parse the first frame if multiple
-	if (!std::getline(xyz_file, line)) break;
-	if (!line.empty() && line.back() == '\r')
-	    line.pop_back();
-
-        // add this atom to info
-        std::stringstream ss(line);
-        std::string element, xstr, ystr, zstr, extra;
-        if(!(ss >> element >> xstr >> ystr >> zstr)) {
-            std::cerr << "Line failed to parse" << std::endl;
-            return atoms;
-        }
-        types.emplace_back(periodic_table.at(element));
-        positions.emplace_back(std::stof(xstr));
-        positions.emplace_back(std::stof(ystr));
-        positions.emplace_back(std::stof(zstr));
-
-        if (velocity_index != -1) {
-            int idx = velocity_index - 4; // already read in 4 things
-            while (idx > 0) {
-                ss >> element;
-                idx--;
-            }
-            // read in velocity
-            if (!(ss >> xstr >> ystr >> zstr)) {
-                std::cerr << "Velocities failed to parse" << std::endl;
-                return atoms;
-            }
-            velocities.emplace_back(std::stof(xstr));
-            velocities.emplace_back(std::stof(ystr));
-            velocities.emplace_back(std::stof(zstr));
-        }
-    }
-
-    // tensor setup
-    atoms.num_atoms = num_atoms;
-    atoms.atom_vertex_numbers = torch::arange(0, num_atoms, 1).to(torch::kInt64);
-    atoms.atom_types = torch::from_blob(types.data(), {num_atoms}, torch::kUInt8).clone().toType(torch::kInt64);
-    atoms.atom_positions = torch::from_blob(positions.data(), {num_atoms, 3}).clone();
-
-    if (velocity_index == -1)
-        atoms.atom_velocities = torch::zeros({num_atoms, 3});
-    else
-        atoms.atom_velocities = torch::from_blob(velocities.data(), {num_atoms, 3}).clone();
-
-    return atoms;
-}
-void TrajectoryWriter::write_to_xyz(const MolecularInfo& state, const std::string& file_name, std::vector<std::string> opts) {
-
-    bool xyz_has_velocities = true;
-    if (!opts.empty()) {
-        xyz_has_velocities = false;
-        bool xyz_has_positions = false;
-        for (const auto& o : opts) {
-            if (o == "velocities") xyz_has_velocities = true;
-            else if (o == "positions") xyz_has_positions = true;
-            else if (o == "indices") continue;
-            else throw std::runtime_error("TrajectoryWriter::write_to_xyz: unknown option '" + o + "'");
-        }
-        if (!xyz_has_positions) {
-            throw std::runtime_error("TrajectoryWriter::write_to_xyz: 'positions' cannot be excluded from options");
-        }
-    }
-
-    std::unordered_map<int64_t, std::string> reversed_table;
-
-    for (const auto& [label, number] : periodic_table) {
-        reversed_table.insert({static_cast<int64_t>(number), label});
-    }
-
-    // accessors for the state info
-    auto types = state.atom_types.accessor<int64_t, 1>();
-    auto positions = state.atom_positions.accessor<float, 2>();
-
-    // loop through and write to the xyz file
-    std::ofstream out(output_dir + "/" + file_name);
-
-    auto write_floats = [&](float x, float y, float z) {
-        out << std::to_string(x)
-            << '\t' << std::to_string(y)
-            << '\t' << std::to_string(z);
-    };
-
-    out << std::to_string(state.num_atoms) << '\n';
-    if (xyz_has_velocities) {
-        out << "Properties=species:S:1:pos:R:3:momenta:R:3\n";
-        auto velocities = state.atom_velocities.accessor<float, 2>();
-        for (int i = 0; i < state.num_atoms; i++) {
-            out << reversed_table[types[i]] << '\t';
-            write_floats(positions[i][0], positions[i][1], positions[i][2]);
-            out << '\t';
-            write_floats(velocities[i][0], velocities[i][1], velocities[i][2]);
-            out << '\n';
-        }
-    } else {
-        out << "Properties=species:S:1:pos:R:3\n";
-        for (int i = 0; i < state.num_atoms; i++) {
-            out << reversed_table[types[i]] << '\t';
-            write_floats(positions[i][0], positions[i][1], positions[i][2]);
-            out << '\n';
-        }
-    }
-    out.close();
 }
 
 } // namespace distnnp_state
