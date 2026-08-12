@@ -1,6 +1,7 @@
 # Install external dependencies
 torch>=2.0.0
 pytest
+scipy
 
 # Install local components in editable mode
 -e ./distnnp_state
