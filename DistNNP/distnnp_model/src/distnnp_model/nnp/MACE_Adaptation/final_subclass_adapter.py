@@ -10,6 +10,7 @@ single interaction-block hook.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -941,6 +942,14 @@ def build_parser() -> argparse.ArgumentParser:
             "monolithic parity reference. Leave empty to reuse --model."
         ),
     )
+    parser.add_argument(
+        "--verbose-diagnostics",
+        action="store_true",
+        help=(
+            "Print the full per-rank diagnostic surface. By default the adapter "
+            "prints a compact summary suitable for larger stress cases."
+        ),
+    )
     return parser
 
 
@@ -1325,7 +1334,10 @@ def summarize_rank_results(
         "source_path": raw_structure.get("source_path", "unknown"),
         "num_atoms": num_atoms,
         "atomic_numbers": list(raw_structure["atomic_numbers"]),
-        "positions_A": raw_structure["positions"],
+        "atomic_number_counts": dict(
+            sorted(Counter(int(z) for z in raw_structure["atomic_numbers"]).items())
+        ),
+        "positions_preview_A": raw_structure["positions"][: min(8, num_atoms)],
         "structure_diagnostics": structure_diagnostics,
         "adapter_checks": checks,
         "monolithic_parity": monolithic_parity,
@@ -1347,8 +1359,8 @@ def print_summary(summary: Dict[str, Any], args: argparse.Namespace) -> None:
     print("------------------------------------------------------------")
     print(f"source_path: {summary['source_path']}")
     print(f"num_atoms: {summary['num_atoms']}")
-    print(f"atomic_numbers: {summary['atomic_numbers']}")
-    print(f"positions_A: {summary['positions_A']}")
+    print(f"atomic_number_counts: {summary['atomic_number_counts']}")
+    print(f"positions_preview_A: {summary['positions_preview_A']}")
     print()
     print("------------------------------------------------------------")
     print("Structure Diagnostics")
@@ -1411,7 +1423,6 @@ def print_summary(summary: Dict[str, Any], args: argparse.Namespace) -> None:
         "exchange_vs_no_exchange_force_l2_delta: "
         f"{checks['exchange_vs_no_exchange_force_l2_delta']}"
     )
-    print(f"dtype_policies: {checks['dtype_policies']}")
     print(f"case_type: {checks['case_type']}")
     print()
     if summary["monolithic_parity"] is not None:
@@ -1424,8 +1435,6 @@ def print_summary(summary: Dict[str, Any], args: argparse.Namespace) -> None:
         print(f"monolithic_total_energy: {parity['monolithic_total_energy']}")
         print(f"distributed_owned_energy_sum: {parity['distributed_owned_energy_sum']}")
         print(f"absolute_energy_error: {parity['absolute_energy_error']}")
-        print(f"distributed_force_shape: {parity['distributed_force_shape']}")
-        print(f"monolithic_force_shape: {parity['monolithic_force_shape']}")
         print(f"max_abs_force_error: {parity['max_abs_force_error']}")
         print(f"l2_force_error: {parity['l2_force_error']}")
         print(f"max_abs_node_energy_error: {parity['max_abs_node_energy_error']}")
@@ -1439,46 +1448,7 @@ def print_summary(summary: Dict[str, Any], args: argparse.Namespace) -> None:
             "max_owned_neighbor_count_mismatch: "
             f"{parity['max_owned_neighbor_count_mismatch']}"
         )
-        print(
-            "monolithic_model_parameter_dtype: "
-            f"{parity['monolithic_model_parameter_dtype']}"
-        )
-        print(
-            "monolithic_batch_positions_dtype: "
-            f"{parity['monolithic_batch_positions_dtype']}"
-        )
-        print(
-            "monolithic_node_energy_dtype: "
-            f"{parity['monolithic_node_energy_dtype']}"
-        )
-        print(
-            "monolithic_total_energy_dtype: "
-            f"{parity['monolithic_total_energy_dtype']}"
-        )
         print()
-        print("------------------------------------------------------------")
-        print("Graph Parity By Rank")
-        print("------------------------------------------------------------")
-        for graph_record in parity["graph_parity_records"]:
-            print(f"rank: {graph_record['rank']}")
-            print(f"  owned_indices: {graph_record['owned_indices']}")
-            print(
-                "  distributed_owned_destination_edge_count: "
-                f"{graph_record['distributed_owned_destination_edge_count']}"
-            )
-            print(
-                "  monolithic_owned_destination_edge_count: "
-                f"{graph_record['monolithic_owned_destination_edge_count']}"
-            )
-            print(
-                "  owned_destination_edge_sets_exact_match: "
-                f"{graph_record['owned_destination_edge_sets_exact_match']}"
-            )
-            print(
-                "  per_owned_atom_neighbor_delta: "
-                f"{graph_record['per_owned_atom_neighbor_delta']}"
-            )
-            print()
     print("------------------------------------------------------------")
     print("Per-Rank Observation Points")
     print("------------------------------------------------------------")
@@ -1487,51 +1457,63 @@ def print_summary(summary: Dict[str, Any], args: argparse.Namespace) -> None:
         print(f"  n_local: {record['n_local']}")
         print(f"  n_total_after_exchange: {record['n_total_after_exchange']}")
         print(f"  n_halo: {record['n_halo']}")
-        print(f"  expected_total_recv: {record['expected_total_recv']}")
-        print(f"  exchange_mode: {record['exchange_mode']}")
-        print(f"  exchange_reason: {record['exchange_reason']}")
         print(f"  total_send: {record['total_send']}")
         print(f"  total_recv: {record['total_recv']}")
-        print(f"  feature_exchange_used_ipc: {record['feature_exchange_used_ipc']}")
         print(
             "  executed_exchange_boundaries: "
             f"{record['executed_exchange_boundaries']}"
         )
-        print(f"  executed_exchange_layers: {record['executed_exchange_layers']}")
-        print(f"  num_interactions: {record['num_interactions']}")
-        print(
-            "  exchange_layers_before_interaction: "
-            f"{record['exchange_layers_before_interaction']}"
-        )
-        print(f"  exchange_layers_after_product: {record['exchange_layers_after_product']}")
-        print(f"  ownership_boundary: {record['ownership_boundary']}")
-        print(f"  ownership_rule: {record['ownership_rule']}")
-        print(f"  force_rule: {record['force_rule']}")
-        print(f"  global_owned_indices: {record['global_owned_indices']}")
-        print(f"  halo_global_indices: {record['halo_global_indices']}")
-        print(f"  expanded_rank_graph_energy: {record['expanded_rank_graph_energy']}")
         print(f"  owned_local_energy: {record['owned_local_energy']}")
-        print(f"  expanded_minus_owned_energy: {record['expanded_minus_owned_energy']}")
-        print(f"  comparison_owned_local_energy: {record['comparison_owned_local_energy']}")
         print(
             "  comparison_energy_delta_vs_exchange_on: "
             f"{record['owned_local_energy'] - record['comparison_owned_local_energy']}"
         )
-        print(f"  owned_destination_edge_count: {record['owned_destination_edge_count']}")
-        print(f"  owned_node_energy_values: {record['owned_node_energy_values']}")
-        print(f"  recovered_force_shape: {record['recovered_force_shape']}")
         print(f"  halo_gradient_active: {record['halo_gradient_active']}")
-        print(f"  model_parameter_dtype: {record['model_parameter_dtype']}")
-        print(f"  batch_positions_dtype: {record['batch_positions_dtype']}")
-        print(f"  graph_vectors_dtype: {record['graph_vectors_dtype']}")
-        print(f"  graph_lengths_dtype: {record['graph_lengths_dtype']}")
-        print(f"  node_embedding_dtype: {record['node_embedding_dtype']}")
-        print(f"  edge_attr_dtype: {record['edge_attr_dtype']}")
-        print(f"  edge_feat_dtype: {record['edge_feat_dtype']}")
-        print(f"  node_energy_dtype: {record['node_energy_dtype']}")
-        print(f"  total_energy_dtype: {record['total_energy_dtype']}")
-        print(f"  owned_local_energy_dtype: {record['owned_local_energy_dtype']}")
-        print(f"  layer_records: {record['layer_records']}")
+        print(f"  feature_exchange_used_ipc: {record['feature_exchange_used_ipc']}")
+        if args.verbose_diagnostics:
+            print(f"  expected_total_recv: {record['expected_total_recv']}")
+            print(f"  exchange_mode: {record['exchange_mode']}")
+            print(f"  exchange_reason: {record['exchange_reason']}")
+            print(f"  executed_exchange_layers: {record['executed_exchange_layers']}")
+            print(f"  num_interactions: {record['num_interactions']}")
+            print(
+                "  exchange_layers_before_interaction: "
+                f"{record['exchange_layers_before_interaction']}"
+            )
+            print(
+                "  exchange_layers_after_product: "
+                f"{record['exchange_layers_after_product']}"
+            )
+            print(f"  ownership_boundary: {record['ownership_boundary']}")
+            print(f"  ownership_rule: {record['ownership_rule']}")
+            print(f"  force_rule: {record['force_rule']}")
+            print(f"  global_owned_indices: {record['global_owned_indices']}")
+            print(f"  halo_global_indices: {record['halo_global_indices']}")
+            print(
+                f"  expanded_rank_graph_energy: {record['expanded_rank_graph_energy']}"
+            )
+            print(
+                f"  expanded_minus_owned_energy: {record['expanded_minus_owned_energy']}"
+            )
+            print(
+                f"  comparison_owned_local_energy: {record['comparison_owned_local_energy']}"
+            )
+            print(
+                f"  owned_destination_edge_count: {record['owned_destination_edge_count']}"
+            )
+            print(f"  owned_node_energy_values: {record['owned_node_energy_values']}")
+            print(f"  model_parameter_dtype: {record['model_parameter_dtype']}")
+            print(f"  batch_positions_dtype: {record['batch_positions_dtype']}")
+            print(f"  graph_vectors_dtype: {record['graph_vectors_dtype']}")
+            print(f"  graph_lengths_dtype: {record['graph_lengths_dtype']}")
+            print(f"  node_embedding_dtype: {record['node_embedding_dtype']}")
+            print(f"  edge_attr_dtype: {record['edge_attr_dtype']}")
+            print(f"  edge_feat_dtype: {record['edge_feat_dtype']}")
+            print(f"  node_energy_dtype: {record['node_energy_dtype']}")
+            print(f"  total_energy_dtype: {record['total_energy_dtype']}")
+            print(f"  owned_local_energy_dtype: {record['owned_local_energy_dtype']}")
+            print(f"  layer_records: {record['layer_records']}")
+        print(f"  recovered_force_shape: {record['recovered_force_shape']}")
         print()
 
 

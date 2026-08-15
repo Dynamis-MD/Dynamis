@@ -119,6 +119,14 @@ BUILTIN_SYSTEMS: Dict[str, Dict[str, Any]] = {
         "kind": "file",
         "description": "6-atom DistNNP xyz fixture with overlapping coordinates.",
     },
+    "adapter_stress_pbc_125": {
+        "kind": "synthetic",
+        "description": (
+            "125-atom periodic simple-cubic stress fixture with mixed light elements. "
+            "Designed to create broad cross-partition halo traffic while remaining "
+            "deterministic and usable across 2-4 GPU runs."
+        ),
+    },
 }
 
 DEFAULT_ADAPTER_STRUCTURE_PATH = Path(__file__).resolve().with_name("sample_nonoverlap.xyz")
@@ -281,7 +289,44 @@ def parse_raw_structure(args: argparse.Namespace) -> Dict[str, Any]:
         return parse_xyz_file(DEFAULT_HALO_STRUCTURE_PATH)
     if args.builtin_system == "distnnp_xyz6":
         return parse_xyz_file(DEFAULT_REAL_STRUCTURE_PATH)
+    if args.builtin_system == "adapter_stress_pbc_125":
+        return build_synthetic_stress_structure()
     raise ValueError(f"Unsupported built-in system: {args.builtin_system}")
+
+
+def build_synthetic_stress_structure() -> Dict[str, Any]:
+    grid_shape = (5, 5, 5)
+    spacing = 2.35
+    cell_lengths = [axis * spacing for axis in grid_shape]
+    element_cycle = [1, 6, 7, 8, 16]
+
+    atomic_numbers = []
+    positions = []
+    linear_index = 0
+    for ix in range(grid_shape[0]):
+        for iy in range(grid_shape[1]):
+            for iz in range(grid_shape[2]):
+                atomic_numbers.append(element_cycle[linear_index % len(element_cycle)])
+                positions.append(
+                    [
+                        round((ix + 0.5) * spacing, 6),
+                        round((iy + 0.5) * spacing, 6),
+                        round((iz + 0.5) * spacing, 6),
+                    ]
+                )
+                linear_index += 1
+
+    return {
+        "atomic_numbers": atomic_numbers,
+        "positions": positions,
+        "cell": [
+            [cell_lengths[0], 0.0, 0.0],
+            [0.0, cell_lengths[1], 0.0],
+            [0.0, 0.0, cell_lengths[2]],
+        ],
+        "pbc": [True, True, True],
+        "source_path": "builtin://adapter_stress_pbc_125",
+    }
 
 
 def analyze_structure(raw_structure: Dict[str, Any]) -> Dict[str, Any]:
