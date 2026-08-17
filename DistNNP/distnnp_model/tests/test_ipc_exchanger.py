@@ -57,7 +57,7 @@ def _mp_worker(rank, world_size, num_atoms, feature_dim, cutoff,
     info = p.partition(state, env)
     p.build_halo_maps(info, state, env, cfg)
 
-    num_local = info.local_atom_positions.shape[0]
+    num_local = info.partition_indices.shape[0]
     so = info.send_offsets.cpu()
     ro = info.recv_offsets.cpu()
     total_send = so[-1].item()
