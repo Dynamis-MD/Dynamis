@@ -61,7 +61,7 @@ C++/CUDA extension. Defines the core data structures shared by all other package
 Key types (in `include/distnnp_state/distnnp_state.hpp`):
 - `MolecularInfo` — positions, velocities, atom indices for a partition
 - `DistEnvironment` — rank, world size, GPU topology
-- `PartitionMessagePassingInfo` — local atom data + halo map + send/recv matrix
+- `PartitionMessagePassingInfo` — partition indices + halo map + send/recv matrix
 - `DistNNPState` — aggregates the above
 
 Partitioner interface (`include/distnnp_state/partitioner.hpp`): `AbstractPartitioner` with concrete subclasses `SimpleSpatialPartitioner`, `KDTreePartitioner`, `SFCPartitioner`.

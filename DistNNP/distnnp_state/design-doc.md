@@ -63,8 +63,6 @@ The primary output of the partitioner pipeline. Each rank holds one of these, po
 |---|---|---|
 | `partition_id` | `[N]` int64 | Rank assignment for every atom in the global system |
 | `partition_indices` | `[num_local]` int64 | Global atom indices owned by this rank |
-| `local_atom_positions` | `[num_local, 3]` float32 | Positions of locally owned atoms |
-| `local_atom_velocities` | `[num_local, 3]` float32 | Velocities of locally owned atoms |
 | `global_send_recv_matrix` | `[W, W]` int64 | Atom-count matrix; only `row[rank]` diagonal is filled initially |
 
 **After `build_halo_maps()`:**
@@ -122,7 +120,7 @@ public:
 
 The interface separates two concerns:
 
-1. **`partition()`** — assigns atoms to ranks. Each subclass implements its own spatial decomposition strategy. The method reads `global_molecular_info` and writes `partition_id`, `partition_indices`, `local_atom_{positions,velocities}`, and the diagonal of `global_send_recv_matrix`.
+1. **`partition()`** — assigns atoms to ranks. Each subclass implements its own spatial decomposition strategy. The method reads `global_molecular_info` and writes `partition_id`, `partition_indices`, and the diagonal of `global_send_recv_matrix`.
 
 2. **`build_halo_maps()`** — shared across all subclasses. Given the `partition_id` tensor produced by any `partition()` call and a `SimulationConfig`, it builds the full send/receive CSR maps. It runs on whatever device the input tensors are on (CUDA required for the internal `radius_graph_pbc` call).
 
@@ -153,7 +151,7 @@ The cheapest partitioner. Assigns atoms in index order: rank `r` receives the co
 - **Cost:** O(1), no CUDA kernels.
 - **Quality:** Good only when the input atom ordering already has spatial locality (e.g., a pre-sorted trajectory file). Random or layered orderings produce poor halo volume.
 - **Use case:** Baseline benchmarking, validation, or when atoms are ordered along a natural scan axis.
-- **Produced fields:** `partition_id` (via `arange // atoms_per_rank` clamped to `W-1`), `partition_indices`, `local_atom_{positions,velocities}`, `global_send_recv_matrix` diagonal.
+- **Produced fields:** `partition_id` (via `arange // atoms_per_rank` clamped to `W-1`), `partition_indices`, `global_send_recv_matrix` diagonal.
 
 ### `KDTreePartitioner`
 
@@ -300,7 +298,6 @@ SimulationConfig
  PartitionMessagePassingInfo
    ├── partition_id [N]
    ├── partition_indices [num_local]
-   ├── local_atom_{positions, velocities} [num_local, 3]
    └── global_send_recv_matrix diagonal
          │
          ▼

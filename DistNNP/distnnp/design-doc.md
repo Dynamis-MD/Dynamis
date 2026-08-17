@@ -625,7 +625,7 @@ The following functions and methods are referenced in this document but are not 
 
 1. **Masses and energy on `DistNNPState`**: Currently `DistNNPState` does not carry `masses` or `energy`. The integrators reference `state.mass` and `state.energy` directly. Options: (a) add these fields to `MolecularInfo` / `DistNNPState` in `distnnp_state`, or (b) define them as properties on a thin Python wrapper around `DistNNPState` in `distnnp`. Option (a) is cleaner for checkpointing; option (b) avoids touching the C++ struct.
 
-2. **`state.pos` / `state.vel` aliases**: The integrators access `state.pos`, `state.vel`, `state.forces`, `state.mass` directly. These must resolve to `state.local_partition_info.local_atom_positions` etc. Whether these are added to the C++ `DistNNPState` struct or provided as Python properties needs to be decided in coordination with `distnnp_state`.
+2. **`state.forces` / `state.mass` aliases**: The integrators access `state.forces` and `state.mass` directly. `SimState` exposes `pos` and `vel` as Python properties over `DistNNPState.local_molecular_info`; `forces` and `mass` need the same treatment — see open question 1.
 
 3. **Checkpoint / restart**: `run()` has no restart support yet. A checkpoint mechanism would write `state.local_partition_info` (positions, velocities, atom indices) plus the step counter to disk via the `DistributedBufferedWriter`, so a run can be resumed without re-reading the input file from scratch.
 

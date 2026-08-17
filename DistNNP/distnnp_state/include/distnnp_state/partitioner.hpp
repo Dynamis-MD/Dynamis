@@ -10,7 +10,7 @@ public:
   virtual ~AbstractPartitioner() = default;
 
   // Subclass implements: fills partition_id, partition_indices,
-  // local_atom_positions, local_atom_velocities, global_send_recv_matrix.
+  // global_send_recv_matrix.
   virtual PartitionMessagePassingInfo partition(const MolecularInfo &state,
                                                 const DistEnvironment &env) = 0;
 

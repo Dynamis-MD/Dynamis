@@ -62,7 +62,6 @@ class TestCppPartitioner:
 
         assert info.partition_indices.shape == (25,)
         assert torch.equal(info.partition_indices, torch.arange(25, device=device))
-        assert info.local_atom_positions.shape == (25, 3)
 
     def test_last_rank_gets_remainder(self, device):
         state = _make_global_state(103, device)
@@ -96,13 +95,6 @@ class TestCppPartitioner:
         combined = torch.cat(all_indices)
         assert torch.equal(combined.sort()[0], torch.arange(100, device=device))
 
-    def test_positions_match_global(self, device):
-        state = _make_global_state(100, device)
-        env = _make_env(rank=2, world_size=4)
-        info = SimpleSpatialPartitioner().partition(state, env)
-
-        assert torch.equal(info.local_atom_positions, state.atom_positions[50:75])
-
     def test_diagonal_send_recv_matrix(self, device):
         state = _make_global_state(100, device)
         env = _make_env(rank=1, world_size=4)
@@ -117,7 +109,6 @@ class TestCppPartitioner:
 
         assert info.partition_id.device.type == device.type
         assert info.partition_indices.device.type == device.type
-        assert info.local_atom_positions.device.type == device.type
 
 
 @requires_cuda
@@ -241,7 +232,7 @@ class TestBuildHaloMaps:
         info = p.partition(state, env)
         p.build_halo_maps(info, state, env, cfg)
 
-        num_local = info.local_atom_positions.shape[0]
+        num_local = info.partition_indices.shape[0]
         if info.send_local_indices.numel() > 0:
             assert info.send_local_indices.max().item() < num_local
 
@@ -256,6 +247,6 @@ class TestBuildHaloMaps:
         info = p.partition(state, env)
         p.build_halo_maps(info, state, env, cfg)
 
-        num_local = info.local_atom_positions.shape[0]
+        num_local = info.partition_indices.shape[0]
         if info.recv_ghost_indices.numel() > 0:
             assert info.recv_ghost_indices.min().item() >= num_local

@@ -80,8 +80,10 @@ For GNN models that need a different `FeatureExchanger` per message-passing laye
 Using `LennardJonesPotentialModel` as the canonical reference:
 
 ```
+state.local_molecular_info
+  └── atom_positions         [num_local, 3]   ← owned atom positions (requires_grad after clone)
+
 state.local_partition_info
-  ├── local_atom_positions   [num_local, 3]   ← owned atom positions (requires_grad after clone)
   ├── partition_indices      [num_local]       ← global atom indices / types
   ├── send_local_indices     [total_send]      ← CSR: which local atoms to push to neighbours
   └── recv_ghost_indices     [total_recv]      ← CSR: ghost slots to receive into
@@ -493,6 +495,6 @@ Because `FeaturePushToExchange` is called `L` times in the forward pass, `energy
 
 3. **Asynchronous exchange and computation overlap**: The baseline (`cfg.dist.overlap`) can overlap the NNP compute on interior atoms (identified by `interior_mask` in `PartitionMessagePassingInfo`) with the halo exchange for boundary atoms. This requires splitting the NNP forward pass into two phases: interior atoms first (while communication runs), then boundary atoms after the exchange completes. The `FeatureExchanger` must expose an async `begin_send_recv()` / `wait()` interface for this.
 
-4. **Gradient correctness for non-differentiable position exchange**: In the `LennardJonesPotentialModel`, `local_positions` is detached and re-created with `requires_grad=True` before the exchange. This is necessary to make `energy.backward()` produce forces via `local_positions.grad`. However, it breaks the gradient path from `state.local_partition_info.local_atom_positions` through to `energy` for any use case that needs end-to-end differentiability (e.g., training the NNP). A future design should clarify whether `DistNNPModel` is always in inference/MD mode or must also support training.
+4. **Gradient correctness for non-differentiable position exchange**: In the `LennardJonesPotentialModel`, `local_positions` is detached and re-created with `requires_grad=True` before the exchange. This is necessary to make `energy.backward()` produce forces via `local_positions.grad`. However, it breaks the gradient path from `state.local_molecular_info.atom_positions` through to `energy` for any use case that needs end-to-end differentiability (e.g., training the NNP). A future design should clarify whether `DistNNPModel` is always in inference/MD mode or must also support training.
 
 5. **RDMA completion notification**: The doorbell (RDMA SEND/RECV) approach described above is one option. An alternative is polling on a GPU-side flag written by the NIC after the RDMA WRITE completes (GPU direct notification via `nv_peer_mem` or NVSHMEM's `nvshmemx_getmem_nbi`). The polling approach avoids the extra QP verb but requires careful fence ordering to prevent the flag read from being speculated ahead of the data.

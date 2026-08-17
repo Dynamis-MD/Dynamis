@@ -79,15 +79,6 @@ class TestKDTreePartitioner:
         assert combined.shape == (100,)
         assert torch.equal(combined.sort()[0], torch.arange(100, device=device))
 
-    def test_local_positions_match_global(self, device):
-        """Local positions must match global[partition_indices]."""
-        state = _make_global_state(100, device)
-        env = _make_env(rank=2, world_size=4)
-        info = KDTreePartitioner().partition(state, env)
-
-        expected = state.atom_positions.index_select(0, info.partition_indices)
-        assert torch.allclose(info.local_atom_positions, expected)
-
     def test_balance_unweighted(self, device):
         """Unweighted partitions should be roughly balanced (within 20%)."""
         N = 200
@@ -195,7 +186,6 @@ class TestKDTreePartitioner:
 
         assert info.partition_id.device.type == device.type
         assert info.partition_indices.device.type == device.type
-        assert info.local_atom_positions.device.type == device.type
 
     def test_single_atom(self, device):
         """N=1: single atom assigned to exactly one valid rank."""
@@ -501,6 +491,6 @@ class TestKDTreeHaloMaps:
         info = p.partition(state, env)
         p.build_halo_maps(info, state, env, cfg)
 
-        num_local = info.local_atom_positions.shape[0]
+        num_local = info.partition_indices.shape[0]
         if info.send_local_indices.numel() > 0:
             assert info.send_local_indices.max().item() < num_local
