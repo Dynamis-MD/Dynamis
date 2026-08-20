@@ -2,6 +2,7 @@
 #include "distnnp_state/distnnp_state.hpp"
 #include "distnnp_state/partitioner.hpp"
 #include "distnnp_state/radius_graph.hpp"
+#include "distnnp_state/timing.hpp"
 #include "distnnp_state/trajectory_writer.hpp"
 #include <torch/extension.h>
 #include <pybind11/stl.h>
@@ -182,6 +183,51 @@ PYBIND11_MODULE(distnnp_state_impl, m) {
       py::arg("pos"), py::arg("cell"), py::arg("pbc"), py::arg("radius"),
       py::arg("max_num_neighbors"), py::arg("enforce_max_strictly"),
       py::arg("target_indices") = c10::optional<at::Tensor>{});
+
+  // ===== Timing =====
+
+  py::enum_<distnnp_state::TimerClass>(m, "TimerClass")
+      .value("Compute", distnnp_state::TimerClass::Compute)
+      .value("Comm",    distnnp_state::TimerClass::Comm)
+      .value("Wait",    distnnp_state::TimerClass::Wait)
+      .value("Other",   distnnp_state::TimerClass::Other);
+
+  py::enum_<distnnp_state::Where>(m, "Where")
+      .value("Host",   distnnp_state::Where::Host)
+      .value("Device", distnnp_state::Where::Device);
+
+  py::enum_<distnnp_state::Level>(m, "Level")
+      .value("Off",    distnnp_state::Level::Off)
+      .value("Basic",  distnnp_state::Level::Basic)
+      .value("Detail", distnnp_state::Level::Detail);
+
+  py::class_<distnnp_state::TimingRegistry>(m, "TimingRegistry")
+      .def_static("instance", &distnnp_state::TimingRegistry::instance,
+                  py::return_value_policy::reference)
+      .def("init", [](distnnp_state::TimingRegistry& self,
+                      uint32_t rank, uint32_t local_rank, uint32_t world_size,
+                      py::bytes run_id, int32_t device_id,
+                      const std::string& output_dir) {
+               self.init(rank, local_rank, world_size,
+                         static_cast<std::string>(run_id), device_id, output_dir);
+           },
+           py::arg("rank"), py::arg("local_rank"), py::arg("world_size"),
+           py::arg("run_id"), py::arg("device_id"), py::arg("output_dir"))
+      .def("set_level", &distnnp_state::TimingRegistry::set_level, py::arg("level"))
+      .def("enabled",   &distnnp_state::TimingRegistry::enabled)
+      .def("set_step",  &distnnp_state::TimingRegistry::set_step,  py::arg("step"))
+      .def("flush",     &distnnp_state::TimingRegistry::flush);
+
+  py::class_<distnnp_state::Timer>(m, "Timer")
+      .def(py::init<>())
+      .def("start", &distnnp_state::Timer::start,
+           py::arg("key"), py::arg("cls"),
+           py::arg("where") = distnnp_state::Where::Host,
+           py::arg("stream") = nullptr)
+      .def("stop", &distnnp_state::Timer::stop)
+      .def_static("set_level", &distnnp_state::Timer::set_level, py::arg("level"))
+      .def_static("enabled",   &distnnp_state::Timer::enabled)
+      .def_static("set_step",  &distnnp_state::Timer::set_step,  py::arg("step"));
 
   m.def("radius_graph_pbc_counts_ex", &radius_graph_pbc_counts_ex,
         "Count-only variant: returns just neighbor_counts[N_target] int32. "
