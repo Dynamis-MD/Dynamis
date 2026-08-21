@@ -11,6 +11,8 @@
 
 #include "distnnp_state/partitioner.hpp"
 #include "distnnp_state/radius_graph.hpp"
+#include "distnnp_state/timing.hpp"
+#include <cstdio>
 
 namespace distnnp_state
 {
@@ -23,6 +25,9 @@ void AbstractPartitioner::build_halo_maps(
     const DistEnvironment &env,
     const SimulationConfig &config)
 {
+    Timer t;
+    t.start();
+
     auto pos = global_state.atom_positions;
     auto device = pos.device();
     auto long_opts = torch::TensorOptions().dtype(torch::kLong).device(device);
@@ -153,6 +158,13 @@ void AbstractPartitioner::build_halo_maps(
     info.global_send_recv_matrix.select(0, R).copy_(send_counts_per_rank);
     // Restore diagonal (local atom count, not halo count)
     info.global_send_recv_matrix.index_put_({R, R}, num_local);
+
+    t.stop();
+    // Scaffolding: replaced by the real output layer once it exists.
+    // Nothing is recorded when timing is disabled, so there is nothing to report.
+    if (!t.times_ns().empty()) {
+        fprintf(stderr, "build_halo_maps: %.3f ms\n", t.times_ns().back() / 1e6);
+    }
 }
 
 } // namespace distnnp_state

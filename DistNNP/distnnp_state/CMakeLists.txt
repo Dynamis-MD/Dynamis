@@ -65,6 +65,7 @@ python_add_library(distnnp_state_impl
     src/csrc/graph/dist_graph_ops.cpp
     src/csrc/graph/dist_graph_ops_kernels.cu
     src/csrc/trajectory_writer.cpp
+    src/csrc/timing.cpp
 )
 
 target_include_directories(distnnp_state_impl
