@@ -1,7 +1,8 @@
 #include "distnnp_integrator/integrator.hpp"
 #include "distnnp_integrator/macros.hpp"
+#include "distnnp_state/timing.hpp"
 #include <torch/extension.h>
-#include <c10/cuda/CUDAStream.h>
+#include <ATen/cuda/CUDAContext.h>
 
 namespace
 {
@@ -60,6 +61,10 @@ namespace distnnp_integrator
     auto device_index = positions.device().index();
     auto stream = at::cuda::getCurrentCUDAStream(device_index);
 
+    distnnp_state::Timer t;
+    t.start("integrator_halfstep1", distnnp_state::TimerClass::Compute,
+            distnnp_state::Where::Device, stream.stream());
+
     verlet_halfstep1_kernel<<<blocks, threads_per_block, 0, stream>>>(
         positions.data_ptr<float>(),
         velocities.data_ptr<float>(),
@@ -67,6 +72,8 @@ namespace distnnp_integrator
         masses.data_ptr<float>(),
         dt,
         num_floats);
+
+    t.stop();
 
     CUDACHECK(cudaGetLastError());
   }
@@ -92,12 +99,18 @@ namespace distnnp_integrator
     auto device_index = velocities.device().index();
     auto stream = at::cuda::getCurrentCUDAStream(device_index);
 
+    distnnp_state::Timer t;
+    t.start("integrator_halfstep2", distnnp_state::TimerClass::Compute,
+            distnnp_state::Where::Device, stream.stream());
+
     verlet_halfstep2_kernel<<<blocks, threads_per_block, 0, stream>>>(
         velocities.data_ptr<float>(),
         forces.data_ptr<float>(),
         masses.data_ptr<float>(),
         dt,
         num_floats);
+
+    t.stop();
 
     CUDACHECK(cudaGetLastError());
   }

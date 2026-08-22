@@ -4,6 +4,7 @@
 #include "distnnp_state/radius_graph.hpp"
 #include "distnnp_state/timing.hpp"
 #include "distnnp_state/trajectory_writer.hpp"
+#include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
 #include <pybind11/stl.h>
 
@@ -220,10 +221,21 @@ PYBIND11_MODULE(distnnp_state_impl, m) {
 
   py::class_<distnnp_state::Timer>(m, "Timer")
       .def(py::init<>())
-      .def("start", &distnnp_state::Timer::start,
+      // For Where::Device, device_index is used to fetch the current CUDA stream
+      // inside C++ — Python cannot pass cudaStream_t handles directly.
+      .def("start",
+           [](distnnp_state::Timer& self, const std::string& key,
+              distnnp_state::TimerClass cls, distnnp_state::Where where,
+              int device_index) {
+               cudaStream_t stream = nullptr;
+               if (where == distnnp_state::Where::Device) {
+                   stream = at::cuda::getCurrentCUDAStream(device_index).stream();
+               }
+               self.start(key, cls, where, stream);
+           },
            py::arg("key"), py::arg("cls"),
            py::arg("where") = distnnp_state::Where::Host,
-           py::arg("stream") = nullptr)
+           py::arg("device_index") = 0)
       .def("stop", &distnnp_state::Timer::stop)
       .def_static("set_level", &distnnp_state::Timer::set_level, py::arg("level"))
       .def_static("enabled",   &distnnp_state::Timer::enabled)

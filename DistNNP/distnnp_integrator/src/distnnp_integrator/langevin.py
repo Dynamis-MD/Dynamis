@@ -7,7 +7,7 @@ from distnnp_integrator._data_check import (
     check_shapes_match,
 )
 from distnnp_integrator.integrator import DistNNPIntegrator
-from distnnp_state import DistNNPState
+from distnnp_state import DistNNPState, Timer, TimerClass, Where
 from distnnp_model import DistNNPModel
 from distnnp_integrator.masses import TORCH_MASSES
 
@@ -20,6 +20,7 @@ class Langevin(DistNNPIntegrator):
         self.kT = kT
         self.cpp_integrator = LangevinIntegrator()
         self.prev_forces = None
+        self._timer = Timer()
 
     def reset(self) -> None:
         self.prev_forces = None
@@ -90,6 +91,7 @@ class Langevin(DistNNPIntegrator):
         """
 
         state = dist_state.local_molecular_info
+        device_index = state.atom_positions.device.index
         if dt is not None:
             step_size = dt
         else:
@@ -100,11 +102,13 @@ class Langevin(DistNNPIntegrator):
         atom_masses = TORCH_MASSES.to(state.atom_positions.device)[state.atom_types.reshape(-1).to(torch.long)]
 
         if self.prev_forces is None:
+            self._timer.start("model_forward", TimerClass.Compute, Where.Device, device_index)
             _, atom_forces = model(dist_state)
-            
+            self._timer.stop()
         else:
             atom_forces = self.prev_forces
 
+        # integrator_halfstep1 is timed in C++ (langevin_integrator.cu)
         self.halfstep1_(
             state.atom_positions,
             state.atom_velocities,
@@ -115,11 +119,14 @@ class Langevin(DistNNPIntegrator):
         )
 
         # Recompute forces at new positions
+        self._timer.start("model_forward", TimerClass.Compute, Where.Device, device_index)
         energy, atom_forces = model(dist_state)
+        self._timer.stop()
         self.prev_forces = atom_forces
 
         # Second random noise draw for the second half-step
         noise2 = torch.randn_like(state.atom_velocities)
+        # integrator_halfstep2 is timed in C++ (langevin_integrator.cu)
         self.halfstep2_(
             state.atom_velocities,
             atom_forces,
