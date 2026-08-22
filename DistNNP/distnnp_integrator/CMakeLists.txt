@@ -33,6 +33,37 @@ if (TORCH_LIBRARY)
   get_filename_component(TORCH_LIB_DIR "${TORCH_LIBRARY}" DIRECTORY)
 endif ()
 
+# Locate distnnp_state public headers (same pattern as distnnp_model).
+find_path(DISTNNP_STATE_INCLUDE_DIR
+    NAMES distnnp_state/distnnp_state.hpp
+    HINTS
+        "${Python_SITEARCH}/distnnp_state/include"
+        "${Python_SITELIB}/distnnp_state/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../distnnp_state/include"
+    NO_DEFAULT_PATH
+)
+if(NOT DISTNNP_STATE_INCLUDE_DIR)
+    message(FATAL_ERROR
+        "Could not find distnnp_state headers. "
+        "Install it first: pip install -e ./distnnp_state")
+endif()
+message(STATUS "distnnp_state include dir: ${DISTNNP_STATE_INCLUDE_DIR}")
+
+# Python extensions use non-standard naming (distnnp_state_impl.cpython-XY-*.so,
+# no 'lib' prefix), so ask Python's importlib for the exact path.
+execute_process(
+    COMMAND "${Python_EXECUTABLE}" -c
+        "import importlib.util; s=importlib.util.find_spec('distnnp_state.distnnp_state_impl'); print(s.origin if s else '')"
+    OUTPUT_VARIABLE DISTNNP_STATE_IMPL_LIBRARY
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+if(NOT DISTNNP_STATE_IMPL_LIBRARY)
+    message(FATAL_ERROR
+        "Could not locate distnnp_state_impl. "
+        "Install it first: pip install -e ./distnnp_state")
+endif()
+message(STATUS "distnnp_state_impl library: ${DISTNNP_STATE_IMPL_LIBRARY}")
+
 find_library(TORCH_PYTHON_LIBRARY
   torch_python
   HINTS
@@ -58,6 +89,8 @@ target_include_directories(distnnp_integrator_impl
     PRIVATE
     include
     ${TORCH_INCLUDE_DIRS}
+    ${CUDAToolkit_INCLUDE_DIRS}
+    ${DISTNNP_STATE_INCLUDE_DIR}
 )
 
 # torch_python provides pybind11 type_casters for at::Tensor and must be
@@ -70,6 +103,7 @@ target_link_libraries(distnnp_integrator_impl
     ${TORCH_LIBRARIES}
     torch
     ${TORCH_PYTHON_LIBRARY}
+    ${DISTNNP_STATE_IMPL_LIBRARY}
 )
 
 set_target_properties(distnnp_integrator_impl

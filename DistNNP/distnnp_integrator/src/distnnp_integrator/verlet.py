@@ -7,7 +7,7 @@ from distnnp_integrator._data_check import (
     check_shapes_match,
 )
 from distnnp_integrator.integrator import DistNNPIntegrator
-from distnnp_state import DistNNPState
+from distnnp_state import DistNNPState, Timer, TimerClass, Where
 from distnnp_model import DistNNPModel
 from distnnp_integrator.masses import TORCH_MASSES
 
@@ -18,6 +18,7 @@ class Verlet(DistNNPIntegrator):
         self.dt = dt
         self.cpp_integrator = VerletIntegrator()
         self.prev_forces = None
+        self._timer = Timer()
 
     def reset(self) -> None:
         self.prev_forces = None
@@ -86,15 +87,19 @@ class Verlet(DistNNPIntegrator):
             step_size = self.dt
 
         state = dist_state.local_molecular_info
+        device_index = state.atom_positions.device.index
         atom_masses = TORCH_MASSES.to(state.atom_positions.device)[state.atom_types.reshape(-1).to(torch.long)]
 
-        # 0. Compute forces
+        # 0. Compute forces (skipped after first step — prev_forces reused)
         if self.prev_forces is None:
+            self._timer.start("model_forward", TimerClass.Compute, Where.Device, device_index)
             _, atom_forces = model(dist_state)
+            self._timer.stop()
         else:
             atom_forces = self.prev_forces
-    
+
         # 1. Update v to half-step, and pos to full-step
+        # integrator_halfstep1 is timed in C++ (verlet_integrator.cu)
         self.halfstep1_(
             state.atom_positions,
             state.atom_velocities,
@@ -104,11 +109,14 @@ class Verlet(DistNNPIntegrator):
         )
 
         # 2. Recompute forces at new positions
+        self._timer.start("model_forward", TimerClass.Compute, Where.Device, device_index)
         energy, new_forces = model(dist_state)
-    
+        self._timer.stop()
+
         self.prev_forces = new_forces
 
         # 3. Complete the velocity full-step update
+        # integrator_halfstep2 is timed in C++ (verlet_integrator.cu)
         self.halfstep2_(
             state.atom_velocities, new_forces, atom_masses, step_size
         )

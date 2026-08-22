@@ -5,8 +5,13 @@ import os
 import time
 
 import pytest
+import torch
 
 from distnnp_state import Timer, TimingRegistry, TimerClass, Where, Level
+
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA not available"
+)
 
 RUN_ID = b"\x01" * 16
 
@@ -174,3 +179,114 @@ def test_timer_class_written_correctly(tmp_path, cls, expected):
 
     records = flush_and_read(tmp_path)
     assert records[1]["class"] == expected
+
+
+# ── device timers ─────────────────────────────────────────────────────────────
+
+@requires_cuda
+def test_device_timer_produces_device_record(tmp_path):
+    init_registry(tmp_path)
+
+    t = Timer()
+    t.start("gpu_region", TimerClass.Compute, Where.Device, 0)
+    # Give the GPU a trivial workload so there is something to time.
+    torch.cuda.synchronize(0)
+    t.stop()
+
+    records = flush_and_read(tmp_path)
+    recs = [r for r in records if r["type"] == "rec"]
+    assert len(recs) == 1
+    rec = recs[0]
+    assert rec["key"] == "gpu_region"
+    assert rec["where"] == "device"
+    assert rec["class"] == "compute"
+    assert rec["time_us"] >= 0.0
+
+
+@requires_cuda
+def test_device_timer_elapsed_is_positive(tmp_path):
+    init_registry(tmp_path)
+
+    t = Timer()
+    t.start("gpu_region", TimerClass.Compute, Where.Device, 0)
+    # A small CUDA kernel to ensure the GPU does real work.
+    _ = torch.zeros(1024, device="cuda") + 1.0
+    torch.cuda.synchronize(0)
+    t.stop()
+
+    records = flush_and_read(tmp_path)
+    rec = next(r for r in records if r["type"] == "rec")
+    assert rec["time_us"] > 0.0
+
+
+@requires_cuda
+def test_device_timer_deferred_until_flush(tmp_path):
+    # Records from device timers are written only at flush(), not at stop().
+    init_registry(tmp_path)
+    path = tmp_path / "timing_rank0.jsonl"
+
+    t = Timer()
+    t.start("gpu_region", TimerClass.Compute, Where.Device, 0)
+    t.stop()
+
+    # File should only have the meta line before flush.
+    lines_before = [l for l in path.read_text().splitlines() if l.strip()]
+    recs_before = [json.loads(l) for l in lines_before if json.loads(l)["type"] == "rec"]
+    assert len(recs_before) == 0
+
+    TimingRegistry.instance().flush()
+
+    lines_after = [l for l in path.read_text().splitlines() if l.strip()]
+    recs_after = [json.loads(l) for l in lines_after if json.loads(l)["type"] == "rec"]
+    assert len(recs_after) == 1
+
+
+@requires_cuda
+def test_device_timer_reuse_produces_one_record_per_stop(tmp_path):
+    init_registry(tmp_path)
+
+    t = Timer()
+    for step in range(3):
+        Timer.set_step(step)
+        t.start("gpu_region", TimerClass.Compute, Where.Device, 0)
+        _ = torch.zeros(1, device="cuda")
+        t.stop()
+
+    records = flush_and_read(tmp_path)
+    recs = [r for r in records if r["type"] == "rec"]
+    assert len(recs) == 3
+    for i, rec in enumerate(recs):
+        assert rec["step"] == i
+        assert rec["where"] == "device"
+
+
+@requires_cuda
+def test_level_off_suppresses_device_records(tmp_path):
+    init_registry(tmp_path)
+    Timer.set_level(Level.Off)
+
+    t = Timer()
+    t.start("gpu_region", TimerClass.Compute, Where.Device, 0)
+    t.stop()
+
+    records = flush_and_read(tmp_path)
+    assert all(r["type"] != "rec" for r in records)
+
+
+@requires_cuda
+def test_device_timer_stop_without_start_is_safe(tmp_path):
+    # stop() before start() must not crash (running flag guards it).
+    init_registry(tmp_path)
+    t = Timer()
+    t.stop()  # should be a no-op
+    records = flush_and_read(tmp_path)
+    assert all(r["type"] != "rec" for r in records)
+
+
+@requires_cuda
+def test_device_timer_destructor_without_stop_does_not_leak(tmp_path):
+    # If stop() is never called the destructor must release the CUDA events.
+    init_registry(tmp_path)
+    t = Timer()
+    t.start("gpu_region", TimerClass.Compute, Where.Device, 0)
+    del t  # destructor fires here — must not crash or leak events

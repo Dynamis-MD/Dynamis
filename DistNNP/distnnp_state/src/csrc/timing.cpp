@@ -43,14 +43,6 @@ const char* timer_class_str(TimerClass cls) {
     return "other";
 }
 
-const char* where_str(Where where) {
-    switch (where) {
-        case Where::Host:   return "host";
-        case Where::Device: return "device";
-    }
-    return "host";
-}
-
 void write_line(int fd, const std::string& line) {
     const char* p = line.data();
     size_t remaining = line.size();
@@ -75,9 +67,10 @@ TimingRegistry& TimingRegistry::instance() {
 void TimingRegistry::init(uint32_t rank_, uint32_t local_rank_, uint32_t world_size_,
                           const std::string& run_id_, int32_t device_id_,
                           const std::string& output_dir_) {
-    if (fd_ >= 0) { close(fd_); fd_ = -1; }
+    if (fd >= 0) { close(fd); fd = -1; }
     call_order.clear();
     call_order_seen.clear();
+    device_records.clear();
 
     rank = rank_;
     local_rank = local_rank_;
@@ -99,8 +92,8 @@ void TimingRegistry::init(uint32_t rank_, uint32_t local_rank_, uint32_t world_s
             throw std::runtime_error("timing: failed to create output dir: " + output_dir);
     }
     std::string path = output_dir + "/timing_rank" + std::to_string(rank) + ".jsonl";
-    fd_ = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd_ < 0)
+    fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
         throw std::runtime_error("timing: failed to open " + path + ": " + strerror(errno));
 
     std::ostringstream meta;
@@ -115,20 +108,14 @@ void TimingRegistry::init(uint32_t rank_, uint32_t local_rank_, uint32_t world_s
          << ",\"device_id\":" << device_id
          << ",\"host\":\"" << hostname << "\""
          << "}\n";
-    write_line(fd_, meta.str());
+    write_line(fd, meta.str());
 }
 
-void TimingRegistry::set_level(Level lvl) {
-    level = lvl;
-}
+void TimingRegistry::set_level(Level lvl) { level = lvl; }
 
-bool TimingRegistry::enabled() const {
-    return level != Level::Off;
-}
+bool TimingRegistry::enabled() const { return level != Level::Off; }
 
-void TimingRegistry::set_step(uint64_t s) {
-    step = s;
-}
+void TimingRegistry::set_step(uint64_t s) { step = s; }
 
 void TimingRegistry::append(const std::string& key, TimerClass cls, Where where, double time_us) {
     if (!enabled()) return;
@@ -145,16 +132,62 @@ void TimingRegistry::append(const std::string& key, TimerClass cls, Where where,
          << ",\"step\":" << step
          << ",\"key\":\"" << key << "\""
          << ",\"class\":\"" << timer_class_str(cls) << "\""
-         << ",\"where\":\"" << where_str(where) << "\""
+         << ",\"where\":\"host\""
          << ",\"time_us\":" << time_buf
          << "}\n";
-    write_line(fd_, line.str());
+    write_line(fd, line.str());
+}
+
+void TimingRegistry::append_device(const std::string& key, TimerClass cls,
+                                    cudaEvent_t ev_start, cudaEvent_t ev_stop) {
+    if (!enabled()) {
+        // Timing was disabled between start() and stop(); discard the events.
+        cudaEventDestroy(ev_start);
+        cudaEventDestroy(ev_stop);
+        return;
+    }
+
+    if (call_order_seen.find(key) == call_order_seen.end()) {
+        call_order.push_back(key);
+        call_order_seen.insert(key);
+    }
+
+    device_records.push_back({key, cls, step, ev_start, ev_stop});
 }
 
 void TimingRegistry::flush() {
-    if (fd_ < 0) return;
+    if (fd < 0) return;
 
-    // Write call_order as a footer record so post-processing can reconstruct the pipeline order.
+    // Read all pending device records. Swapping out first means any Timer::stop()
+    // calls that race with flush() (unlikely at end-of-run but defensive) don't
+    // corrupt the iteration we're about to do.
+    std::vector<PendingDeviceRecord> pending;
+    pending.swap(device_records);
+
+    for (auto& rec : pending) {
+        // Block until the stop event has been reached on the GPU.
+        cudaEventSynchronize(rec.ev_stop);
+
+        float ms = 0.0f;
+        cudaEventElapsedTime(&ms, rec.ev_start, rec.ev_stop);
+
+        cudaEventDestroy(rec.ev_start);
+        cudaEventDestroy(rec.ev_stop);
+
+        char time_buf[32];
+        snprintf(time_buf, sizeof(time_buf), "%.2f", static_cast<double>(ms) * 1000.0);
+        std::ostringstream line;
+        line << "{\"type\":\"rec\""
+             << ",\"step\":" << rec.step
+             << ",\"key\":\"" << rec.key << "\""
+             << ",\"class\":\"" << timer_class_str(rec.cls) << "\""
+             << ",\"where\":\"device\""
+             << ",\"time_us\":" << time_buf
+             << "}\n";
+        write_line(fd, line.str());
+    }
+
+    // Write call_order footer so post-processing can reconstruct the pipeline.
     std::ostringstream co;
     co << "{\"type\":\"call_order\",\"order\":[";
     for (size_t i = 0; i < call_order.size(); ++i) {
@@ -162,26 +195,57 @@ void TimingRegistry::flush() {
         co << "\"" << call_order[i] << "\"";
     }
     co << "]}\n";
-    write_line(fd_, co.str());
-    close(fd_);
-    fd_ = -1;
+    write_line(fd, co.str());
+    close(fd);
+    fd = -1;
 }
 
-void Timer::start(const std::string& key_, TimerClass cls_, Where where_, void* /*stream*/) {
+// ---------------------------------------------------------------------------
+// Timer
+// ---------------------------------------------------------------------------
+
+Timer::~Timer() {
+    // If start() was called but stop() never was, the events were never transferred
+    // to the registry — destroy them here to avoid leaking CUDA resources.
+    if (ev_start) { cudaEventDestroy(ev_start); ev_start = nullptr; }
+    if (ev_stop)  { cudaEventDestroy(ev_stop);  ev_stop  = nullptr; }
+}
+
+void Timer::start(const std::string& key_, TimerClass cls_, Where where_, cudaStream_t stream_) {
     if (!TimingRegistry::instance().enabled()) return;
     key = key_;
     cls = cls_;
     where = where_;
     running = true;
-    t0 = std::chrono::high_resolution_clock::now();
+
+    if (where == Where::Device) {
+        // Create fresh events each measurement so that a reused Timer doesn't
+        // stomp events that are still pending in the registry from a prior stop().
+        cudaEventCreate(&ev_start);
+        cudaEventCreate(&ev_stop);
+        stream = stream_;
+        cudaEventRecord(ev_start, stream);
+    } else {
+        t0 = std::chrono::high_resolution_clock::now();
+    }
 }
 
 void Timer::stop() {
     if (!running) return;
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double time_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
-    TimingRegistry::instance().append(key, cls, where, time_us);
     running = false;
+
+    if (where == Where::Device) {
+        cudaEventRecord(ev_stop, stream);
+        // Transfer ownership of the event pair to the registry for deferred read.
+        // Set pointers to nullptr so the destructor doesn't double-free them.
+        TimingRegistry::instance().append_device(key, cls, ev_start, ev_stop);
+        ev_start = nullptr;
+        ev_stop  = nullptr;
+    } else {
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double time_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+        TimingRegistry::instance().append(key, cls, Where::Host, time_us);
+    }
 }
 
 } // namespace distnnp_state

@@ -3,7 +3,7 @@ import torch
 # Uncomment when the communication engine is implemented
 # from distnnp_model.distnnp_model_impl import feature_push
 
-from distnnp_state import DistNNPState, PartitionMessagePassingInfo
+from distnnp_state import DistNNPState, PartitionMessagePassingInfo, Timer, TimerClass, Where
 from torch.autograd import Function
 from distnnp_model.comm.exchanger import Exchanger
 from typing import Tuple
@@ -42,9 +42,13 @@ class FeaturePushToExchange(Function):
             f"{tuple(features_to_push.shape)}"
         )
 
+        t = Timer()
+        t.start("halo_exchange", TimerClass.Comm,
+                Where.Device, features_to_push.device.index)
         received_features = exchanger.feature_push_forward(
             features_to_push, partition_info
         )
+        t.stop()
 
         return received_features
 
@@ -65,8 +69,12 @@ class FeaturePushToExchange(Function):
         input_feature_shape = ctx._features_to_push_shape
         exchanger = ctx._exchanger
 
+        t = Timer()
+        t.start("halo_exchange", TimerClass.Comm,
+                Where.Device, grad_output.device.index)
         recevied_features_grad = exchanger.feature_push_backward(
             grad_output, input_feature_shape, state.local_partition_info
         )
+        t.stop()
 
         return recevied_features_grad, None, None  # No gradients for state or exchanger
