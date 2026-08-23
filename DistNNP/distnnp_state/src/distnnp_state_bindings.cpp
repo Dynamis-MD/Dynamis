@@ -221,6 +221,7 @@ PYBIND11_MODULE(distnnp_state_impl, m) {
            py::arg("rank"), py::arg("local_rank"), py::arg("world_size"),
            py::arg("run_id"), py::arg("device_id"), py::arg("output_dir"))
       .def("set_level", &distnnp_state::TimingRegistry::set_level, py::arg("level"))
+      .def("get_level", &distnnp_state::TimingRegistry::get_level)
       .def("enabled",   &distnnp_state::TimingRegistry::enabled)
       .def("set_step",  &distnnp_state::TimingRegistry::set_step,  py::arg("step"))
       .def("flush",     &distnnp_state::TimingRegistry::flush);
@@ -245,6 +246,7 @@ PYBIND11_MODULE(distnnp_state_impl, m) {
       .def("stop", &distnnp_state::Timer::stop)
       .def_static("set_level", &distnnp_state::Timer::set_level, py::arg("level"))
       .def_static("enabled",   &distnnp_state::Timer::enabled)
+      .def_static("level",     &distnnp_state::Timer::level)
       .def_static("set_step",  &distnnp_state::Timer::set_step,  py::arg("step"));
 
   m.def("radius_graph_pbc_counts_ex", &radius_graph_pbc_counts_ex,

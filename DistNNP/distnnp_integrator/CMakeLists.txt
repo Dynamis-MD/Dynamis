@@ -69,6 +69,15 @@ if(NOT DISTNNP_STATE_IMPL_LIBRARY)
 endif()
 message(STATUS "distnnp_state_impl library: ${DISTNNP_STATE_IMPL_LIBRARY}")
 
+# distnnp_state_impl*.so has no 'lib' prefix (Python extension naming), so a
+# bare target_link_libraries(... ${DISTNNP_STATE_IMPL_LIBRARY}) gets rewritten
+# by CMake into "-ldistnnp_state_impl...", which the linker then hunts for as
+# "libdistnnp_state_impl....so" and never finds. An IMPORTED target pins the
+# exact file instead of letting CMake guess a library name from the path.
+add_library(distnnp_state_impl SHARED IMPORTED)
+set_target_properties(distnnp_state_impl PROPERTIES
+    IMPORTED_LOCATION "${DISTNNP_STATE_IMPL_LIBRARY}")
+
 find_library(TORCH_PYTHON_LIBRARY
   torch_python
   HINTS

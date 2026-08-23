@@ -117,6 +117,8 @@ void TimingRegistry::init(uint32_t rank_, uint32_t local_rank_, uint32_t world_s
 
 void TimingRegistry::set_level(Level lvl) { level = lvl; }
 
+Level TimingRegistry::get_level() const { return level; }
+
 bool TimingRegistry::enabled() const { return level != Level::Off; }
 
 void TimingRegistry::set_step(uint64_t s) { step = s; }

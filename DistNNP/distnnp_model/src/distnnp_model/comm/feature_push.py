@@ -1,12 +1,27 @@
 import torch
+import torch.distributed as dist
 
 # Uncomment when the communication engine is implemented
 # from distnnp_model.distnnp_model_impl import feature_push
 
-from distnnp_state import DistNNPState, PartitionMessagePassingInfo, Timer, TimerClass, Where
+from distnnp_state import DistNNPState, PartitionMessagePassingInfo, Timer, TimerClass, Where, Level
 from torch.autograd import Function
 from distnnp_model.comm.exchanger import Exchanger
 from typing import Tuple
+
+
+def _wait_for_peers() -> None:
+    """At Level.Detail, time a barrier immediately before the collective so
+    load imbalance is attributed to TimerClass.Wait instead of silently
+    inflating the halo_exchange Comm measurement (see TIMING-PLAN.md)."""
+    if Timer.level() != Level.Detail:
+        return
+    if not dist.is_initialized() or dist.get_world_size() == 1:
+        return
+    wt = Timer()
+    wt.start("halo_exchange_wait", TimerClass.Wait, Where.Host)
+    dist.barrier()
+    wt.stop()
 
 
 class FeaturePushToExchange(Function):
@@ -42,6 +57,8 @@ class FeaturePushToExchange(Function):
             f"{tuple(features_to_push.shape)}"
         )
 
+        _wait_for_peers()
+
         t = Timer()
         t.start("halo_exchange", TimerClass.Comm,
                 Where.Device, features_to_push.device.index)
@@ -68,6 +85,8 @@ class FeaturePushToExchange(Function):
         state = ctx._state
         input_feature_shape = ctx._features_to_push_shape
         exchanger = ctx._exchanger
+
+        _wait_for_peers()
 
         t = Timer()
         t.start("halo_exchange", TimerClass.Comm,

@@ -35,6 +35,8 @@ POSSIBLE_PARTITIONERS_TYPES = Union[
 
 VALID_PARTITION_ALGORITHMS = ["simple", "kdtree", "sfc_morton", "sfc_hilbert"]
 
+TIMING_LEVELS = {"off": Level.Off, "basic": Level.Basic, "detail": Level.Detail}
+
 
 # Typing check if integrator is one of the available integrators
 def check_integrator(integrator):
@@ -79,6 +81,13 @@ class SimulatorConfig:
 
     # Distributed backend
     backend: str = "nccl"  # PyTorch distributed backend ("nccl" | "gloo")
+
+    # Timing
+    # Valid values: "off" | "basic" | "detail"
+    # "off": no timing records. "basic": iteration + component timers, no extra sync.
+    # "detail": adds a barrier immediately before halo_exchange (TimerClass.Wait) to
+    # separate load-imbalance wait time from real communication time — perturbs the run.
+    timing_level: Literal["off", "basic", "detail"] = "basic"
     """
     Args:
         timestep_fs (float): Integration timestep in femtoseconds.
@@ -99,6 +108,9 @@ class SimulatorConfig:
         log_interval (int): Number of steps between logging energy/timing information.
         writer_buffer_size (int): Maximum number of snapshots held in memory before submit() blocks.
         backend (str): PyTorch distributed backend to use ("nccl" or "gloo").
+        timing_level (str): Timing detail ("off", "basic", "detail"). "detail" adds a
+            pre-collective barrier (TimerClass.Wait) to separate load-imbalance wait
+            time from communication time, at the cost of perturbing the run.
     """
 
 
@@ -137,7 +149,7 @@ class Simulator:
             device_id,
             config.output_dir,
         )
-        Timer.set_level(Level.Basic)
+        Timer.set_level(TIMING_LEVELS[config.timing_level])
         self.timer = Timer()
 
     def _get_partitioner(self) -> POSSIBLE_PARTITIONERS_TYPES:

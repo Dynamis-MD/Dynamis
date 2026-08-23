@@ -22,6 +22,7 @@ public:
     static TimingRegistry& instance();
 
     void set_level(Level level);
+    Level get_level() const;
     bool enabled() const;
     void set_step(uint64_t step);
 
@@ -111,6 +112,7 @@ public:
 
     static void set_level(Level lvl) { TimingRegistry::instance().set_level(lvl); }
     static bool enabled()            { return TimingRegistry::instance().enabled(); }
+    static Level level()             { return TimingRegistry::instance().get_level(); }
     static void set_step(uint64_t s) { TimingRegistry::instance().set_step(s); }
 
 private:
