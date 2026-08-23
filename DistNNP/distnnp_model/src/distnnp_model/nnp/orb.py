@@ -18,12 +18,22 @@ from distnnp_state import DistNNPState, radius_graph_pbc_cuda
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 from distnnp_model.comm.exchanger import GPUDirectExchanger
 
+# missing conservative architechure params
+
+# when has_electrostatic is true the energy head is replace with a ChargeConditionedEnergyHead + LatentChargeHEad + CoulombModule(conservative regressor) (long range electrostatics)
+# use_per_atom_spins adds a per-atom spin prediction through LatentSpinHead.
+# has_charge_spin_cond or has_electrostatics adds ChargeSpinConditioner
+# has_stress (not sure how this is calculated in conservative regressor)
+
+# orb conservative_inf_omat/mpa only set has_stress = true.
+
 class ORBModel(DistNNPModel, nn.Module):
     def __init__(
         self,
-        model_name: str = "orb_v3_conservative_inf_omat",
-        device: str = "cuda",
-        precision: str = "float32-highest",
+        model_name: Literal["orb_v3_conservative_inf_omat", "orb_v3_conservative_inf_map", "orb_v3_conservative_20_omat", "orb_v3_conservative_20_mpa"],
+        # todo: v3 omol and direct
+        precision: Literal["float32-high","float32-highest", "float64"],
+        device: Literal["cuda", "cpu"] | None = None,
         **kwargs
     ):
         nn.Module.__init__(self)
@@ -33,7 +43,7 @@ class ORBModel(DistNNPModel, nn.Module):
         
         # Let the ORB factory build the model, heads, and load weights
         factory_function = getattr(pretrained, model_name)
-        self.orbff, _ = factory_function( # atoms_adapter is ignored as we use our own radius_graph_pbc_cuda, convert atom positions to AtomGrpahs
+        self.orbff, adapter = factory_function( # atoms_adapter is only used for attributes
             compile=False, 
             device=device,
             precision=precision
@@ -43,6 +53,9 @@ class ORBModel(DistNNPModel, nn.Module):
         self.num_mp_steps = self.orbff.model.num_message_passing_steps
         self.hidden_dim = self.orbff.model.gnn_stacks[0].latent_dim
 
+        self.model_radius = adapter.radius                        # default 6.0
+        self.model_max_num_neighbors = adapter.max_num_neighbors  # 120 for the inf family, 20 otherwise
+
         self._feature_exchanger = GPUDirectExchanger()
         self._atom_type_exchanger = GPUDirectExchanger()
         # One latent exchanger PER message-passing layer (dim=hidden_dim)
@@ -50,7 +63,7 @@ class ORBModel(DistNNPModel, nn.Module):
         self._latent_exchangers = [
             GPUDirectExchanger() for _ in range(self.num_mp_steps)
         ]
-        
+
     def initialize_buffers(
         self,
         partition_info,
@@ -71,7 +84,7 @@ class ORBModel(DistNNPModel, nn.Module):
                 feature_dim=self.hidden_dim, partition_info=partition_info, device=device
             )
         
-    def _build_local_atomgraph(self, atom_types, n_atoms, senders, receivers,
+    def _make_atomgraph(self, atom_types, n_atoms, senders, receivers,
                                displacement_vectors, cell, cutoff, device):
         return AtomGraphs(
             senders=senders,
@@ -95,7 +108,7 @@ class ORBModel(DistNNPModel, nn.Module):
             fix_atoms=None,
             tags=None,
             radius=cutoff,
-            max_num_neighbors=torch.tensor([1000], device=device),
+            max_num_neighbors=torch.tensor([self.model_max_num_neighbors], device=device),
             half_supercell=False,
         )
         
@@ -131,8 +144,8 @@ class ORBModel(DistNNPModel, nn.Module):
                     },
                 )(),
                 radius=sim_config.cutoff,
-                max_num_neighbors_threshold=0,
-                enforce_max_neighbors_strictly=False,
+                max_num_neighbors_threshold=self.model_max_num_neighbors,
+                enforce_max_neighbors_strictly=True,
             )
 
         if os.environ.get("ORB_DEBUG") == "1":
@@ -145,6 +158,7 @@ class ORBModel(DistNNPModel, nn.Module):
                 co.to(positions.dtype), sim_config.cell.squeeze(0).to(positions.dtype)
             )
             return positions[ei[1]] - positions[ei[0]] - shifts
+        
         #  Orb's AttentionInteractionNetwork does segment_sum over senders and receivers, so message passing is effectively undirected
         mp_mask = (edge_index[0] < n_local_atoms) | (edge_index[1] < n_local_atoms) # is this edge's sender local or edge's receiver local
         mp_edge_index = edge_index[:, mp_mask] # drops any edge connecting atoms in my halo but not local
@@ -161,7 +175,7 @@ class ORBModel(DistNNPModel, nn.Module):
         # featurize_nodes for orb_v3 (use_embedding=True) calls atom_emb(batch) which looks up "atomic_numbers" from node_features. 
         # featurize_edges reads "vectors" from edge_features. 
 
-        atomgraph = self._build_local_atomgraph(
+        atomgraph = self._make_atomgraph(
             atom_types, n_atoms, senders, receivers,
             displacement_vectors, sim_config.cell, sim_config.cutoff, self.device,
         )
@@ -183,7 +197,7 @@ class ORBModel(DistNNPModel, nn.Module):
         nodes, edges = gns._encoder(node_features, edge_features)
         
         # calculate cutoffs for attention masking, with deafult to 6A
-        edge_cutoff = get_cutoff(displacement_vectors.norm(dim=-1))
+        edge_cutoff = get_cutoff(displacement_vectors.norm(dim=-1), r_max=self.model_radius)
 
         
         for i, gnn in enumerate(gns.gnn_stacks):
@@ -226,27 +240,30 @@ class ORBModel(DistNNPModel, nn.Module):
             node_targets={}, edge_targets={}, system_targets={},
             system_id=None, fix_atoms=None, tags=None,
             radius=sim_config.cutoff,
-            max_num_neighbors=torch.tensor([1000], device=self.device),
+            max_num_neighbors=torch.tensor([self.model_max_num_neighbors], device=self.device),
             half_supercell=False,
         )
-
+        # 1. EnergyHead: below replicates the energyhead.forward() call
         energy_head = self.orbff.heads[self.orbff.energy_name]
 
         world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-        local_emb_sum = local_node_embeddings.sum(dim=0, keepdim=True)  # [1, latent]
+        local_emb_sum = local_node_embeddings.sum(dim=0, keepdim=True)  # [1, latent_dim]
         local_count = torch.tensor(
             [float(n_local_atoms)], device=local_emb_sum.device, dtype=local_emb_sum.dtype
         )
-        if world_size > 1:
+        # dist_nn.all_reduce is an autograd function 
+        if world_size > 1: 
             global_emb_sum = dist_nn.all_reduce(local_emb_sum, op=dist.ReduceOp.SUM)
             global_count = dist_nn.all_reduce(local_count, op=dist.ReduceOp.SUM)
         else:
             global_emb_sum, global_count = local_emb_sum, local_count
 
-        global_mean = global_emb_sum / global_count  # [1, latent]
+        global_mean = global_emb_sum / global_count  # [1, latent_dim]
 
-        mlp_out = energy_head.mlp(global_mean).squeeze(-1)          # [1]
+        mlp_out = energy_head.mlp(global_mean).squeeze(-1)   
+        
+        # look at _denormalize in forcefield_heads.py
         interaction_global = energy_head.normalizer.inverse(mlp_out)
         if getattr(energy_head, "atom_avg", False):
             interaction_global = interaction_global * global_count
@@ -254,17 +271,17 @@ class ORBModel(DistNNPModel, nn.Module):
         # sum over ranks == interaction_global.
         interaction_contribution = interaction_global / world_size
 
-
+        # 2. Pair repulsion
         zbl_local = displacement_vectors.new_zeros(())
         if getattr(self.orbff, "pair_repulsion", False):
             # RECEIVER-local edge set, not the union MP graph: one rank per pair.
-            zbl_graph = self._build_local_atomgraph(
+            zbl_graph = self._make_atomgraph(
                 atom_types, n_atoms, zbl_edge_index[0], zbl_edge_index[1],
                 zbl_displacement, sim_config.cell, sim_config.cutoff, self.device,
             )
             zbl_local = self.orbff.pair_repulsion_fn(zbl_graph)["energy"].squeeze()
 
-        # ---- Element reference: local and rank decomposable. Constant w.r.t. positions, so it adds no force.
+        # 3. Atom reference energy: lookup table
         reference_local = energy_head.reference(
             local_graph.atomic_numbers, local_graph.n_node
         ).squeeze()
@@ -289,7 +306,7 @@ class ORBModel(DistNNPModel, nn.Module):
                     sim_config.cell.squeeze(0).to(positions.dtype),
                 )
                 _fdisp = positions[_fr] - positions[_fs] - _fshift
-                _fgraph = self._build_local_atomgraph(
+                _fgraph = self._make_atomgraph(
                     atom_types, n_atoms, _fs, _fr, _fdisp,
                     sim_config.cell, sim_config.cutoff, self.device,
                 )
