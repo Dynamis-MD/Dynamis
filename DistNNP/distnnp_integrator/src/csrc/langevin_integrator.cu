@@ -14,14 +14,15 @@ namespace
           const float gamma,
           const float kT,
           const float dt,
-          const int num_atoms)
+          const int num_elements)
   {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < num_atoms) {
-      float m = masses[idx];
+    if (idx < num_elements) {
+      const int atom_idx = idx / 3;
+      float m = masses[atom_idx];
       float c1 = 1.0f - 0.5f * gamma * dt;
       float c2 = sqrtf(gamma * kT * dt / m);
-      
+
       velocities[idx] = velocities[idx] * c1 + 0.5f * (forces[idx] / m) * dt + c2 * noise[idx];
       positions[idx] += velocities[idx] * dt;
     }
@@ -35,11 +36,12 @@ namespace
           const float gamma,
           const float kT,
           const float dt,
-          const int num_atoms)
+          const int num_elements)
   {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < num_atoms) {
-      float m = masses[idx];
+    if (idx < num_elements) {
+      const int atom_idx = idx / 3;
+      float m = masses[atom_idx];
       float c3 = 1.0f / (1.0f + 0.5f * gamma * dt);
       float c2 = sqrtf(gamma * kT * dt / m);
 
@@ -51,13 +53,13 @@ namespace
 namespace distnnp_integrator
 {
   void LangevinIntegrator::halfstep1(
-          torch::Tensor &positions, 
-          torch::Tensor &velocities, 
-          const torch::Tensor &forces, 
-          const torch::Tensor &masses, 
-          const torch::Tensor &noise, 
-          const float gamma, 
-          const float kT, 
+          torch::Tensor &positions,
+          torch::Tensor &velocities,
+          const torch::Tensor &forces,
+          const torch::Tensor &masses,
+          const torch::Tensor &noise,
+          const float gamma,
+          const float kT,
           const float dt)
   {
     assert(positions.is_contiguous() && positions.is_cuda());
@@ -72,9 +74,10 @@ namespace distnnp_integrator
     assert(positions.device() == noise.device());
 
     int num_atoms = positions.size(0);
+    int num_elements = num_atoms * 3;
 
     int threads = 256;
-    int blocks = (num_atoms + threads - 1) / threads;
+    int blocks = (num_elements + threads - 1) / threads;
 
     auto device_index = positions.device().index();
     auto stream = at::cuda::getCurrentCUDAStream(device_index);
@@ -88,7 +91,7 @@ namespace distnnp_integrator
         gamma,
         kT,
         dt,
-        num_atoms);
+        num_elements);
 
     CUDACHECK(cudaGetLastError());
   }
@@ -112,9 +115,10 @@ namespace distnnp_integrator
     assert(velocities.device() == noise.device());
 
     int num_atoms = velocities.size(0);
+    int num_elements = num_atoms * 3;
 
     int threads = 256;
-    int blocks = (num_atoms + threads - 1) / threads;
+    int blocks = (num_elements + threads - 1) / threads;
 
     auto device_index = velocities.device().index();
     auto stream = at::cuda::getCurrentCUDAStream(device_index);
@@ -127,7 +131,7 @@ namespace distnnp_integrator
         gamma,
         kT,
         dt,
-        num_atoms);
+        num_elements);
 
     CUDACHECK(cudaGetLastError());
   }

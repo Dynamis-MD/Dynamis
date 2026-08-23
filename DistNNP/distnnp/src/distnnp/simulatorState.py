@@ -8,7 +8,6 @@ from distnnp_state import (
     SimpleSpatialPartitioner,
     KDTreePartitioner,
 )
-from distnnp_state.masses import TORCH_ATOMIC_MASSES
 import torch
 import torch.distributed as dist
 from typing import Union, Literal, Optional
@@ -43,20 +42,19 @@ class SimState:
         partitioner.build_halo_maps(
             partition_info, molecular_system, self.dist_env_obj, simulation_config
         )
-        self.parition_info = partition_info
+        self.partition_info = partition_info
 
         self.global_molecular_info = molecular_system
-        self._local_molecular_info = self.setup_mass_and_forces(
-            partition_info=partition_info,
-            molecular_system=molecular_system,
-        )
 
         self._state = DistNNPState()
         self._state.dist_env = self.dist_env_obj
         self._state.sim_config = simulation_config
         self._state.global_molecular_info = molecular_system
         self._state.local_partition_info = partition_info
-        self._state.local_molecular_info = self._local_molecular_info
+        self._state.local_molecular_info = self.setup_mass_and_forces(
+            partition_info=partition_info,
+            molecular_system=molecular_system,
+        )
 
     def setup_mass_and_forces(self, partition_info, molecular_system):
         local_molecular_info = MolecularInfo()
@@ -66,16 +64,10 @@ class SimState:
         local_molecular_info.atom_velocities = molecular_system.atom_velocities[
             partition_info.partition_indices
         ]
-        local_molecular_info.atom_masses = molecular_system.atom_masses[
-            partition_info.partition_indices
-        ]
         local_molecular_info.atom_types = molecular_system.atom_types[
             partition_info.partition_indices
         ]
         num_local_atoms = local_molecular_info.atom_positions.shape[0]
-        local_molecular_info.atom_forces = torch.zeros(
-            num_local_atoms, 3, device=self.device
-        )
         local_molecular_info.num_atoms = num_local_atoms
 
         return local_molecular_info
@@ -105,7 +97,7 @@ class SimState:
 
     @property
     def pos(self) -> torch.Tensor:
-        return self._local_molecular_info.atom_positions
+        return self._state.local_molecular_info.atom_positions
 
     @property
     def vel(self) -> torch.Tensor:
@@ -121,7 +113,7 @@ class SimState:
 
     @property
     def local_state(self) -> MolecularInfo:
-        return self._local_molecular_info
+        return self._state.local_molecular_info
 
     @property
     def local_partition_info(self) -> PartitionMessagePassingInfo:
@@ -167,9 +159,9 @@ class SimState:
                 [g is not None for g in gathered]
             ), "Gather failed: some ranks did not contribute data."
 
-            all_indices = torch.cat([g["indices"] for g in gathered])  # type: ignore # [N]
-            all_positions = torch.cat([g["positions"] for g in gathered])  # type: ignore  # [N, 3]
-            all_velocities = torch.cat([g["velocities"] for g in gathered])  # type: ignore  # [N, 3]
+            all_indices = torch.cat([g["indices"].to(self.device) for g in gathered])  # type: ignore # [N]
+            all_positions = torch.cat([g["positions"].to(self.device) for g in gathered])  # type: ignore  # [N, 3]
+            all_velocities = torch.cat([g["velocities"].to(self.device) for g in gathered])  # type: ignore  # [N, 3]
 
             # Restore canonical atom order (0 … N-1).
             sort_order = torch.argsort(all_indices)
@@ -185,7 +177,8 @@ class SimState:
 
         self._state.local_partition_info = new_partition_info
         self._state.global_molecular_info = global_mol_info
+        self.parition_info = new_partition_info
 
-        self.setup_mass_and_forces(
+        self._state.local_molecular_info = self.setup_mass_and_forces(
             partition_info=new_partition_info, molecular_system=global_mol_info
         )

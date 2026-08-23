@@ -7,8 +7,8 @@
 //      → builds graph at cutoff, computes edge_counts, stores edge_index
 
 #include "distnnp_state/partitioner.hpp"
-#include "distnnp_state/kdtree_cuda.hpp"
-#include "distnnp_state/radius_pbc.hpp"
+#include "distnnp_state/kdtree.hpp"
+#include "distnnp_state/radius_graph.hpp"
 
 namespace distnnp_state
 {
@@ -91,6 +91,7 @@ static PartitionMessagePassingInfo do_partition(
     info.partition_id = labels;
 
     // Extract local atoms for rank R (non-contiguous partition)
+    info.atom_counts = torch::bincount(labels, /*weights=*/{}, /*minlength=*/env.world_size);
     auto my_mask = labels.eq(R);
     auto my_indices = torch::nonzero(my_mask).squeeze(-1);
     int64_t num_local = my_indices.size(0);

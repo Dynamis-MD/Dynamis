@@ -18,8 +18,7 @@ namespace
     if (idx < num_atoms * 3)
     {
       const int atom_idx = idx / 3;
-      // Update velocity: v(t + dt) = v(t) + (F(t) / m) * dt
-      velocities[idx] += (forces[idx] / masses[atom_idx]) * dt;
+      velocities[idx] += (forces[idx] / masses[idx / 3]) * dt;
       // Update position: x(t + dt) = x(t) + v(t + dt) * dt
       positions[idx] += velocities[idx] * dt;
     }

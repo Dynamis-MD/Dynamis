@@ -20,6 +20,9 @@ pytestmark = pytest.mark.skipif(
     reason="Need at least 2 CUDA GPUs",
 )
 
+# Local atom count per rank for the 2-rank test topology.
+N_LOCAL = (50, 60)
+
 
 def _build_partition_info(rank, world_size, device):
     """Build a PartitionMessagePassingInfo for a 2-rank test topology.
@@ -31,6 +34,13 @@ def _build_partition_info(rank, world_size, device):
         matrix[r][c] = number of atoms rank r sends to rank c
     """
     info = PartitionMessagePassingInfo()
+
+    # Local (owned) atom indices for this partition. Production partitioners
+    # always populate this; GPUDirectExchanger.setup_exchanger reads
+    # len(partition_indices) to size the IPC halo buffer.
+    info.partition_indices = torch.arange(
+        N_LOCAL[rank], dtype=torch.int64, device=device
+    )
 
     # [world_size, world_size]: matrix[sender][receiver] = atom count
     gsrm = torch.zeros(world_size, world_size, dtype=torch.int64, device=device)
@@ -67,9 +77,8 @@ def _worker_forward_backward(rank, world_size, result_dict):
         world_size=world_size,
     )
 
-    N_local = [50, 60]
     F = 16
-    n_local = N_local[rank]
+    n_local = N_LOCAL[rank]
 
     partition_info = _build_partition_info(rank, world_size, device)
 
@@ -156,9 +165,8 @@ def _worker_reset_buffers(rank, world_size, result_dict):
         world_size=world_size,
     )
 
-    N_local = [50, 60]
     F = 8
-    n_local = N_local[rank]
+    n_local = N_LOCAL[rank]
 
     partition_info = _build_partition_info(rank, world_size, device)
     total_recv = int(partition_info.global_send_recv_matrix.sum(dim=0)[rank].item())
@@ -209,9 +217,8 @@ def _worker_backward_without_forward(rank, world_size, result_dict):
         world_size=world_size,
     )
 
-    N_local = [50, 60]
     F = 8
-    n_local = N_local[rank]
+    n_local = N_LOCAL[rank]
     total_recv = 6 if rank == 0 else 5
 
     partition_info = _build_partition_info(rank, world_size, device)

@@ -1,4 +1,4 @@
-// radius_pbc.cu — CUDA cell-list radius graph with selective PBC tiling
+// radius_graph_kernels.cu — CUDA cell-list radius graph with selective PBC tiling
 //
 // Stage A: Selective PBC replication (only boundary atoms near cell faces)
 // Stage B: Cell-list construction + two-pass neighbor search
@@ -257,41 +257,122 @@ __global__ void count_neighbors_kernel(
     neighbor_counts[tidx] = count;
 }
 
-// Kernel B4: Write neighbor edges
-__global__ void write_neighbors_kernel(
-    const float* __restrict__ target_pos,   // [N, 3]
-    const float* __restrict__ source_pos,   // [M, 3]
-    const int* __restrict__ target_cell_x,  // [N]
-    const int* __restrict__ target_cell_y,  // [N]
-    const int* __restrict__ target_cell_z,  // [N]
-    const int64_t* __restrict__ source_orig_idx, // [M]
-    const float* __restrict__ source_cell_shift, // [M, 3]
-    const int* __restrict__ cell_start,
-    const int* __restrict__ cell_end,
+// ===== Stage B4: warp-per-atom neighbor-write kernels =====
+//
+// One templated kernel write_neighbors_kernel<USE_SHM> (defined below the constants):
+// warp-per-atom scan, with nosort (no shm) vs collect (shm + coalesced) write strategies
+// chosen by the B4 dispatch in radius_graph_pbc_cuda_impl_ex. Neighbor counting (Stage B3)
+// stays one-thread-per-atom (count_neighbors_kernel above) — see its dispatch comment.
+
+// nosort path: 8 warps/block (256 threads), no shared memory → full occupancy.
+static constexpr int WARPS_PER_BLOCK_WARP = 8;   // BLOCK_SIZE == 256 == 8*32
+
+// collect path: 4 warps/block (128 threads) + per-warp shm scratch (dist + src).
+// shm per block = WARPS_PER_BLOCK_COLLECT * MAX_NEIGHBORS_BUF_COLLECT * (4B + 4B)
+//   = 4 * 256 * 8 = 8 KB → 12 blocks/SM → 48/64 warps = 75% occupancy (A100).
+// Dispatch guard max_nbrs_pre < MAX_NEIGHBORS_BUF_COLLECT ensures the buffer never overflows.
+static constexpr int MAX_NEIGHBORS_BUF_COLLECT = 256;
+static constexpr int WARPS_PER_BLOCK_COLLECT   = 4;
+static constexpr int BLOCK_SIZE_COLLECT        = 32 * WARPS_PER_BLOCK_COLLECT;  // 128
+
+
+// Shared edge-write helper: emit one (src → tgt) edge, applying the PBC cell-shift
+// correction for the target/source wrap offsets (frac_floor). Both write paths go
+// through here so the edge layout lives in exactly one place.
+__device__ __forceinline__ void emit_edge(
+    int64_t out, int s, int64_t tgt_orig, float d2,
+    float tfx, float tfy, float tfz,
+    const int64_t* __restrict__ source_orig_idx,
+    const float*   __restrict__ source_cell_shift,
+    const float*   __restrict__ frac_floor,
+    int64_t* __restrict__ edge_src,
+    int64_t* __restrict__ edge_tgt,
+    float*   __restrict__ edge_cell_shift_out,
+    float*   __restrict__ edge_dist_sq)
+{
+    int64_t src_orig = source_orig_idx[s];
+    float sfx = frac_floor[src_orig * 3 + 0];
+    float sfy = frac_floor[src_orig * 3 + 1];
+    float sfz = frac_floor[src_orig * 3 + 2];
+    edge_src[out]     = src_orig;
+    edge_tgt[out]     = tgt_orig;
+    edge_dist_sq[out] = d2;
+    edge_cell_shift_out[out * 3 + 0] = source_cell_shift[s * 3 + 0] + tfx - sfx;
+    edge_cell_shift_out[out * 3 + 1] = source_cell_shift[s * 3 + 1] + tfy - sfy;
+    edge_cell_shift_out[out * 3 + 2] = source_cell_shift[s * 3 + 2] + tfz - sfz;
+}
+
+// Kernel B4: warp-per-atom neighbor write (max_num_neighbors == 0).
+//
+// One warp (32 threads) handles one target atom, striding lanes through each of the
+// (2*padding+1)^3 neighbor cells (s = cell_start + it*32 + lane), so active lanes load
+// contiguous source atoms. The Phase-A scan (cell loop + distance test + ballot) is
+// identical for both strategies; the USE_SHM template parameter selects how the found
+// neighbors are emitted — the compiler specializes one kernel per value, no runtime cost:
+//
+//   USE_SHM == false (nosort) : write inline during the scan via ballot+popc scatter.
+//     No shared memory → full occupancy. Best for dense systems (>=5 atoms/cell).
+//   USE_SHM == true  (collect): stash (dist, src) into a per-warp shm buffer, then in
+//     Phase C write stride-32 (all 32 lanes active → fully coalesced). 8KB shm → 75%
+//     occupancy. Best for sparse systems (<5 atoms/cell, write-bound).
+//
+// The collect dispatch guarantees degree < MAX_NEIGHBORS_BUF_COLLECT (buffer never overflows).
+template<bool USE_SHM>
+__global__ void __launch_bounds__(USE_SHM ? BLOCK_SIZE_COLLECT : BLOCK_SIZE)
+write_neighbors_kernel(
+    const float*   __restrict__ target_pos,
+    const float*   __restrict__ source_pos,
+    const int*     __restrict__ target_cell_x,
+    const int*     __restrict__ target_cell_y,
+    const int*     __restrict__ target_cell_z,
+    const int64_t* __restrict__ source_orig_idx,
+    const float*   __restrict__ source_cell_shift,
+    const int*     __restrict__ cell_start,
+    const int*     __restrict__ cell_end,
     int grid_nx, int grid_ny, int grid_nz,
     int padding_size,
     float radius_sq,
     int N,
-    const int64_t* __restrict__ neighbor_offsets, // [N] exclusive prefix sum
-    int64_t* __restrict__ edge_src,          // [E] source original idx
-    int64_t* __restrict__ edge_tgt,          // [E] target idx
-    float* __restrict__ edge_cell_shift,     // [E, 3]
-    float* __restrict__ edge_dist_sq         // [E]
+    const int*     __restrict__ neighbor_counts,    // collect Phase-C count (== degree); unused when !USE_SHM
+    const int64_t* __restrict__ neighbor_offsets,
+    const int64_t* __restrict__ target_sort_perm,   // sorted_idx → original atom id
+    const float*   __restrict__ frac_floor,         // [N_orig, 3] PBC wrap correction
+    int64_t* __restrict__ edge_src,
+    int64_t* __restrict__ edge_tgt,
+    float*   __restrict__ edge_cell_shift_out,      // [E, 3]
+    float*   __restrict__ edge_dist_sq
 ) {
-    int tidx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tidx >= N) return;
+    int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    int lane    = threadIdx.x & 31;
+    if (warp_id >= N) return;
 
-    float tx = target_pos[tidx * 3 + 0];
-    float ty = target_pos[tidx * 3 + 1];
-    float tz = target_pos[tidx * 3 + 2];
+    // collect: per-warp shared-memory scratch. nosort launches with 0 dynamic shm and
+    // never touches this (all accesses guarded by `if constexpr (USE_SHM)`).
+    extern __shared__ float smem_c[];
+    float* s_dist = nullptr;
+    int*   s_src  = nullptr;
+    if constexpr (USE_SHM) {
+        int* smem_c_int = (int*)(smem_c + WARPS_PER_BLOCK_COLLECT * MAX_NEIGHBORS_BUF_COLLECT);
+        int warp_local = threadIdx.x >> 5;
+        s_dist = smem_c     + warp_local * MAX_NEIGHBORS_BUF_COLLECT;
+        s_src  = smem_c_int + warp_local * MAX_NEIGHBORS_BUF_COLLECT;
+    }
 
-    int tcx = target_cell_x[tidx];
-    int tcy = target_cell_y[tidx];
-    int tcz = target_cell_z[tidx];
+    int64_t tgt_orig = target_sort_perm[warp_id];
+    float tx = target_pos[warp_id * 3 + 0];
+    float ty = target_pos[warp_id * 3 + 1];
+    float tz = target_pos[warp_id * 3 + 2];
+    int   tcx = target_cell_x[warp_id];
+    int   tcy = target_cell_y[warp_id];
+    int   tcz = target_cell_z[warp_id];
+    float tfx = frac_floor[tgt_orig * 3 + 0];
+    float tfy = frac_floor[tgt_orig * 3 + 1];
+    float tfz = frac_floor[tgt_orig * 3 + 2];
 
-    int64_t write_offset = neighbor_offsets[tidx];
-    int write_count = 0;
+    int64_t base     = neighbor_offsets[warp_id];
+    int     produced = 0;   // running count of neighbors found by this warp so far
 
+    // Phase A: scan the (2*padding+1)^3 neighbor cells.
     for (int dz = -padding_size; dz <= padding_size; dz++) {
         int nz = tcz + dz;
         if (nz < 0 || nz >= grid_nz) continue;
@@ -303,58 +384,127 @@ __global__ void write_neighbors_kernel(
                 if (nx_val < 0 || nx_val >= grid_nx) continue;
 
                 int cell_id = nx_val + ny * grid_nx + nz * grid_nx * grid_ny;
-                int start = cell_start[cell_id];
-                int end = cell_end[cell_id];
+                int cs = cell_start[cell_id];
+                int ce = cell_end[cell_id];
+                int iters = (ce - cs + 31) >> 5;
 
-                for (int s = start; s < end; s++) {
-                    float sx = source_pos[s * 3 + 0];
-                    float sy = source_pos[s * 3 + 1];
-                    float sz = source_pos[s * 3 + 2];
-
-                    float dx2 = tx - sx;
-                    float dy2 = ty - sy;
-                    float dz2 = tz - sz;
-                    float dist_sq = dx2 * dx2 + dy2 * dy2 + dz2 * dz2;
-
-                    if (dist_sq <= radius_sq && dist_sq > 1e-8f) {
-                        int64_t out = write_offset + write_count;
-                        edge_src[out] = source_orig_idx[s];
-                        edge_tgt[out] = (int64_t)tidx;
-                        edge_cell_shift[out * 3 + 0] = source_cell_shift[s * 3 + 0];
-                        edge_cell_shift[out * 3 + 1] = source_cell_shift[s * 3 + 1];
-                        edge_cell_shift[out * 3 + 2] = source_cell_shift[s * 3 + 2];
-                        edge_dist_sq[out] = dist_sq;
-                        write_count++;
+                for (int it = 0; it < iters; it++) {
+                    int s = cs + (it << 5) + lane;
+                    float d2 = 0.0f;
+                    bool is_nbr = false;
+                    if (s < ce) {
+                        float sx = source_pos[s * 3 + 0];
+                        float sy = source_pos[s * 3 + 1];
+                        float sz = source_pos[s * 3 + 2];
+                        d2 = (tx-sx)*(tx-sx) + (ty-sy)*(ty-sy) + (tz-sz)*(tz-sz);
+                        is_nbr = (d2 <= radius_sq) && (d2 > 1e-8f);
                     }
+                    uint32_t mask = __ballot_sync(0xFFFFFFFFu, is_nbr);
+                    if (is_nbr) {
+                        int local = __popc(mask & ((1u << lane) - 1));
+                        if constexpr (USE_SHM) {
+                            int store_pos = produced + local;
+                            // dispatch guarantees produced + local < MAX_NEIGHBORS_BUF_COLLECT
+                            if (store_pos < MAX_NEIGHBORS_BUF_COLLECT) {
+                                s_dist[store_pos] = d2;
+                                s_src[store_pos]  = s;
+                            }
+                        } else {
+                            emit_edge(base + produced + local, s, tgt_orig, d2,
+                                      tfx, tfy, tfz, source_orig_idx, source_cell_shift,
+                                      frac_floor, edge_src, edge_tgt,
+                                      edge_cell_shift_out, edge_dist_sq);
+                        }
+                    }
+                    produced += __popc(mask);
                 }
             }
         }
     }
+
+    if constexpr (USE_SHM) {
+        // Order Phase-A shm stores (each slot written by whichever lane owned it) before
+        // Phase C reads them across lanes (lane L reads slot L+32k, written by another
+        // lane). Without this __syncwarp(), Volta+ independent thread scheduling lets a
+        // lane read a stale slot left by the previous block's warp on this SM →
+        // a byte-exact duplicate edge.
+        __syncwarp();
+
+        // Phase C: stride-32 write → all 32 lanes active per iteration → fully coalesced.
+        int out_count = neighbor_counts[warp_id];  // == produced (B3 and Phase A agree)
+        for (int i = lane; i < out_count; i += 32) {
+            emit_edge(base + i, s_src[i], tgt_orig, s_dist[i],
+                      tfx, tfy, tfz, source_orig_idx, source_cell_shift,
+                      frac_floor, edge_src, edge_tgt,
+                      edge_cell_shift_out, edge_dist_sq);
+        }
+    }
 }
+
+// ===== Per-stage profiling helper (enabled via RADIUS_PBC_PROFILE=1) =====
+static bool s_profile = (std::getenv("RADIUS_PBC_PROFILE") != nullptr);
+struct StageClock {
+    cudaEvent_t start, stop;
+    const char* name;
+    bool active;
+    StageClock(const char* n, cudaStream_t stream) : name(n), active(s_profile) {
+        if (!active) return;
+        cudaEventCreate(&start); cudaEventCreate(&stop);
+        cudaEventRecord(start, stream);
+    }
+    float lap(cudaStream_t stream) {
+        if (!active) return 0;
+        cudaEventRecord(stop, stream);
+        cudaEventSynchronize(stop);
+        float ms = 0; cudaEventElapsedTime(&ms, start, stop);
+        printf("  %-28s: %6.2f ms\n", name, ms);
+        cudaEventRecord(start, stream);   // reset for next stage
+        return ms;
+    }
+    ~StageClock() { if (active) { cudaEventDestroy(start); cudaEventDestroy(stop); } }
+};
 
 // ===== Dispatch Function =====
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor>
-radius_graph_pbc_cuda_impl(
+// Extended internal impl. If `target_indices` is provided (non-null), only atoms
+// at those indices are used as targets (sources still come from full `pos` + PBC).
+// Output edge endpoints use global atom indices regardless.
+//
+// Returns:
+//   edge_index[2, E]            COO, global atom ids
+//   cell_shifts[E, 3]           PBC image shifts per edge
+//   num_neighbors_image[1]      int64, total edges
+//   neighbor_counts[N_target]   int32, per-target degree (in target_indices order if provided,
+//                               else atom-id order)
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+radius_graph_pbc_cuda_impl_ex(
     at::Tensor pos,       // [N, 3] float32 CUDA
     at::Tensor cell,      // [3, 3] float32
     at::Tensor pbc,       // [3] bool
     float radius,
     int64_t max_num_neighbors,
-    bool enforce_max_strictly
+    bool enforce_max_strictly,
+    c10::optional<at::Tensor> target_indices,  // [N_target] int64, nullopt = all atoms
+    bool counts_only
 ) {
     at::cuda::CUDAGuard device_guard(pos.device());
     auto stream = at::cuda::getCurrentCUDAStream();
     const int N = pos.size(0);
+    const int N_target = target_indices.has_value()
+                             ? (int)target_indices->size(0)
+                             : N;
+    StageClock clk("total", stream.stream());
 
     // Handle empty input
-    if (N == 0) {
+    if (N == 0 || N_target == 0) {
         auto opts_long = at::TensorOptions().dtype(at::kLong).device(pos.device());
         auto opts_float = at::TensorOptions().dtype(at::kFloat).device(pos.device());
+        auto opts_int = at::TensorOptions().dtype(at::kInt).device(pos.device());
         return std::make_tuple(
             at::empty({2, 0}, opts_long),
             at::empty({0, 3}, opts_float),
-            at::zeros({1}, opts_long)
+            at::zeros({1}, opts_long),
+            at::zeros({N_target}, opts_int)
         );
     }
 
@@ -479,7 +629,8 @@ radius_graph_pbc_cuda_impl(
         return std::make_tuple(
             at::empty({2, 0}, opts_long),
             at::empty({0, 3}, opts_float),
-            at::zeros({1}, opts_long)
+            at::zeros({1}, opts_long),
+            at::zeros({N_target}, opts_int)
         );
     }
 
@@ -503,6 +654,8 @@ radius_graph_pbc_cuda_impl(
     );
 
     int M = (int)total_sources; // total source atoms
+    if (s_profile) printf("  M (total source atoms)       : %d\n", M);
+    clk.lap(stream.stream());  // A: wrap + PBC images
 
     // ===== Stage B: Cell-List Neighbor Search =====
 
@@ -573,196 +726,225 @@ radius_graph_pbc_cuda_impl(
         cell_end_t.data_ptr<int>()
     );
 
-    // Assign target atoms to cells (compute their grid coords)
-    auto target_cell_ids = at::empty({N}, opts_int);
-    auto target_cell_x = at::empty({N}, opts_int);
-    auto target_cell_y = at::empty({N}, opts_int);
-    auto target_cell_z = at::empty({N}, opts_int);
+    clk.lap(stream.stream());  // B1-B2: source cell list
+
+    // Assign target atoms to cells (compute their grid coords).
+    // If target_indices provided, restrict targets to that subset (sources stay full).
+    at::Tensor target_pos_subset;
+    if (target_indices.has_value()) {
+        target_pos_subset = pos_wrapped.index_select(0, target_indices.value()).contiguous();
+    } else {
+        target_pos_subset = pos_wrapped;
+    }
 
     // Compute target cell coords on GPU via ATen (using wrapped positions)
-    auto target_grid_coords = at::floor((pos_wrapped - grid_min_t.unsqueeze(0)) * grid_res_inv).to(at::kInt);
+    auto target_grid_coords = at::floor((target_pos_subset - grid_min_t.unsqueeze(0)) * grid_res_inv).to(at::kInt);
     // Clamp
     auto grid_dims_t = at::tensor({grid_nx, grid_ny, grid_nz}, opts_int);
     target_grid_coords = at::clamp(target_grid_coords, at::tensor({0}, opts_int), grid_dims_t.unsqueeze(0) - 1);
 
-    target_cell_x = target_grid_coords.select(1, 0).contiguous();
-    target_cell_y = target_grid_coords.select(1, 1).contiguous();
-    target_cell_z = target_grid_coords.select(1, 2).contiguous();
+    at::Tensor target_cell_x = target_grid_coords.select(1, 0).contiguous();
+    at::Tensor target_cell_y = target_grid_coords.select(1, 1).contiguous();
+    at::Tensor target_cell_z = target_grid_coords.select(1, 2).contiguous();
 
-    // B3: Count neighbors
+    // Sort target atoms by cell ID so adjacent warp lanes access spatially adjacent atoms.
+    // Gives B3 and B4 the same cache-locality benefit that sorting source atoms gives B1-B2:
+    // each warp's 32 threads access the same ~125 neighboring cells → cell_start/end arrays
+    // stay in L1/L2 rather than being evicted between threads.
+    // edge_tgt values written by B4 are in sorted-target-space; remapped to original
+    // atom indices just before the cell-shift correction (after Stage C).
+    auto tgt_flat_ids   = target_cell_x.to(at::kLong)
+                          + target_cell_y.to(at::kLong) * grid_nx
+                          + target_cell_z.to(at::kLong) * (int64_t)grid_nx * grid_ny;
+    auto tgt_sort_res   = at::sort(tgt_flat_ids);
+    auto sort_perm_in_subset = std::get<1>(tgt_sort_res);  // [N_target]: sorted_idx → subset_idx
+    // target_sort_perm maps sorted_idx → GLOBAL atom id (used by kernels to look up frac_floor / write edge_tgt)
+    at::Tensor target_sort_perm = target_indices.has_value()
+        ? target_indices.value().index_select(0, sort_perm_in_subset)
+        : sort_perm_in_subset;
+    // Rebind pos_wrapped to the sorted target subset (subsequent code uses it as target array)
+    pos_wrapped   = target_pos_subset.index_select(0, sort_perm_in_subset).contiguous();
+    target_cell_x = target_cell_x.index_select(0, sort_perm_in_subset);
+    target_cell_y = target_cell_y.index_select(0, sort_perm_in_subset);
+    target_cell_z = target_cell_z.index_select(0, sort_perm_in_subset);
+
+    // B3: Count neighbors (one thread per target atom — more efficient than warp-per-atom
+    // for sparse systems where most cells have < 1 atom on average, as warp-per-atom
+    // would require 32× more GPU waves for the same compute).
+    // No truncation: every neighbor within the cutoff is counted and emitted
+    // (max_num_neighbors == 0 for all current callers).
     int padding_size = (int)std::floor(radius / grid_resolution) + 1;
     float radius_sq = radius * radius;
 
-    auto neighbor_counts = at::empty({N}, opts_int);
-    int grid_size_B3 = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    auto neighbor_counts = at::empty({N_target}, opts_int);
+    {
+        int gs = (N_target + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        count_neighbors_kernel<<<gs, BLOCK_SIZE, 0, stream>>>(
+            pos_wrapped.contiguous().data_ptr<float>(),
+            sorted_source_pos.data_ptr<float>(),
+            target_cell_x.data_ptr<int>(),
+            target_cell_y.data_ptr<int>(),
+            target_cell_z.data_ptr<int>(),
+            sorted_source_orig_idx.data_ptr<int64_t>(),  // unused in kernel but part of signature
+            cell_start_t.data_ptr<int>(),
+            cell_end_t.data_ptr<int>(),
+            grid_nx, grid_ny, grid_nz,
+            padding_size, radius_sq, N_target,
+            neighbor_counts.data_ptr<int>()
+        );
+    }
+    clk.lap(stream.stream());  // B3: count_neighbors (single-thread)
 
-    count_neighbors_kernel<<<grid_size_B3, BLOCK_SIZE, 0, stream>>>(
-        pos_wrapped.contiguous().data_ptr<float>(),
-        sorted_source_pos.data_ptr<float>(),
-        target_cell_x.data_ptr<int>(),
-        target_cell_y.data_ptr<int>(),
-        target_cell_z.data_ptr<int>(),
-        sorted_source_orig_idx.data_ptr<int64_t>(),
-        cell_start_t.data_ptr<int>(),
-        cell_end_t.data_ptr<int>(),
-        grid_nx, grid_ny, grid_nz,
-        padding_size,
-        radius_sq,
-        N,
-        neighbor_counts.data_ptr<int>()
-    );
+    // ===== Counts-only fast path =====
+    // Skip prefix-sum / CPU sync / edge buffer / B4 write kernel entirely.
+    // Used by Mode A refresh: only per-target degree is needed; edges get
+    // built later by Mode B at radius r.
+    if (counts_only) {
+        auto inverse_perm = sort_perm_in_subset.argsort();
+        auto neighbor_counts_user = neighbor_counts.index_select(0, inverse_perm);
+        return std::make_tuple(
+            at::empty({2, 0}, opts_long),
+            at::empty({0, 3}, opts_float),
+            at::zeros({1}, opts_long),
+            neighbor_counts_user
+        );
+    }
 
     // Prefix sum → neighbor_offsets
     auto neighbor_counts_long = neighbor_counts.to(at::kLong);
     auto neighbor_offsets = at::cumsum(neighbor_counts_long, 0) - neighbor_counts_long;
-    int64_t total_edges = neighbor_counts_long.sum().item<int64_t>();
+
+    // CPU sync: fetch total_edges and max_nbrs_pre (single sync, two values)
+    auto totals_cpu = at::cat({
+        neighbor_counts_long.sum().unsqueeze(0),
+        neighbor_counts_long.max().unsqueeze(0)
+    }).to(at::kCPU);
+    int64_t total_edges  = totals_cpu[0].item<int64_t>();
+    int64_t max_nbrs_pre = totals_cpu[1].item<int64_t>();
+    if (s_profile) printf("  total_edges = %lld  max_nbrs = %lld\n",
+                          (long long)total_edges, (long long)max_nbrs_pre);
+    clk.lap(stream.stream());  // prefix-sum + CPU sync
 
     if (total_edges == 0) {
+        // Un-sort neighbor_counts so the i-th value corresponds to target_indices[i]
+        // (or atom i if target_indices not provided). It's all zeros here, but keep
+        // the convention consistent with the non-empty path.
+        auto inverse_perm = sort_perm_in_subset.argsort();
+        auto neighbor_counts_user = neighbor_counts.index_select(0, inverse_perm);
         return std::make_tuple(
             at::empty({2, 0}, opts_long),
             at::empty({0, 3}, opts_float),
-            at::zeros({1}, opts_long)
+            at::zeros({1}, opts_long),
+            neighbor_counts_user
         );
     }
 
-    // B4: Write neighbors
-    auto edge_src = at::empty({total_edges}, opts_long);
-    auto edge_tgt = at::empty({total_edges}, opts_long);
+    // Allocate exact-size output arrays (no padding, no pre-fill needed)
+    auto edge_src            = at::empty({total_edges}, opts_long);
+    auto edge_tgt            = at::empty({total_edges}, opts_long);
     auto edge_cell_shift_out = at::empty({total_edges, 3}, opts_float);
-    auto edge_dist_sq = at::empty({total_edges}, opts_float);
+    auto edge_dist_sq        = at::empty({total_edges}, opts_float);
+    clk.lap(stream.stream());  // alloc
 
-    write_neighbors_kernel<<<grid_size_B3, BLOCK_SIZE, 0, stream>>>(
-        pos_wrapped.contiguous().data_ptr<float>(),
-        sorted_source_pos.data_ptr<float>(),
-        target_cell_x.data_ptr<int>(),
-        target_cell_y.data_ptr<int>(),
-        target_cell_z.data_ptr<int>(),
-        sorted_source_orig_idx.data_ptr<int64_t>(),
-        sorted_source_cell_shift.data_ptr<float>(),
-        cell_start_t.data_ptr<int>(),
-        cell_end_t.data_ptr<int>(),
-        grid_nx, grid_ny, grid_nz,
-        padding_size,
-        radius_sq,
-        N,
-        neighbor_offsets.data_ptr<int64_t>(),
-        edge_src.data_ptr<int64_t>(),
-        edge_tgt.data_ptr<int64_t>(),
-        edge_cell_shift_out.data_ptr<float>(),
-        edge_dist_sq.data_ptr<float>()
-    );
+    // B4: Write neighbors — one templated kernel write_neighbors_kernel<USE_SHM>,
+    // dispatched by system density. Both instantiations share the same Phase-A scan;
+    // they differ only in how found neighbors are emitted (see the kernel comment).
+    //
+    //   collect (USE_SHM=true): scan→shm, then Phase C stride-32 coalesced writes.
+    //     8KB shm → 75% occupancy. Wins for sparse/solvated systems (<5 atoms/cell).
+    //     Example: 2rik density (2.87/cell), 9GMO solvated (2.5/cell).
+    //
+    //   nosort (USE_SHM=false): ballot+popc direct write, 0 shm → full occupancy.
+    //     Wins for dense systems (>=5 atoms/cell, compute-bound). Example: 9GMO density (~22/cell).
+    //
+    // Crossover ~5 atoms/cell (calibrated on A100-SXM4-40GB). collect additionally
+    // requires max_nbrs_pre < MAX_NEIGHBORS_BUF_COLLECT so its shm buffer can't overflow.
+    float avg_atoms_per_cell = (num_cells > 0) ? (float)M / (float)num_cells : 0.0f;
 
-    // ===== Stage C: Max Neighbors Mask =====
-    // Using ATen ops (sort per-atom distances, top-K selection)
+    bool use_collect = (max_nbrs_pre < (int64_t)MAX_NEIGHBORS_BUF_COLLECT)
+                    && (avg_atoms_per_cell < 5.0f);
 
-    auto num_neighbors_per_atom = neighbor_counts_long.clone();
-    int64_t max_nbrs = num_neighbors_per_atom.max().item<int64_t>();
+    if (s_profile) printf("  avg_atoms_per_cell=%.2f avg_deg=%lld use_collect=%d\n",
+                           avg_atoms_per_cell,
+                           (long long)(N_target > 0 ? total_edges / N_target : 0),
+                           (int)use_collect);
 
-    at::Tensor num_neighbors_image = at::tensor({total_edges}, opts_long);
-
-    if (max_num_neighbors > 0 && max_nbrs > max_num_neighbors) {
-        // Build per-atom distance matrix for sorting
-        auto num_atoms_scalar = at::tensor({N}, opts_long);
-
-        // Clamp neighbor counts
-        auto clamped_counts = at::clamp(num_neighbors_per_atom, /*min=*/0, /*max=*/max_num_neighbors);
-
-        if (enforce_max_strictly) {
-            // Strict: keep only closest max_num_neighbors per atom
-            // For each atom, sort its edges by distance, keep top-K
-            auto mask = at::ones({total_edges}, at::TensorOptions().dtype(at::kBool).device(pos.device()));
-
-            // Create per-atom distance array: [num_atoms, max_nbrs] filled with inf
-            auto dist_sort = at::full({N, max_nbrs}, std::numeric_limits<float>::infinity(), opts_float);
-
-            // Fill in distances using neighbor_offsets
-            // We use a scatter approach: for each edge, compute its local index within its atom
-            auto atom_indices = edge_tgt; // target atom for each edge
-            auto atom_local_idx = at::arange(total_edges, opts_long) - neighbor_offsets.index_select(0, atom_indices);
-
-            // Write distances into the 2D array
-            auto flat_indices = atom_indices * max_nbrs + atom_local_idx;
-            dist_sort.view(-1).scatter_(0, flat_indices, edge_dist_sq.to(at::kFloat));
-
-            // Sort distances per atom
-            auto sort_result2 = at::sort(dist_sort, /*dim=*/1);
-            auto sorted_dists = std::get<0>(sort_result2);
-            auto sort_perm = std::get<1>(sort_result2);
-
-            // For each atom, mark edges beyond max_num_neighbors as false
-            // Map sort_perm back to global edge indices
-            for (int64_t k = max_num_neighbors; k < max_nbrs; k++) {
-                auto atom_mask = num_neighbors_per_atom.gt(max_num_neighbors);
-                auto col = sort_perm.select(1, k);
-                auto global_idx = neighbor_offsets + col;
-                // Only mask atoms that actually exceed the limit
-                auto valid = atom_mask.logical_and(sorted_dists.select(1, k).isfinite());
-                global_idx = global_idx.masked_select(valid);
-                mask.index_fill_(0, global_idx, false);
-            }
-
-            edge_src = edge_src.masked_select(mask);
-            edge_tgt = edge_tgt.masked_select(mask);
-            edge_cell_shift_out = edge_cell_shift_out.index_select(
-                0, mask.nonzero().squeeze(1));
-            edge_dist_sq = edge_dist_sq.masked_select(mask);
-            total_edges = edge_src.size(0);
-
-            num_neighbors_per_atom = clamped_counts;
-        } else {
-            // Non-strict: allow degeneracy tolerance (similar to v2)
-            float degeneracy_tolerance = 0.01f;
-
-            auto mask = at::ones({total_edges}, at::TensorOptions().dtype(at::kBool).device(pos.device()));
-
-            auto dist_sort = at::full({N, max_nbrs}, std::numeric_limits<float>::infinity(), opts_float);
-            auto atom_indices = edge_tgt;
-            auto atom_local_idx = at::arange(total_edges, opts_long) - neighbor_offsets.index_select(0, atom_indices);
-            auto flat_indices = atom_indices * max_nbrs + atom_local_idx;
-            dist_sort.view(-1).scatter_(0, flat_indices, edge_dist_sq.to(at::kFloat));
-
-            auto sort_result2 = at::sort(dist_sort, /*dim=*/1);
-            auto sorted_dists = std::get<0>(sort_result2);
-            auto sort_perm = std::get<1>(sort_result2);
-
-            // Effective cutoff = distance of (max_num_neighbors+1)-th neighbor + tolerance
-            auto effective_cutoff = sorted_dists.select(1, max_num_neighbors) + degeneracy_tolerance;
-
-            // Mark edges where distance > effective_cutoff
-            for (int64_t k = max_num_neighbors; k < max_nbrs; k++) {
-                auto col_dist = sorted_dists.select(1, k);
-                auto exceeds = col_dist.gt(effective_cutoff);
-                auto col = sort_perm.select(1, k);
-                auto global_idx = neighbor_offsets + col;
-                auto valid = exceeds.logical_and(col_dist.isfinite());
-                global_idx = global_idx.masked_select(valid);
-                mask.index_fill_(0, global_idx, false);
-            }
-
-            edge_src = edge_src.masked_select(mask);
-            edge_tgt = edge_tgt.masked_select(mask);
-            edge_cell_shift_out = edge_cell_shift_out.index_select(
-                0, mask.nonzero().squeeze(1));
-            edge_dist_sq = edge_dist_sq.masked_select(mask);
-            total_edges = edge_src.size(0);
-        }
+    if (use_collect) {
+        int gs = (N_target + WARPS_PER_BLOCK_COLLECT - 1) / WARPS_PER_BLOCK_COLLECT;
+        int smem_bytes = WARPS_PER_BLOCK_COLLECT * MAX_NEIGHBORS_BUF_COLLECT
+                         * (int)(sizeof(float) + sizeof(int));
+        write_neighbors_kernel<true><<<gs, BLOCK_SIZE_COLLECT, smem_bytes, stream>>>(
+            pos_wrapped.contiguous().data_ptr<float>(),
+            sorted_source_pos.data_ptr<float>(),
+            target_cell_x.data_ptr<int>(),
+            target_cell_y.data_ptr<int>(),
+            target_cell_z.data_ptr<int>(),
+            sorted_source_orig_idx.data_ptr<int64_t>(),
+            sorted_source_cell_shift.data_ptr<float>(),
+            cell_start_t.data_ptr<int>(),
+            cell_end_t.data_ptr<int>(),
+            grid_nx, grid_ny, grid_nz,
+            padding_size, radius_sq, N_target,
+            neighbor_counts.data_ptr<int>(),
+            neighbor_offsets.data_ptr<int64_t>(),
+            target_sort_perm.data_ptr<int64_t>(),
+            frac_floor.data_ptr<float>(),
+            edge_src.data_ptr<int64_t>(),
+            edge_tgt.data_ptr<int64_t>(),
+            edge_cell_shift_out.data_ptr<float>(),
+            edge_dist_sq.data_ptr<float>()
+        );
+    } else {
+        int gs = (N_target + WARPS_PER_BLOCK_WARP - 1) / WARPS_PER_BLOCK_WARP;
+        write_neighbors_kernel<false><<<gs, BLOCK_SIZE, 0, stream>>>(
+            pos_wrapped.contiguous().data_ptr<float>(),
+            sorted_source_pos.data_ptr<float>(),
+            target_cell_x.data_ptr<int>(),
+            target_cell_y.data_ptr<int>(),
+            target_cell_z.data_ptr<int>(),
+            sorted_source_orig_idx.data_ptr<int64_t>(),
+            sorted_source_cell_shift.data_ptr<float>(),
+            cell_start_t.data_ptr<int>(),
+            cell_end_t.data_ptr<int>(),
+            grid_nx, grid_ny, grid_nz,
+            padding_size, radius_sq, N_target,
+            neighbor_counts.data_ptr<int>(),
+            neighbor_offsets.data_ptr<int64_t>(),
+            target_sort_perm.data_ptr<int64_t>(),
+            frac_floor.data_ptr<float>(),
+            edge_src.data_ptr<int64_t>(),
+            edge_tgt.data_ptr<int64_t>(),
+            edge_cell_shift_out.data_ptr<float>(),
+            edge_dist_sq.data_ptr<float>()
+        );
     }
+    clk.lap(stream.stream());  // B4-kernel (includes target remap + frac_floor correction)
 
-    // ===== Correct cell shifts for position wrapping =====
-    // The algorithm ran on wrapped positions. The cell shifts are relative to
-    // the wrapped frame. To get shifts relative to the ORIGINAL positions:
-    //   cell_shift_original = cell_shift_wrapped + frac_floor[source] - frac_floor[target]
-    if (total_edges > 0) {
-        auto src_frac_floor = frac_floor.index_select(0, edge_src);  // [E, 3]
-        auto tgt_frac_floor = frac_floor.index_select(0, edge_tgt);  // [E, 3]
-        edge_cell_shift_out = edge_cell_shift_out + tgt_frac_floor - src_frac_floor;
-    }
+    // Stage C: target remap and frac_floor correction are done inline in B4 kernels.
 
-    // Build edge_index [2, E] = [[source_idx...], [target_idx...]]
     auto edge_index = at::stack({edge_src, edge_tgt}, 0);
+    auto num_neighbors_image = at::tensor({total_edges}, opts_long);
 
-    // num_neighbors: total edge count
-    num_neighbors_image = at::tensor({total_edges}, opts_long);
+    // Un-sort neighbor_counts: kernel wrote in sorted-target order; user expects
+    // neighbor_counts[i] = degree of target_indices[i] (or atom i in legacy mode).
+    auto inverse_perm = sort_perm_in_subset.argsort();
+    auto neighbor_counts_user = neighbor_counts.index_select(0, inverse_perm);
 
-    return std::make_tuple(edge_index, edge_cell_shift_out, num_neighbors_image);
+    return std::make_tuple(edge_index, edge_cell_shift_out, num_neighbors_image, neighbor_counts_user);
+}
+
+// Legacy 3-tuple wrapper: forwards to _ex without target_indices, discards neighbor_counts.
+std::tuple<at::Tensor, at::Tensor, at::Tensor>
+radius_graph_pbc_cuda_impl(
+    at::Tensor pos,
+    at::Tensor cell,
+    at::Tensor pbc,
+    float radius,
+    int64_t max_num_neighbors,
+    bool enforce_max_strictly
+) {
+    auto result = radius_graph_pbc_cuda_impl_ex(
+        pos, cell, pbc, radius, max_num_neighbors, enforce_max_strictly,
+        c10::nullopt, /*counts_only=*/false);
+    return std::make_tuple(std::get<0>(result), std::get<1>(result), std::get<2>(result));
 }

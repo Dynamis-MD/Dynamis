@@ -1,4 +1,4 @@
-// kdtree_cuda.cu — Level-by-level batched KD-tree bisection on GPU.
+// kdtree_kernels.cu — Level-by-level batched KD-tree bisection on GPU.
 //
 // Replaces the recursive CPU kdtree_bisect with iterative breadth-first
 // bisection. All work stays on GPU — 0 .item() calls in the main loop.

@@ -80,8 +80,10 @@ For GNN models that need a different `FeatureExchanger` per message-passing laye
 Using `LennardJonesPotentialModel` as the canonical reference:
 
 ```
+state.local_molecular_info
+  └── atom_positions         [num_local, 3]   ← owned atom positions (requires_grad after clone)
+
 state.local_partition_info
-  ├── local_atom_positions   [num_local, 3]   ← owned atom positions (requires_grad after clone)
   ├── partition_indices      [num_local]       ← global atom indices / types
   ├── send_local_indices     [total_send]      ← CSR: which local atoms to push to neighbours
   └── recv_ghost_indices     [total_recv]      ← CSR: ghost slots to receive into
@@ -407,7 +409,17 @@ h = cat([h[:N_local], ghost_h], dim=0)  # caller's responsibility
 
 This matches the `FeaturePushToExchange` API contract: it returns ghost features only; the caller concatenates with local features.
 
-**One-time IPC setup, cheap per-layer reconfiguration.** Opening IPC handles (`cudaIpcOpenMemHandle`) is an expensive kernel-mode operation requiring cross-process coordination. It must not be repeated per GNN layer. The design separates two concerns:
+### CUDA 12 Fabric Handles & Multi-Node NVLink (NVL72)
+
+For multi-node NVLink architectures (such as NVIDIA NVL72, GH200, and GB200 clusters), legacy `cudaIpc*` APIs cannot cross OS / node boundaries. DistNNP supports CUDA 12+ Fabric Handles (`CU_MEM_HANDLE_TYPE_FABRIC` via the Virtual Memory Management `cuMem*` APIs) with automatic fallback to legacy IPC on single-node or older systems:
+
+- **Dynamic Detection:** `supports_fabric_handles(device_id)` queries `CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED`. If supported and running CUDA 12+, Fabric VMM allocations are used.
+- **Physical Allocation & Export:** `cuMemCreate` allocates physical GPU memory with `CU_MEM_HANDLE_TYPE_FABRIC`, exported via `cuMemExportToShareableHandle` as a 64-byte `CUDA_MEM_FABRIC_HANDLE`.
+- **Remote Import & Virtual Address Mapping:** Receiving ranks import the handle via `cuMemImportFromShareableHandle`, reserve virtual address space (`cuMemAddressReserve`), map the allocation (`cuMemMap`), and set permissions (`cuMemSetAccess`).
+- **Push Synchronization:** Both SM push kernels and the Copy Engine DMA paths operate directly on mapped virtual addresses across multi-node NVLink Fabric. Synchronization counters also utilize Fabric handles.
+- **Backward Compatibility:** On systems without Fabric support, the implementation seamlessly falls back to legacy `cudaMalloc`, `cudaIpcGetMemHandle`, and `cudaIpcOpenMemHandle`.
+
+**One-time IPC / Fabric setup, cheap per-layer reconfiguration.** Opening IPC/Fabric handles is an expensive kernel-mode operation requiring cross-process coordination. It must not be repeated per GNN layer. The design separates two concerns:
 
 - **Topology setup** (once per partition): allocate `x_buffer [N_ghost, max_F]` and `grad_recv_buffer [total_send, max_F]` for the maximum feature dimension across all layers; export and exchange handles via a single `all_gather`; open remote handles; compute and upload `PushTarget` arrays.
 - **Feature dimension reconfiguration** (once per layer, O(1)): call `reconfigure_feature_dim(F_l)` to update the active column count. This writes a single integer field — no IPC operations, no collectives, no buffer reallocation.
@@ -493,6 +505,6 @@ Because `FeaturePushToExchange` is called `L` times in the forward pass, `energy
 
 3. **Asynchronous exchange and computation overlap**: The baseline (`cfg.dist.overlap`) can overlap the NNP compute on interior atoms (identified by `interior_mask` in `PartitionMessagePassingInfo`) with the halo exchange for boundary atoms. This requires splitting the NNP forward pass into two phases: interior atoms first (while communication runs), then boundary atoms after the exchange completes. The `FeatureExchanger` must expose an async `begin_send_recv()` / `wait()` interface for this.
 
-4. **Gradient correctness for non-differentiable position exchange**: In the `LennardJonesPotentialModel`, `local_positions` is detached and re-created with `requires_grad=True` before the exchange. This is necessary to make `energy.backward()` produce forces via `local_positions.grad`. However, it breaks the gradient path from `state.local_partition_info.local_atom_positions` through to `energy` for any use case that needs end-to-end differentiability (e.g., training the NNP). A future design should clarify whether `DistNNPModel` is always in inference/MD mode or must also support training.
+4. **Gradient correctness for non-differentiable position exchange**: In the `LennardJonesPotentialModel`, `local_positions` is detached and re-created with `requires_grad=True` before the exchange. This is necessary to make `energy.backward()` produce forces via `local_positions.grad`. However, it breaks the gradient path from `state.local_molecular_info.atom_positions` through to `energy` for any use case that needs end-to-end differentiability (e.g., training the NNP). A future design should clarify whether `DistNNPModel` is always in inference/MD mode or must also support training.
 
 5. **RDMA completion notification**: The doorbell (RDMA SEND/RECV) approach described above is one option. An alternative is polling on a GPU-side flag written by the NIC after the RDMA WRITE completes (GPU direct notification via `nv_peer_mem` or NVSHMEM's `nvshmemx_getmem_nbi`). The polling approach avoids the extra QP verb but requires careful fence ordering to prevent the flag read from being speculated ahead of the data.

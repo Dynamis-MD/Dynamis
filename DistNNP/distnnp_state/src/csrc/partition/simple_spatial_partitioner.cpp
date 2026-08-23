@@ -34,6 +34,8 @@ PartitionMessagePassingInfo SimpleSpatialPartitioner::partition(
     long num_local = end - start;
     info.global_send_recv_matrix.index_put_({R, R}, num_local);
 
+    info.atom_counts = torch::bincount(info.partition_id, /*weights=*/{}, /*minlength=*/env.world_size);
+
     return info;
 }
 

@@ -1,6 +1,11 @@
 import torch
 from distnnp_integrator.distnnp_integrator_impl import EulerIntegrator
-from distnnp_integrator._data_check import check_devices, check_shapes_match
+from distnnp_integrator._data_check import (
+    check_devices,
+    check_shape_2D,
+    check_mass_shape,
+    check_shapes_match,
+)
 from distnnp_integrator.integrator import DistNNPIntegrator
 from distnnp_state import DistNNPState
 from distnnp_model import DistNNPModel
@@ -32,9 +37,14 @@ class Euler(DistNNPIntegrator):
         # Do python-side checks before calling the C++ implementation
 
         check_devices(pos, vel, frc, mass)
-        check_shapes_match(pos, vel, frc, mass)
+        check_shape_2D(pos)
+        check_mass_shape(mass, pos)
+        check_shapes_match(pos, vel, frc)
 
         EulerIntegrator().step(pos, vel, frc, mass, dt)
+
+    def reset(self) -> None:
+        pass
 
     def step(self, state: DistNNPState, model: DistNNPModel, dt=None):
         """
@@ -45,22 +55,21 @@ class Euler(DistNNPIntegrator):
             model (DistNNPModel): The potential model used to compute forces based on the current state.
         """
         # Compute forces using the provided model
-        energy, forces = model(state)
+        energy, new_forces = model(state)
         if dt is not None:
             step_size = dt
         else:
             step_size = self.dt
 
-        
-
         molecular_info = state.local_molecular_info
 
-        atom_masses = TORCH_MASSES.to(molecular_info.atom_positions.device)[state.atom_types.reshape(-1)]
+        atom_masses = TORCH_MASSES.to(molecular_info.atom_positions.device)[molecular_info.atom_types.reshape(-1).to(torch.long)]
         # Update positions and velocities using the Euler method
         self.step_(
             molecular_info.atom_positions,
             molecular_info.atom_velocities,
-            forces,
+            new_forces,
             atom_masses,
             step_size,
         )
+        return energy, new_forces
