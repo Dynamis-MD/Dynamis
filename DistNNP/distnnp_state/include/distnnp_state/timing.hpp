@@ -79,6 +79,8 @@ class Timer {
 public:
     Timer() = default;
     ~Timer();
+    Timer(const Timer&) = delete;
+    Timer& operator=(const Timer&) = delete;
 
     // `where` selects the measurement mechanism:
     //   Host   — std::chrono; right for CPU-bound or ATen work that syncs internally.
