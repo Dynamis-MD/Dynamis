@@ -641,14 +641,17 @@ class UMAModel(DistNNPModel):
     def __init__(
         self,
         model_name: str,
+        dataset: str,
         global_rank: int = None,
-        dataset: str = None,
         inference_settings: InferenceSettings | str = "default", #"turbo",
         overrides: dict | None = None,
-        device: Literal["cuda", "cpu"] | None = None,
+        device: str | torch.device | None = None,
         exchanger: Exchanger | None = None,
     ):
-        self.device = device
+        if isinstance(device, torch.device):
+            self.device = device.type # make sure this is a str because fairchem needs str (with no ordinal)
+        else:
+            self.device = device
         self.global_rank = global_rank
         self.dataset = dataset
         inference_settings = guess_inference_settings(inference_settings)
@@ -658,7 +661,7 @@ class UMAModel(DistNNPModel):
             overrides["backbone"] = {"model": "distributed_escnmd_backbone"}
         else:
             overrides["backbone"]["model"] = "distributed_escnmd_backbone"
-        self.predictor = pretrained_mlip.get_predict_unit(model_name, inference_settings, overrides, device)
+        self.predictor = pretrained_mlip.get_predict_unit(model_name, inference_settings, overrides, self.device)
         self.main_model = self.predictor.model.module
         self.main_model.output_heads["energyandforcehead"].head = MaskedHeadWrapper(self.main_model.output_heads["energyandforcehead"].head)
 
@@ -776,9 +779,6 @@ class UMAModel(DistNNPModel):
     def __call__(
         self,
         distributed_state: DistNNPState,
-        batch: torch.Tensor = None,
-        batch_full: torch.Tensor = None,
-        datasets: str | List[str] = None,
         charge: torch.Tensor | None = None,
         spin: torch.Tensor | None = None,
         device: Literal["cuda", "cpu"] | None = None,
@@ -823,12 +823,8 @@ class UMAModel(DistNNPModel):
                 enforce_max_neighbors_strictly=False,
             )
 
-        if batch is None:
-            batch = torch.zeros(num_local, dtype=torch.long, device=device)
-        if batch_full is None:
-            batch_full = torch.zeros(num_atoms, dtype=torch.long, device=device)
-        if datasets is None:
-            datasets = self.dataset
+        batch = torch.zeros(num_local, dtype=torch.long, device=device)
+        datasets = self.dataset
         num_systems = int(batch.max().item()) + 1 
         if charge is None:
             charge = torch.zeros(num_systems, dtype=torch.long, device=device)

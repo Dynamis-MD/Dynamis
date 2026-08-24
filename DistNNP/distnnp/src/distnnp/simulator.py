@@ -210,6 +210,7 @@ class Simulator:
             self.state.local_partition_info, device=device if device else self.device
         )
         self.writer.update_atom_counts(self.state.local_partition_info.atom_counts.to(torch.uint32))
+        self.integrator.reset()
 
     def _set_state(self, state: SimState):
         self.state = state

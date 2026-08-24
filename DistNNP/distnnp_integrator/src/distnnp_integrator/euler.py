@@ -43,6 +43,9 @@ class Euler(DistNNPIntegrator):
 
         EulerIntegrator().step(pos, vel, frc, mass, dt)
 
+    def reset(self) -> None:
+        pass
+
     def step(self, state: DistNNPState, model: DistNNPModel, dt=None):
         """
         Update positions and velocities based on the Euler integration method.
