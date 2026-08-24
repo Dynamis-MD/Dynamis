@@ -226,7 +226,7 @@ void Timer::start(const std::string& key_, TimerClass cls_, Where where_, cudaSt
         stream = stream_;
         cudaEventRecord(ev_start, stream);
     } else {
-        t0 = std::chrono::high_resolution_clock::now();
+        t0 = std::chrono::steady_clock::now();
     }
 }
 
@@ -242,7 +242,7 @@ void Timer::stop() {
         ev_start = nullptr;
         ev_stop  = nullptr;
     } else {
-        auto t1 = std::chrono::high_resolution_clock::now();
+        auto t1 = std::chrono::steady_clock::now();
         double time_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
         TimingRegistry::instance().append(key, cls, Where::Host, time_us);
     }

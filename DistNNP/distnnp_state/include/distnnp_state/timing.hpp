@@ -99,7 +99,7 @@ private:
     bool running { false };
 
     // Host path
-    std::chrono::time_point<std::chrono::high_resolution_clock> t0;
+    std::chrono::time_point<std::chrono::steady_clock> t0;
 
     // Device path — fresh events are created on each start() and ownership is
     // transferred to the registry on stop(), so these are nullptr between pairs.
