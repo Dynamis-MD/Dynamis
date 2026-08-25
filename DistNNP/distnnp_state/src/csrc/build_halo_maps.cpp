@@ -28,8 +28,12 @@ void AbstractPartitioner::build_halo_maps(
     auto pos = global_state.atom_positions;
     auto device = pos.device();
     cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index()).stream();
+
+#ifdef DISTNNP_TIMING
     Timer t;
     t.start("build_halo_maps", TimerClass::Compute, Where::Device, stream);
+#endif
+
     auto long_opts = torch::TensorOptions().dtype(torch::kLong).device(device);
     auto bool_opts = torch::TensorOptions().dtype(torch::kBool).device(device);
 
@@ -158,7 +162,10 @@ void AbstractPartitioner::build_halo_maps(
     info.global_send_recv_matrix.select(0, R).copy_(send_counts_per_rank);
     // Restore diagonal (local atom count, not halo count)
     info.global_send_recv_matrix.index_put_({R, R}, num_local);
+
+#ifdef DISTNNP_TIMING
     t.stop();
+#endif
 }
 
 } // namespace distnnp_state

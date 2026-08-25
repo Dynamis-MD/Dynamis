@@ -7,7 +7,12 @@ import time
 import pytest
 import torch
 
-from distnnp_state import Timer, TimingRegistry, TimerClass, Where, Level
+from distnnp_state import Timer, TimingRegistry, TimerClass, Where, Level, TIMING_ENABLED
+
+pytestmark = pytest.mark.skipif(
+    not TIMING_ENABLED,
+    reason="distnnp_state built with -DDISTNNP_TIMING=OFF",
+)
 
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA not available"

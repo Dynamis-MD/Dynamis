@@ -212,6 +212,7 @@ Timer::~Timer() {
 }
 
 void Timer::start(const std::string& key_, TimerClass cls_, Where where_, cudaStream_t stream_) {
+#ifdef DISTNNP_TIMING
     if (!TimingRegistry::instance().enabled()) return;
     key = key_;
     cls = cls_;
@@ -228,9 +229,14 @@ void Timer::start(const std::string& key_, TimerClass cls_, Where where_, cudaSt
     } else {
         t0 = std::chrono::steady_clock::now();
     }
+#else
+    // This is done to silence parameter warnings
+    (void)key_; (void)cls_; (void)where_; (void)stream_;
+#endif
 }
 
 void Timer::stop() {
+#ifdef DISTNNP_TIMING
     if (!running) return;
     running = false;
 
@@ -246,6 +252,7 @@ void Timer::stop() {
         double time_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
         TimingRegistry::instance().append(key, cls, Where::Host, time_us);
     }
+#endif
 }
 
 } // namespace distnnp_state

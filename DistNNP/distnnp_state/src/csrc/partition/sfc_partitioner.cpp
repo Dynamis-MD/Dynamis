@@ -193,11 +193,18 @@ PartitionMessagePassingInfo SFCPartitioner::partition(
     cudaStream_t stream = on_cuda
         ? at::cuda::getCurrentCUDAStream(state.atom_positions.device().index()).stream()
         : nullptr;
+#ifdef DISTNNP_TIMING
     Timer t;
     t.start("partition", TimerClass::Compute,
             on_cuda ? Where::Device : Where::Host, stream);
+#endif
+
     auto result = do_partition(state, env, state.edge_counts, curve_type_);
+
+#ifdef DISTNNP_TIMING
     t.stop();
+#endif
+
     return result;
 }
 
@@ -212,8 +219,11 @@ PartitionMessagePassingInfo SFCPartitioner::partition(
     // Mode 3 always operates on CUDA tensors (radius_graph_pbc requires it).
     cudaStream_t stream =
         at::cuda::getCurrentCUDAStream(state.atom_positions.device().index()).stream();
+
+#ifdef DISTNNP_TIMING
     Timer t;
     t.start("partition", TimerClass::Compute, Where::Device, stream);
+#endif
 
     auto pos = state.atom_positions;
     auto device = pos.device();
@@ -241,7 +251,10 @@ PartitionMessagePassingInfo SFCPartitioner::partition(
     // Store graph for downstream use
     info.edge_index = edge_idx;
 
+#ifdef DISTNNP_TIMING
     t.stop();
+#endif
+
     return info;
 }
 

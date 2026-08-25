@@ -12,9 +12,13 @@ PartitionMessagePassingInfo SimpleSpatialPartitioner::partition(
     cudaStream_t stream = on_cuda
         ? at::cuda::getCurrentCUDAStream(state.atom_positions.device().index()).stream()
         : nullptr;
+
+#ifdef DISTNNP_TIMING
     Timer t;
     t.start("partition", TimerClass::Compute,
             on_cuda ? Where::Device : Where::Host, stream);
+#endif
+
     PartitionMessagePassingInfo info;
     auto device = state.atom_positions.device();
     auto long_opts = torch::TensorOptions().dtype(torch::kLong).device(device);
@@ -45,7 +49,10 @@ PartitionMessagePassingInfo SimpleSpatialPartitioner::partition(
 
     info.atom_counts = torch::bincount(info.partition_id, /*weights=*/{}, /*minlength=*/env.world_size);
 
+#ifdef DISTNNP_TIMING
     t.stop();
+#endif
+
     return info;
 }
 
