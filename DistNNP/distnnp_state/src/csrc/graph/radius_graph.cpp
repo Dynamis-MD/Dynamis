@@ -14,7 +14,10 @@ radius_graph_pbc(
     int64_t max_num_neighbors,
     bool enforce_max_strictly
 ) {
+
+#ifdef DISTNNP_TIMING
     distnnp_state::Timer t;
+#endif
 
     // Validate pos: [N, 3] float32 CUDA contiguous
     TORCH_CHECK(pos.is_cuda(), "pos must be a CUDA tensor");
@@ -44,10 +47,18 @@ radius_graph_pbc(
     // pos.is_cuda() is guaranteed by the TORCH_CHECK above, so it is safe to
     // grab the current CUDA stream here and use device-side event timing.
     cudaStream_t stream = at::cuda::getCurrentCUDAStream(pos.device().index()).stream();
+
+#ifdef DISTNNP_TIMING
     t.start("build_graph", distnnp_state::TimerClass::Compute,
             distnnp_state::Where::Device, stream);
+#endif
+
     auto result = radius_graph_pbc_cuda_impl(pos, cell, pbc, radius, max_num_neighbors, enforce_max_strictly);
+
+#ifdef DISTNNP_TIMING
     t.stop();
+#endif
+
     return result;
 }
 

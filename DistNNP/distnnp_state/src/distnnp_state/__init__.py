@@ -33,6 +33,7 @@ TimingRegistry = distnnp_state_impl.TimingRegistry
 TimerClass = distnnp_state_impl.TimerClass
 Where = distnnp_state_impl.Where
 Level = distnnp_state_impl.Level
+TIMING_ENABLED = distnnp_state_impl.TIMING_ENABLED
 
 __all__ = [
     "MolecularInfo",
@@ -56,4 +57,5 @@ __all__ = [
     "TimerClass",
     "Where",
     "Level",
+    "TIMING_ENABLED",
 ]

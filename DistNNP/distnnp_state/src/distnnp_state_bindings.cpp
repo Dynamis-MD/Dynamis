@@ -193,6 +193,12 @@ PYBIND11_MODULE(distnnp_state_impl, m) {
       .value("Wait",    distnnp_state::TimerClass::Wait)
       .value("Other",   distnnp_state::TimerClass::Other);
 
+#ifdef DISTNNP_TIMING
+    m.attr("TIMING_ENABLED") = true;
+#else
+    m.attr("TIMING_ENABLED") = false;
+#endif
+
   py::enum_<distnnp_state::Where>(m, "Where")
       .value("Host",   distnnp_state::Where::Host)
       .value("Device", distnnp_state::Where::Device);

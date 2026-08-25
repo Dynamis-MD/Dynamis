@@ -8,6 +8,11 @@ project(
     LANGUAGES CXX CUDA
 )
 
+option(DISTNNP_TIMING "Compile in timing instrumentation" ON)
+if(DISTNNP_TIMING)
+    add_compile_definitions(DISTNNP_TIMING)
+endif()
+
 # Use the modern CUDAToolkit finder first to resolve the correct include path.
 # In conda environments, nvcc lives in $PREFIX/bin but headers are under
 # $PREFIX/targets/x86_64-linux/include — a non-standard layout that PyTorch's
