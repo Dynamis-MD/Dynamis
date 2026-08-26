@@ -30,13 +30,13 @@ TrajectoryWriterImpl::TrajectoryWriterImpl(
     , run_id(run_id)
     , author(author)
 {
-    // Ensure output directory exists.
+    // Ensure output directory exists for rank 0
     struct stat st;
-    if (stat(output_dir.c_str(), &st) != 0) {
+    if (stat(output_dir.c_str(), &st) != 0 && global_rank == 0) {
         if (mkdir(output_dir.c_str(), 0755) != 0) {
             throw std::runtime_error("failed to create output directory '" + output_dir + "': " + strerror(errno));
         }
-    } else if (!S_ISDIR(st.st_mode)) {
+    } else if (!S_ISDIR(st.st_mode) && global_rank == 0) {
         throw std::runtime_error("output path exists and is not a directory: '" + output_dir + "'");
     }
 
