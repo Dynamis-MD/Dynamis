@@ -44,7 +44,7 @@ def test_uma_distributed_parity():
 
     if rank == 0:
         predictor = pretrained_mlip.get_predict_unit("uma-s-1p2", device=device)
-    dist_model = UMAModel("uma-s-1p2", rank, device=device)
+    dist_model = UMAModel("uma-s-1p2", dataset="omol", device=device)
 
     # ==========================================
     # 2. Setup Global Data (Ground Truth)
@@ -163,15 +163,7 @@ def test_uma_distributed_parity():
     # ==========================================
     # 5. Forward & Backward Pass: DISTRIBUTED MODEL
     # ==========================================
-    batch = torch.zeros(n_local, dtype=torch.long, device=device)
-
-    n_total_with_ghosts = (
-        state.local_molecular_info.num_atoms +
-        state.local_partition_info.recv_ghost_indices.shape[0]
-    )
-    batch_full = torch.zeros(n_total_with_ghosts, dtype=torch.long, device=device)
-
-    local_energy, local_forces = dist_model(state, batch, batch_full, "omol")
+    local_energy, local_forces = dist_model(state)
     
     # ==========================================
     # 6. Parity Assertions

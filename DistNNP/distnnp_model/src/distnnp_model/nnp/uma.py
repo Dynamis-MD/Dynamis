@@ -641,14 +641,19 @@ class UMAModel(DistNNPModel):
     def __init__(
         self,
         model_name: str,
-        global_rank: int,
+        dataset: str,
+        global_rank: int = None,
         inference_settings: InferenceSettings | str = "default", #"turbo",
         overrides: dict | None = None,
-        device: Literal["cuda", "cpu"] | None = None,
+        device: str | torch.device | None = None,
         exchanger: Exchanger | None = None,
     ):
-        self.device = device
+        if isinstance(device, torch.device):
+            self.device = device.type # make sure this is a str because fairchem needs str (with no ordinal)
+        else:
+            self.device = device
         self.global_rank = global_rank
+        self.dataset = dataset
         inference_settings = guess_inference_settings(inference_settings)
         if overrides is None:
             overrides = {"backbone": {"model": "distributed_escnmd_backbone"}}
@@ -656,7 +661,7 @@ class UMAModel(DistNNPModel):
             overrides["backbone"] = {"model": "distributed_escnmd_backbone"}
         else:
             overrides["backbone"]["model"] = "distributed_escnmd_backbone"
-        self.predictor = pretrained_mlip.get_predict_unit(model_name, inference_settings, overrides, device)
+        self.predictor = pretrained_mlip.get_predict_unit(model_name, inference_settings, overrides, self.device)
         self.main_model = self.predictor.model.module
         self.main_model.output_heads["energyandforcehead"].head = MaskedHeadWrapper(self.main_model.output_heads["energyandforcehead"].head)
 
@@ -774,9 +779,6 @@ class UMAModel(DistNNPModel):
     def __call__(
         self,
         distributed_state: DistNNPState,
-        batch: torch.Tensor,
-        batch_full: torch.Tensor,     
-        datasets: str | List[str], 
         charge: torch.Tensor | None = None,
         spin: torch.Tensor | None = None,
         device: Literal["cuda", "cpu"] | None = None,
@@ -784,15 +786,12 @@ class UMAModel(DistNNPModel):
         self.main_model.eval()
         device = device or self.device
         self.main_model.backbone._distributed_state = distributed_state
-        num_systems = int(batch.max().item()) + 1 
-        if charge is None:
-            charge = torch.zeros(num_systems, dtype=torch.long, device=device)
-        if spin is None:
-            spin = torch.ones(num_systems, dtype=torch.long, device=device)
 
         local_mol_info = distributed_state.local_molecular_info
         global_mol_info = distributed_state.global_molecular_info
         sim_config = distributed_state.sim_config
+        if self.global_rank is None:
+            self.global_rank = distributed_state.dist_env.global_rank
 
         positions = FeaturePushToExchange.apply(
             local_mol_info.atom_positions, distributed_state, self.position_exchanger
@@ -823,6 +822,14 @@ class UMAModel(DistNNPModel):
                 max_num_neighbors_threshold=0,
                 enforce_max_neighbors_strictly=False,
             )
+
+        batch = torch.zeros(num_local, dtype=torch.long, device=device)
+        datasets = self.dataset
+        num_systems = int(batch.max().item()) + 1 
+        if charge is None:
+            charge = torch.zeros(num_systems, dtype=torch.long, device=device)
+        if spin is None:
+            spin = torch.ones(num_systems, dtype=torch.long, device=device)
 
         data = AtomicData(
             positions,
