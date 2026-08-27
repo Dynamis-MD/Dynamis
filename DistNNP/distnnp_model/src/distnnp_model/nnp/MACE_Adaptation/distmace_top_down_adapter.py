@@ -9,9 +9,10 @@ not use ``AtomicData.from_config`` for neighbor generation.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import torch
+import torch.distributed as dist
 
 from distnnp_model.comm.exchanger import GPUDirectExchanger
 from distnnp_model.comm.feature_push import FeaturePushToExchange
@@ -129,15 +130,21 @@ def canonicalize_nonperiodic_geometry(
         )
     return adjusted_positions, adjusted_cell, translation
 
-
-# Does it get used once when we first partition? Why does it refer to multiple exchanges?
+#Do we have to validate it every single time?
 def validate_partition_info(
     partition_info: PartitionMessagePassingInfo,
     world_size: int,
 ) -> Dict[str, Any]:
-    """Validate the CSR metadata consumed by every DistNNP exchange."""
+    """Validate the CSR metadata consumed by every DistNNP exchange.
+
+    The same peer-grouped CSR layout is reused for structural exchange and for
+    every learned-feature exchange, so we validate it once up front.
+    """
     send_offsets = partition_info.send_offsets.to(torch.long)
     recv_offsets = partition_info.recv_offsets.to(torch.long)
+    send_local_indices = partition_info.send_local_indices.to(torch.long)
+    recv_ghost_indices = partition_info.recv_ghost_indices.to(torch.long)
+    n_local = int(partition_info.partition_indices.numel())
     if send_offsets.numel() != world_size + 1 or recv_offsets.numel() != world_size + 1:
         raise ValueError("Halo offsets must contain world_size + 1 entries.")
     if send_offsets[0].item() != 0 or recv_offsets[0].item() != 0:
@@ -148,11 +155,26 @@ def validate_partition_info(
         raise ValueError("recv_offsets must be monotonic.")
     total_send = int(send_offsets[-1].item())
     total_recv = int(recv_offsets[-1].item())
-    if partition_info.send_local_indices.numel() != total_send:
+    if send_local_indices.numel() != total_send:
         raise ValueError("send_local_indices does not match send_offsets.")
-    if partition_info.recv_ghost_indices.numel() != total_recv:
+    if recv_ghost_indices.numel() != total_recv:
         raise ValueError("recv_ghost_indices does not match recv_offsets.")
+    if total_send > 0 and (
+        int(send_local_indices.min().item()) < 0 or int(send_local_indices.max().item()) >= n_local
+    ):
+        raise ValueError("send_local_indices must stay within the local atom range.")
+    expected_ghost_indices = torch.arange(
+        n_local,
+        n_local + total_recv,
+        dtype=torch.long,
+        device=recv_ghost_indices.device,
+    )
+    if total_recv > 0 and not torch.equal(recv_ghost_indices, expected_ghost_indices):
+        raise ValueError(
+            "recv_ghost_indices must enumerate contiguous ghost slots in peer-grouped CSR order."
+        )
     return {
+        "n_local": n_local,
         "total_send": total_send,
         "total_recv": total_recv,
         "send_counts_by_peer": (send_offsets[1:] - send_offsets[:-1]).cpu().tolist(),
@@ -184,10 +206,13 @@ class _RadiusGraphInput:
         self.natoms = torch.tensor([positions.shape[0]], dtype=torch.long, device=positions.device)
 
 
-# This is where the featureexchanger is inserted into MACE forward
-# How does it subclass though? did that logic get removed??
 class DistScaleShiftMACERuntimeMixin:
-    """Small forward override that inserts one feature exchange into MACE."""
+    """Runtime mixin for MP/MPA-like ScaleShiftMACE models.
+
+    The adapter installs this mixin onto the loaded model class so we can keep
+    the normal MACE loop while inserting learned-feature exchange between
+    interaction stages.
+    """
 
     __distmace_explicit_graph__ = True
 
@@ -196,8 +221,133 @@ class DistScaleShiftMACERuntimeMixin:
             "state": None,
             "exchange_enabled": False,
             "observation": None,
+            "feature_partition_info": None,
+            "feature_device": None,
+            "feature_width": None,
+            "debug_tracing": False,
+            "debug_prefix": "distmace-debug",
         }
         self._distmace_feature_exchanger = GPUDirectExchanger()
+
+    def _configure_feature_exchange_runtime(
+        self,
+        partition_info: PartitionMessagePassingInfo,
+        device: torch.device,
+    ) -> None:
+        self._distmace_feature_exchanger = GPUDirectExchanger()
+        self._distmace_context.update(
+            feature_partition_info=partition_info,
+            feature_device=device,
+            feature_width=None,
+        )
+
+    def _set_debug_tracing(self, enabled: bool, prefix: str = "distmace-debug") -> None:
+        self._distmace_context.update(debug_tracing=bool(enabled), debug_prefix=str(prefix))
+
+    def _debug_enabled(self) -> bool:
+        return bool(self._distmace_context.get("debug_tracing"))
+
+    def _debug_rank(self) -> int:
+        if dist.is_initialized():
+            return int(dist.get_rank())
+        return -1
+
+    def _emit_debug_log(self, stage: str, **payload: Any) -> None:
+        if not self._debug_enabled():
+            return
+        prefix = self._distmace_context.get("debug_prefix", "distmace-debug")
+        rank = self._debug_rank()
+        message = [f"[{prefix}][rank={rank}][stage={stage}]"]
+        for key, value in payload.items():
+            message.append(f"{key}={value}")
+        print(" ".join(message), flush=True)
+
+    @staticmethod
+    def _tensor_shape(tensor: Optional[torch.Tensor]) -> Optional[List[int]]:
+        if tensor is None:
+            return None
+        return list(tensor.shape)
+
+    @staticmethod
+    def _describe_optional_tensor(tensor: Optional[torch.Tensor]) -> str:
+        if tensor is None:
+            return "None"
+        return str(list(tensor.shape))
+
+    @staticmethod
+    def _normalize_interaction_output(
+        interaction_output: Any,
+        interaction: torch.nn.Module,
+        layer_index: int,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if not isinstance(interaction_output, tuple) or len(interaction_output) != 2:
+            raise TypeError(
+                "MP/MPA interaction blocks must return a 2-tuple of "
+                f"(node_feats, sc); layer_index={layer_index}, "
+                f"interaction_type={interaction.__class__.__name__}, "
+                f"got={type(interaction_output).__name__}."
+            )
+        node_feats, sc = interaction_output
+        if not isinstance(node_feats, torch.Tensor):
+            raise TypeError(
+                "MP/MPA interaction blocks must return tensor node features as the first tuple "
+                f"item; layer_index={layer_index}, interaction_type={interaction.__class__.__name__}."
+            )
+        if sc is not None and not isinstance(sc, torch.Tensor):
+            raise TypeError(
+                "MP/MPA interaction blocks must return either a tensor or None for the skip "
+                f"connection; layer_index={layer_index}, interaction_type={interaction.__class__.__name__}."
+            )
+        return node_feats, sc
+
+    def _ensure_feature_exchanger_ready(
+        self,
+        node_feats: torch.Tensor,
+        state: DistNNPState,
+    ) -> None:
+        if node_feats.dim() != 2:
+            raise ValueError(
+                "The MP/MPA top-down adapter expects 2-D node features after each product block."
+            )
+        expected_width = self._distmace_context.get("feature_width")
+        feature_width = int(node_feats.shape[-1])
+        if expected_width is None:
+            self._distmace_context["feature_width"] = feature_width
+        elif int(expected_width) != feature_width:
+            raise ValueError(
+                "Feature exchange width changed across interaction layers; the current MP/MPA "
+                "adapter requires a stable width."
+            )
+        self._emit_debug_log(
+            "feature_exchange_ready_check",
+            feature_width=feature_width,
+            expected_width=self._distmace_context.get("feature_width"),
+            num_rows=int(node_feats.shape[0]),
+        )
+
+        if self._distmace_feature_exchanger.is_ipc_setup:
+            self._emit_debug_log("feature_exchange_reuse", feature_width=feature_width)
+            return
+        partition_info = self._distmace_context.get("feature_partition_info")
+        device = self._distmace_context.get("feature_device")
+        if partition_info is None or device is None:
+            partition_info = state.local_partition_info
+            device = node_feats.device
+        self._emit_debug_log(
+            "feature_exchange_setup_begin",
+            feature_width=feature_width,
+            device=str(device),
+        )
+        self._distmace_feature_exchanger.setup_exchanger(
+            feature_width,
+            partition_info,
+            device,
+        )
+        self._emit_debug_log("feature_exchange_setup_end", feature_width=feature_width)
+
+    def _should_exchange_after_product(self, layer_index: int) -> bool:
+        interactions = getattr(self, "interactions", ())
+        return layer_index < max(0, len(interactions) - 1)
 
     def _begin_dist_forward(
         self, state: DistNNPState, exchange_enabled: bool, observation: Dict[str, Any]
@@ -205,39 +355,77 @@ class DistScaleShiftMACERuntimeMixin:
         self._distmace_context.update(
             state=state, exchange_enabled=exchange_enabled, observation=observation
         )
+        self._emit_debug_log(
+            "forward_begin",
+            exchange_enabled=exchange_enabled,
+            num_interactions=len(getattr(self, "interactions", ())),
+            num_readouts=len(getattr(self, "readouts", ())),
+        )
 
     def _end_dist_forward(self) -> None:
+        self._emit_debug_log("forward_end")
         self._distmace_context.update(state=None, exchange_enabled=False, observation=None)
 
-    def _exchange_after_first_layer(
+    def _exchange_after_product(
         self, node_feats: torch.Tensor, layer_index: int
     ) -> torch.Tensor:
         observation = self._distmace_context["observation"]
-        if layer_index != 0 or not self._distmace_context["exchange_enabled"]:
+        if not self._distmace_context["exchange_enabled"]:
             if observation is not None:
                 observation.setdefault("layer_records", []).append(
                     {
                         "layer_index": layer_index,
                         "executed": False,
-                        "reason": "only_layer0_is_exchanged" if layer_index else "no_structural_halo",
+                        "reason": "no_structural_halo",
                     }
                 )
+            self._emit_debug_log(
+                "exchange_skipped",
+                layer_index=layer_index,
+                reason="no_structural_halo",
+            )
+            return node_feats
+        if not self._should_exchange_after_product(layer_index):
+            if observation is not None:
+                observation.setdefault("layer_records", []).append(
+                    {
+                        "layer_index": layer_index,
+                        "executed": False,
+                        "reason": "last_interaction_has_no_downstream_consumer",
+                    }
+                )
+            self._emit_debug_log(
+                "exchange_skipped",
+                layer_index=layer_index,
+                reason="last_interaction_has_no_downstream_consumer",
+            )
             return node_feats
         state = self._distmace_context["state"]
         if state is None:
-            raise RuntimeError("Layer-0 exchange reached without an active DistNNPState.")
+            raise RuntimeError("Feature exchange reached without an active DistNNPState.")
         num_local = int(state.local_molecular_info.num_atoms)
+        self._ensure_feature_exchanger_ready(node_feats, state)
+        self._emit_debug_log(
+            "exchange_begin",
+            layer_index=layer_index,
+            owned_shape=self._tensor_shape(node_feats[:num_local]),
+            full_shape=self._tensor_shape(node_feats),
+        )
         exchanged = FeaturePushToExchange.apply(
-            # Only the features corresponding the local rank and not the ghost?
             node_feats[:num_local].contiguous(), state, self._distmace_feature_exchanger
         ).to(dtype=node_feats.dtype)
         if exchanged.shape[0] != node_feats.shape[0]:
-            raise ValueError("Layer-0 feature exchange changed the structural row count.")
+            raise ValueError("Feature exchange changed the structural row count.")
+        self._emit_debug_log(
+            "exchange_end",
+            layer_index=layer_index,
+            exchanged_shape=self._tensor_shape(exchanged),
+        )
         if observation is not None:
             observation["feature_exchange_used_ipc"] = True
             observation.setdefault("layer_records", []).append(
                 {
-                    "layer_index": 0,
+                    "layer_index": layer_index,
                     "executed": True,
                     "owned_shape": list(node_feats[:num_local].shape),
                     "exchanged_shape": list(exchanged.shape),
@@ -284,8 +472,16 @@ class DistScaleShiftMACERuntimeMixin:
         )
         node_es_list = [pair_node_energy]
         node_feats_list: List[torch.Tensor] = []
+        num_readouts = len(self.readouts)
+        num_layers = len(self.interactions)
+        if num_readouts not in (1, num_layers):
+            raise TypeError(
+                "MP/MPA top-down adapter expects either one final readout or one readout per "
+                f"interaction layer; got num_readouts={num_readouts}, num_layers={num_layers}."
+            )
+
         for layer_index, (interaction, product) in enumerate(zip(self.interactions, self.products)):
-            node_feats, sc = interaction(
+            interaction_output = interaction(
                 node_attrs=data["node_attrs"],
                 node_feats=node_feats,
                 edge_attrs=edge_attrs,
@@ -296,13 +492,27 @@ class DistScaleShiftMACERuntimeMixin:
                 lammps_class=ctx.interaction_kwargs.lammps_class,
                 lammps_natoms=ctx.interaction_kwargs.lammps_natoms,
             )
+            node_feats, sc = self._normalize_interaction_output(
+                interaction_output, interaction, layer_index
+            )
+            self._emit_debug_log(
+                "after_interaction",
+                layer_index=layer_index,
+                node_feats_shape=self._tensor_shape(node_feats),
+                skip_connection_shape=self._describe_optional_tensor(sc),
+                skip_connection_present=sc is not None,
+                interaction_type=interaction.__class__.__name__,
+            )
             node_feats = product(node_feats=node_feats, sc=sc, node_attrs=data["node_attrs"])
-            #Exact point of exchange
-            #Can modify it for multiple layers without any issue
-            node_feats = self._exchange_after_first_layer(node_feats, layer_index)
+            self._emit_debug_log(
+                "after_product",
+                layer_index=layer_index,
+                node_feats_shape=self._tensor_shape(node_feats),
+                product_type=product.__class__.__name__,
+            )
+            # Exchange after each product block whose outputs feed a later interaction.
+            node_feats = self._exchange_after_product(node_feats, layer_index)
             node_feats_list.append(node_feats)
-
-
         for readout_index, readout in enumerate(self.readouts):
             feature_index = -1 if len(self.readouts) == 1 else readout_index
             node_es_list.append(
@@ -344,6 +554,7 @@ class DistScaleShiftMACERuntimeMixin:
                 batch=data["batch"],
                 cell=ctx.cell,
             )
+
         return {
             "energy": total_energy,
             "node_energy": node_energy,
@@ -364,18 +575,20 @@ class DistScaleShiftMACERuntimeMixin:
 
 # The DistNNP model contract facing adapter class
 class DistMACETopDownAdapter(DistNNPModel):
-    """MACE model adapter using DistNNP partitions, halos, graphs, and exchange."""
+    """MP/MPA-focused MACE adapter using DistNNP partitions, halos, graphs, and exchange."""
 
     def __init__(
         self,
         model,
         atomic_number_map: Optional[Mapping[int, int]] = None,
         diagnostics_enabled: bool = True,
+        head_name: Optional[str] = None,
+        debug_tracing: bool = False,
+        debug_prefix: str = "distmace-debug",
     ) -> None:
         super().__init__()
         _require_mace()
-        if ScaleShiftMACE is None or not isinstance(model, ScaleShiftMACE):
-            raise TypeError("DistMACETopDownAdapter currently supports ScaleShiftMACE.")
+        self._validate_model_contract(model)
         self.model = model.to(dtype=COMPUTE_DTYPE).eval()
         self.atomic_number_map = dict(atomic_number_map or {})
         self.cutoff = float(model.r_max.detach().cpu().item())
@@ -385,11 +598,55 @@ class DistMACETopDownAdapter(DistNNPModel):
         self.diagnostics_enabled = diagnostics_enabled
         self.partition_validation: Dict[str, Any] = {}
         self.last_observation: Dict[str, Any] = {}
+        self.head_name = head_name
+        self.debug_tracing = bool(debug_tracing)
+        self.debug_prefix = debug_prefix
         self._install_runtime_subclass()
+
+    @staticmethod
+    def _validate_model_contract(model: Any) -> None:
+        required_attrs: Sequence[str] = (
+            "r_max",
+            "atomic_numbers",
+            "node_embedding",
+            "spherical_harmonics",
+            "radial_embedding",
+            "interactions",
+            "products",
+            "readouts",
+            "atomic_energies_fn",
+            "scale_shift",
+        )
+        missing = [name for name in required_attrs if not hasattr(model, name)]
+        if missing:
+            raise TypeError(
+                "DistMACETopDownAdapter currently targets MP/MPA-style ScaleShiftMACE-compatible "
+                f"models. Missing required attributes: {', '.join(missing)}."
+            )
+        if ScaleShiftMACE is not None and not isinstance(model, ScaleShiftMACE):
+            raise TypeError(
+                "DistMACETopDownAdapter currently supports MP/MPA checkpoints through the "
+                "ScaleShiftMACE-compatible contract exposed by the foundation-model loaders."
+            )
+        num_layers = len(getattr(model, "interactions"))
+        if num_layers != len(getattr(model, "products")):
+            raise TypeError("MACE interactions and products must have matching lengths.")
+        num_readouts = len(getattr(model, "readouts"))
+        if num_readouts not in (1, num_layers):
+            raise TypeError(
+                "MP/MPA checkpoints must expose either one final readout or one readout per "
+                f"interaction layer; got num_readouts={num_readouts}, num_layers={num_layers}."
+            )
 
     def set_diagnostics(self, enabled: bool) -> None:
         """Enable correctness records or the synchronization-free timed path."""
         self.diagnostics_enabled = bool(enabled)
+
+    def set_debug_tracing(self, enabled: bool, prefix: Optional[str] = None) -> None:
+        self.debug_tracing = bool(enabled)
+        if prefix is not None:
+            self.debug_prefix = str(prefix)
+        self.model._set_debug_tracing(self.debug_tracing, self.debug_prefix)
 
     def _install_runtime_subclass(self) -> None:
         if not getattr(self.model.__class__, "__distmace_explicit_graph__", False):
@@ -400,8 +657,8 @@ class DistMACETopDownAdapter(DistNNPModel):
             )
             self.model.__class__ = runtime_class
         self.model._configure_dist_runtime()
+        self.model._set_debug_tracing(self.debug_tracing, self.debug_prefix)
 
-    # List all the buffers that we're using for this adaptation
     def initialize_buffers(
         self,
         partition_info: PartitionMessagePassingInfo,
@@ -410,9 +667,13 @@ class DistMACETopDownAdapter(DistNNPModel):
     ) -> None:
         if world_size is None:
             world_size = int(partition_info.global_send_recv_matrix.shape[0])
+
         self.partition_validation = validate_partition_info(partition_info, world_size)
         total_send = self.partition_validation["total_send"]
         total_recv = self.partition_validation["total_recv"]
+        self.position_exchanger = GPUDirectExchanger()
+        self.atom_type_exchanger = GPUDirectExchanger()
+        self.model._configure_feature_exchange_runtime(partition_info, device)
         if total_send == 0 and total_recv == 0:
             self.exchange_enabled = False
             return
@@ -424,6 +685,7 @@ class DistMACETopDownAdapter(DistNNPModel):
 
     @staticmethod
     def _halo_global_indices(state: DistNNPState) -> torch.Tensor:
+        """Reconstruct halo global IDs in DistNNP's peer-then-global-id recv order."""
         info = state.local_partition_info
         edge_index = info.edge_index_halo
         device = state.local_molecular_info.atom_positions.device
@@ -432,6 +694,7 @@ class DistMACETopDownAdapter(DistNNPModel):
         src, dst = edge_index.to(torch.long)
         owner = info.partition_id.to(torch.long)
         rank = int(state.dist_env.global_rank)
+        expected_total = int(info.recv_offsets[-1].item())
         remote = src[owner.index_select(0, dst).eq(rank) & owner.index_select(0, src).ne(rank)]
         groups = []
         for peer in range(int(state.dist_env.world_size)):
@@ -440,7 +703,14 @@ class DistMACETopDownAdapter(DistNNPModel):
             peer_atoms = remote[owner.index_select(0, remote).eq(peer)]
             if peer_atoms.numel() > 0:
                 groups.append(torch.unique(peer_atoms.sort()[0]))
-        return torch.cat(groups) if groups else torch.empty(0, dtype=torch.long, device=device)
+        ordered = torch.cat(groups) if groups else torch.empty(0, dtype=torch.long, device=device)
+        if ordered.numel() != expected_total:
+            raise ValueError(
+                "Derived halo global IDs do not match recv_offsets. The current DistNNPState does not "
+                "expose halo_recv_global_ids directly, so the adapter requires edge_index_halo to imply "
+                "the same peer-then-global-id ordering."
+            )
+        return ordered
 
     def _map_atomic_numbers(self, atom_types: torch.Tensor) -> torch.Tensor:
         atom_types = atom_types.to(torch.long)
@@ -452,7 +722,6 @@ class DistMACETopDownAdapter(DistNNPModel):
             device=atom_types.device,
         )
 
-    #key logic right here
     def _build_structural_view(self, state: DistNNPState) -> StructuralHaloView:
         info = state.local_partition_info
         if not self.partition_validation:
@@ -481,14 +750,10 @@ class DistMACETopDownAdapter(DistNNPModel):
         expected_total = int(local_global.numel() + self.partition_validation["total_recv"])
         if exchanged_positions.shape[0] != expected_total:
             raise ValueError("Structural rows disagree with DistNNP recv metadata.")
-        if self.diagnostics_enabled:
-            halo_global = self._halo_global_indices(state)
-            expanded_global = torch.cat((local_global, halo_global))
-            if expanded_global.shape[0] != expected_total:
-                raise ValueError("Halo indices disagree with DistNNP recv metadata.")
-        else:
-            halo_global = torch.empty(0, dtype=torch.long, device=local_global.device)
-            expanded_global = torch.empty(0, dtype=torch.long, device=local_global.device)
+        halo_global = self._halo_global_indices(state)
+        expanded_global = torch.cat((local_global, halo_global))
+        if expanded_global.shape[0] != expected_total:
+            raise ValueError("Halo indices disagree with DistNNP recv metadata.")
         return StructuralHaloView(
             local_positions,
             exchanged_positions,
@@ -500,7 +765,6 @@ class DistMACETopDownAdapter(DistNNPModel):
             expected_total,
         )
 
-    # radius_graph_pbc_cuda wrapper
     def _radius_graph(
         self, positions: torch.Tensor, state: DistNNPState
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -514,6 +778,26 @@ class DistMACETopDownAdapter(DistNNPModel):
             )
         # DistNNP shifts the source image; MACE shifts source-to-destination vectors.
         return edge_index.long(), -cell_offsets
+
+    def _resolve_head_index(self) -> int:
+        heads = list(getattr(self.model, "heads", []))
+        if not heads:
+            return 0
+        if self.head_name is not None:
+            if self.head_name not in heads:
+                raise ValueError(
+                    f"Requested head_name={self.head_name!r} is not available in model heads {heads}."
+                )
+            return heads.index(self.head_name)
+        if len(heads) == 1:
+            return 0
+        if "default" in heads:
+            return heads.index("default")
+        if "Default" in heads:
+            return heads.index("Default")
+        raise ValueError(
+            "The loaded MP/MPA model exposes multiple heads but no explicit head_name was provided."
+        )
 
     def _build_owned_graph(
         self, view: StructuralHaloView, state: DistNNPState
@@ -530,12 +814,18 @@ class DistMACETopDownAdapter(DistNNPModel):
         node_attrs = view.exchanged_atomic_numbers[:, None].eq(
             model_atomic_numbers[None, :]
         ).to(dtype=COMPUTE_DTYPE)
-        if self.diagnostics_enabled and not bool(torch.all(node_attrs.sum(dim=1) == 1)):
-            missing = view.exchanged_atomic_numbers[node_attrs.sum(dim=1) == 0].unique()
-            raise ValueError(f"MACE model does not support atomic numbers {missing.tolist()}.")
+        row_match_counts = node_attrs.sum(dim=1)
+        if not bool(torch.all(row_match_counts == 1)):
+            missing = view.exchanged_atomic_numbers[row_match_counts == 0].unique()
+            ambiguous = view.exchanged_atomic_numbers[row_match_counts > 1].unique()
+            messages = []
+            if missing.numel() > 0:
+                messages.append(f"unsupported atomic numbers {missing.tolist()}")
+            if ambiguous.numel() > 0:
+                messages.append(f"ambiguous atomic-number mappings {ambiguous.tolist()}")
+            raise ValueError("MACE species compatibility check failed: " + "; ".join(messages))
         device = view.exchanged_positions.device
-        heads = list(getattr(self.model, "heads", ["Default"]))
-        head_index = heads.index("Default") if "Default" in heads else len(heads) - 1
+        head_index = self._resolve_head_index()
         batch_dict = {
             "positions": view.exchanged_positions,
             "edge_index": edge_index,
@@ -630,6 +920,21 @@ class DistMACETopDownAdapter(DistNNPModel):
                 "rank": int(state.dist_env.global_rank),
                 "feature_exchange_used_ipc": False,
                 "layer_records": [],
+                "model_contract": {
+                    "model_class": self.model.__class__.__mro__[1].__name__
+                    if len(self.model.__class__.__mro__) > 1
+                    else self.model.__class__.__name__,
+                    "runtime_class": self.model.__class__.__name__,
+                    "num_interactions": len(getattr(self.model, "interactions", ())),
+                    "num_products": len(getattr(self.model, "products", ())),
+                    "num_readouts": len(getattr(self.model, "readouts", ())),
+                    "heads": list(getattr(self.model, "heads", [])),
+                    "expected_exchange_layers": [
+                        layer_index
+                        for layer_index in range(len(getattr(self.model, "interactions", ())))
+                        if self.model._should_exchange_after_product(layer_index)
+                    ],
+                },
                 "graph_verification": verification,
             }
         self.last_observation = observation or {}
@@ -645,9 +950,29 @@ class DistMACETopDownAdapter(DistNNPModel):
             owned_energy = outputs.get("owned_local_energy")
             if owned_energy is None:
                 raise KeyError("Distributed MACE forward did not return owned_local_energy.")
+            self.model._emit_debug_log(
+                "owned_energy_ready",
+                owned_energy=float(owned_energy.detach().cpu()),
+            )
             owned_forces, force_checks = self._recover_forces(
                 owned_energy, view, self.diagnostics_enabled
             )
+            self.model._emit_debug_log(
+                "force_recovery_end",
+                returned_force_shape=list(owned_forces.shape),
+            )
+        except Exception as exc:
+            self.model._emit_debug_log(
+                "adapter_exception",
+                error_type=exc.__class__.__name__,
+                error=str(exc),
+            )
+            if observation is not None:
+                observation["adapter_exception"] = {
+                    "error_type": exc.__class__.__name__,
+                    "error": str(exc),
+                }
+            raise
         finally:
             self.model._end_dist_forward()
         if self.diagnostics_enabled:

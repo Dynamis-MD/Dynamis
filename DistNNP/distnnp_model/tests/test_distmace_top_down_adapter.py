@@ -7,11 +7,14 @@ fixtures, or monolithic-reference code.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
 import statistics
+import sys
 import time
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
@@ -119,6 +122,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-family", choices=["mp", "off", "omol", "polar"], default="mp")
     parser.add_argument("--model", default="medium-mpa-0")
     parser.add_argument("--comparison-model", default="")
+    parser.add_argument(
+        "--head-name",
+        default="",
+        help="Optional explicit MACE head name for multi-head MP/MPA checkpoints.",
+    )
+    parser.add_argument(
+        "--debug-exchange",
+        action="store_true",
+        help="Print per-rank adapter progress at each interaction and exchange boundary.",
+    )
+    parser.add_argument(
+        "--debug-log-prefix",
+        default="distmace-debug",
+        help="Prefix used by adapter-side debug tracing.",
+    )
     parser.add_argument("--ghost-cutoff-buffer", type=float, default=0.5)
     parser.add_argument(
         "--nonperiodic-padding",
@@ -132,13 +150,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-json")
     parser.add_argument("--strict-parity", action="store_true")
+    parser.add_argument(
+        "--validation-mode",
+        choices=["full", "minimal"],
+        default="full",
+        help=(
+            "Validation scope. 'full' runs monolithic graph/force parity; 'minimal' keeps "
+            "the distributed execution and structural diagnostics but skips monolithic references."
+        ),
+    )
     parser.add_argument("--atol", type=float, default=1e-5)
     parser.add_argument("--rtol", type=float, default=1e-5)
-    parser.add_argument(
+    benchmark_group = parser.add_mutually_exclusive_group()
+    benchmark_group.add_argument(
         "--benchmark",
+        dest="benchmark",
         action="store_true",
         help="Benchmark validated DistNNP-MACE against single-GPU standalone MACE.",
     )
+    benchmark_group.add_argument(
+        "--no-benchmark",
+        dest="benchmark",
+        action="store_false",
+        help="Disable benchmarking explicitly.",
+    )
+    parser.set_defaults(benchmark=False)
     parser.add_argument("--benchmark-warmup", type=int, default=3)
     parser.add_argument("--benchmark-iterations", type=int, default=10)
     parser.add_argument("--benchmark-samples", type=int, default=5)
@@ -311,6 +347,68 @@ def gather_records(record: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [item for item in records if item is not None]
 
 
+def model_contract_summary(model: Any) -> Dict[str, Any]:
+    return {
+        "model_class": model.__class__.__name__,
+        "num_interactions": len(getattr(model, "interactions", ())),
+        "num_products": len(getattr(model, "products", ())),
+        "num_readouts": len(getattr(model, "readouts", ())),
+        "heads": list(getattr(model, "heads", [])),
+        "atomic_number_count": int(getattr(model, "atomic_numbers").numel()),
+        "cutoff": float(model.r_max.detach().cpu()),
+        "interaction_types": [
+            interaction.__class__.__name__
+            for interaction in getattr(model, "interactions", ())
+        ],
+        "product_types": [
+            product.__class__.__name__ for product in getattr(model, "products", ())
+        ],
+        "readout_types": [
+            readout.__class__.__name__ for readout in getattr(model, "readouts", ())
+        ],
+    }
+
+
+def resolve_model_head_name(model: Any, requested_head_name: Optional[str] = None) -> str:
+    heads = list(getattr(model, "heads", []))
+    if requested_head_name:
+        if heads and requested_head_name not in heads:
+            raise ValueError(
+                f"Requested head_name={requested_head_name!r} is not available in model heads {heads}."
+            )
+        return requested_head_name
+    if not heads:
+        return "Default"
+    if len(heads) == 1:
+        return str(heads[0])
+    if "default" in heads:
+        return "default"
+    if "Default" in heads:
+        return "Default"
+    raise ValueError(
+        "A full-validation reference head could not be inferred from the loaded model; "
+        f"available heads: {heads}. Pass --head-name explicitly."
+    )
+
+
+def resolve_model_head_index(model: Any, requested_head_name: Optional[str] = None) -> int:
+    heads = list(getattr(model, "heads", []))
+    if not heads:
+        return 0
+    resolved_head_name = resolve_model_head_name(model, requested_head_name)
+    return heads.index(resolved_head_name)
+
+
+def emit_reference_debug(enabled: bool, stage: str, **payload: Any) -> None:
+    if not enabled:
+        return
+    rank = dist.get_rank() if dist.is_initialized() else -1
+    message = [f"[distmace-reference][rank={rank}][stage={stage}]"]
+    for key, value in payload.items():
+        message.append(f"{key}={value}")
+    print(" ".join(message), flush=True)
+
+
 def radius_graph(
     positions: torch.Tensor,
     sim: SimulationConfig,
@@ -377,6 +475,7 @@ def explicit_mace_batch_from_tensors(
     sim: SimulationConfig,
     edge_index: torch.Tensor,
     unit_shifts: torch.Tensor,
+    head_name: Optional[str] = None,
 ) -> Dict[str, torch.Tensor]:
     """Package an explicit graph without invoking MACE neighbor generation."""
     device = positions.device
@@ -384,8 +483,7 @@ def explicit_mace_batch_from_tensors(
     node_attrs = numbers[:, None].eq(model_numbers[None, :]).to(COMPUTE_DTYPE)
     cell = sim.cell.reshape(3, 3).to(dtype=COMPUTE_DTYPE)
     unit_shifts = unit_shifts.to(device=device, dtype=COMPUTE_DTYPE)
-    heads = list(getattr(model, "heads", ["Default"]))
-    head_index = heads.index("Default") if "Default" in heads else len(heads) - 1
+    head_index = resolve_model_head_index(model, head_name)
     return {
         "positions": positions,
         "edge_index": edge_index.to(device),
@@ -489,6 +587,7 @@ def benchmark_speedup(
             sim,
             edge_index,
             unit_shifts,
+            head_name=args.head_name or None,
         )
         standalone_model(
             batch,
@@ -553,8 +652,9 @@ def benchmark_speedup(
 
 
 def standalone_mace_batch(
-    raw: Dict[str, Any], model, cutoff: float, device: torch.device
+    raw: Dict[str, Any], model, cutoff: float, device: torch.device, head_name: Optional[str] = None
 ) -> Tuple[Dict[str, torch.Tensor], set[Tuple[int, int, int, int, int]]]:
+    resolved_head = resolve_model_head_name(model, head_name)
     config = Configuration(
         atomic_numbers=np.asarray(raw["atomic_numbers"], dtype=np.int64),
         positions=np.asarray(raw["positions"], dtype=np.float32),
@@ -564,14 +664,15 @@ def standalone_mace_batch(
         pbc=tuple(raw["pbc"]),
         weight=1.0,
         config_type="DistMACE_reference",
-        head="Default",
+        head=resolved_head,
     )
+    model_heads = list(getattr(model, "heads", []))
     z_table = AtomicNumberTable([int(value) for value in model.atomic_numbers.cpu().tolist()])
     atomic_data = AtomicData.from_config(
         config=config,
         z_table=z_table,
         cutoff=cutoff,
-        heads=getattr(model, "heads", ["Default"]),
+        heads=model_heads or [resolved_head],
     )
     records = edge_records(atomic_data.edge_index, atomic_data.unit_shifts)
     batch = Batch.from_data_list([atomic_data]).to(device).to_dict()
@@ -589,14 +690,36 @@ def monolithic_references(
     sim: SimulationConfig,
     args: argparse.Namespace,
     device: torch.device,
+    model: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    model = load_raw_mace_model(
-        args.model_family, args.comparison_model or args.model, str(device)
-    ).to(device=device, dtype=COMPUTE_DTYPE).eval()
+    emit_reference_debug(
+        args.debug_exchange,
+        "reference_begin",
+        comparison_model=args.comparison_model or args.model,
+    )
+    if model is None:
+        model = load_raw_mace_model(
+            args.model_family, args.comparison_model or args.model, str(device)
+        ).to(device=device, dtype=COMPUTE_DTYPE).eval()
     cutoff = float(model.r_max.detach().cpu())
     positions = torch.tensor(raw["positions"], dtype=COMPUTE_DTYPE, device=device)
     dist_edges, dist_shifts = radius_graph(positions, sim, cutoff)
-    explicit_batch = explicit_mace_batch(raw, model, sim, dist_edges, dist_shifts, device)
+    emit_reference_debug(
+        args.debug_exchange,
+        "explicit_batch_ready",
+        cutoff=cutoff,
+        edge_count=int(dist_edges.shape[1]),
+    )
+    explicit_batch = explicit_mace_batch_from_tensors(
+        positions,
+        torch.tensor(raw["atomic_numbers"], dtype=torch.long, device=device),
+        model,
+        sim,
+        dist_edges,
+        dist_shifts,
+        head_name=args.head_name or None,
+    )
+    emit_reference_debug(args.debug_exchange, "explicit_forward_begin")
     explicit_out = model(
         explicit_batch,
         training=False,
@@ -604,7 +727,21 @@ def monolithic_references(
         compute_stress=False,
         compute_hessian=False,
     )
-    standalone_batch, standalone_records = standalone_mace_batch(raw, model, cutoff, device)
+    emit_reference_debug(args.debug_exchange, "explicit_forward_end")
+    emit_reference_debug(args.debug_exchange, "standalone_batch_begin")
+    standalone_batch, standalone_records = standalone_mace_batch(
+        raw,
+        model,
+        cutoff,
+        device,
+        head_name=args.head_name or None,
+    )
+    emit_reference_debug(
+        args.debug_exchange,
+        "standalone_batch_end",
+        edge_count=len(standalone_records),
+    )
+    emit_reference_debug(args.debug_exchange, "standalone_forward_begin")
     standalone_out = model(
         standalone_batch,
         training=False,
@@ -612,6 +749,7 @@ def monolithic_references(
         compute_stress=False,
         compute_hessian=False,
     )
+    emit_reference_debug(args.debug_exchange, "standalone_forward_end")
     dist_records = edge_records(dist_edges, dist_shifts)
     dist_symmetry, dist_missing_reverse = reverse_edge_symmetry(dist_records)
     mace_symmetry, mace_missing_reverse = reverse_edge_symmetry(standalone_records)
@@ -772,6 +910,80 @@ def build_summary(
     }
 
 
+def build_minimal_summary(
+    raw: Dict[str, Any],
+    records: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    records = sorted(records, key=lambda item: item["rank"])
+    owned_indices = [index for item in records for index in item["local_global_indices"]]
+    ownership_ok = sorted(owned_indices) == list(range(len(raw["atomic_numbers"])))
+    send_matrix = torch.tensor([item["send_counts_by_peer"] for item in records])
+    recv_matrix = torch.tensor([item["recv_counts_by_peer"] for item in records])
+    peer_symmetry = torch.equal(send_matrix, recv_matrix.T)
+    structural_ok = all(
+        item["graph_verification"]["structural_classification"] == "structural_graph_ok"
+        for item in records
+    )
+    all_force_shapes_ok = all(
+        tuple(item["returned_force_shape"]) == (len(item["local_global_indices"]), 3)
+        for item in records
+    )
+    classification = (
+        "minimal_ok"
+        if ownership_ok and peer_symmetry and structural_ok and all_force_shapes_ok
+        else "minimal_structural_mismatch"
+    )
+    return {
+        "system": raw["name"],
+        "source_path": raw.get("source_path", f"builtin://{raw['name']}"),
+        "num_atoms": len(raw["atomic_numbers"]),
+        "coordinate_translation": raw.get("coordinate_translation", [0.0, 0.0, 0.0]),
+        "nonperiodic_padding": raw.get("nonperiodic_padding"),
+        "validation_mode": "minimal",
+        "mismatch_classification": classification,
+        "pre_validation": {
+            "all_atoms_owned_exactly_once": ownership_ok,
+            "send_recv_peer_symmetry": peer_symmetry,
+            "all_structural_graphs_ok": structural_ok,
+            "graph_builder_agreement": None,
+            "cutoff": None,
+            "distnnp_edge_count": None,
+            "standalone_mace_edge_count": None,
+            "distnnp_reverse_edge_symmetry": None,
+            "standalone_mace_reverse_edge_symmetry": None,
+            "distnnp_missing_reverse_preview": [],
+            "standalone_mace_missing_reverse_preview": [],
+            "distnnp_only_edge_preview": [],
+            "mace_only_edge_preview": [],
+            "rank_graph_verification": [item["graph_verification"] for item in records],
+        },
+        "parity": {
+            "distributed_energy": sum(item["owned_local_energy"] for item in records),
+            "explicit_distnnp_graph_energy": None,
+            "standalone_mace_energy": None,
+            "distributed_minus_explicit_energy": None,
+            "distributed_minus_standalone_energy": None,
+            "explicit_force_mae": None,
+            "explicit_force_max_abs": None,
+            "explicit_node_energy_mae": None,
+            "explicit_node_energy_max_abs": None,
+            "standalone_force_mae": None,
+            "standalone_force_max_abs": None,
+            "explicit_energy_close": None,
+            "explicit_forces_close": None,
+            "explicit_node_energy_close": None,
+            "all_distributed_dtypes_float32": all(
+                item["model_parameter_dtype"] == "torch.float32"
+                and item["position_dtype"] == "torch.float32"
+                and item["force_dtype"] == "torch.float32"
+                for item in records
+            ),
+            "all_returned_force_shapes_local": all_force_shapes_ok,
+        },
+        "ranks": records,
+    }
+
+
 def print_summary(summary: Dict[str, Any]) -> None:
     print("=" * 60)
     print("DistMACE Explicit-Graph Experiment")
@@ -780,23 +992,29 @@ def print_summary(summary: Dict[str, Any]) -> None:
     print(f"source_path: {summary['source_path']}")
     print(f"num_atoms: {summary['num_atoms']}")
     print(f"coordinate_translation: {summary['coordinate_translation']}")
+    print(f"validation_mode: {summary.get('validation_mode', 'full')}")
     print(f"mismatch_classification: {summary['mismatch_classification']}")
+    if "model_contract" in summary:
+        print("\n" + "-" * 60 + "\nModel Contract\n" + "-" * 60)
+        for key, value in summary["model_contract"].items():
+            print(f"{key}: {value}")
     print("\n" + "-" * 60 + "\nPre-Validation\n" + "-" * 60)
     print(f"all_atoms_owned_exactly_once: {summary['pre_validation']['all_atoms_owned_exactly_once']}")
     print(f"send_recv_peer_symmetry: {summary['pre_validation']['send_recv_peer_symmetry']}")
     print(f"all_structural_graphs_ok: {summary['pre_validation']['all_structural_graphs_ok']}")
-    print(f"graph_builder_agreement: {summary['pre_validation']['graph_builder_agreement']}")
-    print(f"cutoff: {summary['pre_validation']['cutoff']}")
-    print(f"distnnp_edge_count: {summary['pre_validation']['distnnp_edge_count']}")
-    print(f"standalone_mace_edge_count: {summary['pre_validation']['standalone_mace_edge_count']}")
-    print(f"distnnp_reverse_edge_symmetry: {summary['pre_validation']['distnnp_reverse_edge_symmetry']}")
-    print(f"standalone_mace_reverse_edge_symmetry: {summary['pre_validation']['standalone_mace_reverse_edge_symmetry']}")
-    if not summary["pre_validation"]["graph_builder_agreement"]:
+    if summary["pre_validation"]["graph_builder_agreement"] is not None:
+        print(f"graph_builder_agreement: {summary['pre_validation']['graph_builder_agreement']}")
+        print(f"cutoff: {summary['pre_validation']['cutoff']}")
+        print(f"distnnp_edge_count: {summary['pre_validation']['distnnp_edge_count']}")
+        print(f"standalone_mace_edge_count: {summary['pre_validation']['standalone_mace_edge_count']}")
+        print(f"distnnp_reverse_edge_symmetry: {summary['pre_validation']['distnnp_reverse_edge_symmetry']}")
+        print(f"standalone_mace_reverse_edge_symmetry: {summary['pre_validation']['standalone_mace_reverse_edge_symmetry']}")
+    if summary["pre_validation"]["graph_builder_agreement"] is False:
         print(f"distnnp_only_edge_preview: {summary['pre_validation']['distnnp_only_edge_preview']}")
         print(f"mace_only_edge_preview: {summary['pre_validation']['mace_only_edge_preview']}")
-    if not summary["pre_validation"]["distnnp_reverse_edge_symmetry"]:
+    if summary["pre_validation"]["distnnp_reverse_edge_symmetry"] is False:
         print(f"distnnp_missing_reverse_preview: {summary['pre_validation']['distnnp_missing_reverse_preview']}")
-    if not summary["pre_validation"]["standalone_mace_reverse_edge_symmetry"]:
+    if summary["pre_validation"]["standalone_mace_reverse_edge_symmetry"] is False:
         print(f"standalone_mace_missing_reverse_preview: {summary['pre_validation']['standalone_mace_missing_reverse_preview']}")
     for item in summary["pre_validation"]["rank_graph_verification"]:
         print(
@@ -810,10 +1028,16 @@ def print_summary(summary: Dict[str, Any]) -> None:
         print(f"{key}: {value}")
     print("\n" + "-" * 60 + "\nPer-Rank\n" + "-" * 60)
     for record in summary["ranks"]:
+        executed_layers = [
+            layer_record["layer_index"]
+            for layer_record in record.get("layer_records", [])
+            if layer_record.get("executed")
+        ]
         print(
             f"rank {record['rank']}: local={record['n_local']}, halo={record['n_halo']}, "
             f"owned_edges={record['owned_destination_edge_count']}, "
-            f"layer0_exchange={record['feature_exchange_used_ipc']}"
+            f"feature_exchange_used_ipc={record['feature_exchange_used_ipc']}, "
+            f"executed_exchange_layers={executed_layers}"
         )
     if "benchmark" in summary:
         benchmark = summary["benchmark"]
@@ -874,6 +1098,15 @@ def run_experiment(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
     device = torch_env.device
     raw = load_xyz(args.xyz_path) if args.xyz_path else BUILTIN_SYSTEMS[args.builtin_system]()
     model = load_raw_mace_model(args.model_family, args.model, str(device)).to(device).eval()
+    contract = model_contract_summary(model)
+    reference_model = None
+    if dist.get_rank() == 0 and args.validation_mode == "full":
+        if args.comparison_model:
+            reference_model = load_raw_mace_model(
+                args.model_family, args.comparison_model, str(device)
+            ).to(device=device, dtype=COMPUTE_DTYPE).eval()
+        else:
+            reference_model = copy.deepcopy(model).to(device=device, dtype=COMPUTE_DTYPE).eval()
     cutoff = float(model.r_max.detach().cpu())
     if not args.disable_nonperiodic_canonicalization:
         padding = args.nonperiodic_padding
@@ -881,26 +1114,52 @@ def run_experiment(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
             padding = cutoff + args.ghost_cutoff_buffer
         raw = canonicalize_raw_structure(raw, padding)
     state, sim = build_state(raw, cutoff, args.ghost_cutoff_buffer, torch_env)
-    adapter = DistMACETopDownAdapter(model)
+    adapter = DistMACETopDownAdapter(
+        model,
+        head_name=args.head_name or None,
+        debug_tracing=args.debug_exchange,
+        debug_prefix=args.debug_log_prefix,
+    )
     adapter.initialize_buffers(state.local_partition_info, device, dist.get_world_size())
-    energy, forces = adapter(state)
-    record = adapter.last_observation | {
-        "returned_energy": float(energy.cpu()),
-        "returned_force_shape": list(forces.shape),
-    }
-    record["graph_verification"]["rank"] = dist.get_rank()
-    records = gather_records(record)
-    dist.barrier()
+    try:
+        energy, forces = adapter(state)
+        record = adapter.last_observation | {
+            "returned_energy": float(energy.cpu()),
+            "returned_force_shape": list(forces.shape),
+            "model_contract": contract,
+        }
+        record["graph_verification"]["rank"] = dist.get_rank()
+        records = gather_records(record)
+        dist.barrier()
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        if dist.is_initialized() and hasattr(dist, "abort"):
+            dist.abort()
+        raise
     summary = None
     classification = None
-    if dist.get_rank() == 0:
-        reference = monolithic_references(raw, sim, args, device)
-        summary = build_summary(raw, records, reference, args)
-        classification = summary["mismatch_classification"]
+    try:
+        if dist.get_rank() == 0:
+            if args.validation_mode == "full":
+                reference = monolithic_references(raw, sim, args, device, model=reference_model)
+                summary = build_summary(raw, records, reference, args)
+            else:
+                summary = build_minimal_summary(raw, records)
+            summary["model_contract"] = contract
+            classification = summary["mismatch_classification"]
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        if dist.is_initialized() and hasattr(dist, "abort"):
+            dist.abort()
+        raise
     classification_message = [classification]
     dist.broadcast_object_list(classification_message, src=0)
     classification = classification_message[0]
     if args.benchmark:
+        if args.validation_mode != "full":
+            raise RuntimeError("Benchmark requires --validation-mode full.")
         if classification != "parity_ok":
             raise RuntimeError(
                 f"Benchmark requires parity_ok pre-validation, got {classification}."
@@ -918,7 +1177,8 @@ def run_experiment(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     if args.strict_parity:
-        assert summary["mismatch_classification"] == "parity_ok", summary["mismatch_classification"]
+        expected = "parity_ok" if args.validation_mode == "full" else "minimal_ok"
+        assert summary["mismatch_classification"] == expected, summary["mismatch_classification"]
     return summary
 
 
@@ -938,7 +1198,6 @@ def main() -> None:
         run_experiment(build_parser().parse_args())
     finally:
         if dist.is_initialized():
-            dist.barrier()
             dist.destroy_process_group()
 
 
