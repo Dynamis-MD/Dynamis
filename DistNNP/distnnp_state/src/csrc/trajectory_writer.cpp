@@ -308,6 +308,16 @@ void TrajectoryWriter::submit(uint32_t step, MolecularInfo state, c10::optional<
     for (int i = 0; i < rank; i++) {
         atom_count += rank_atom_counts.at(i);
     }
+    std::cout << "Rank " << rank << " writing " << rank_atom_counts.at(rank) << " atoms at offset " << offset << std::endl;
+
+    // doing sizeof here to be more explicit about the calculations
+    uint32_t indices_offset = offset + (atom_count * sizeof(int64_t));
+    offset += total_atoms * sizeof(int64_t);
+    uint32_t positions_offset = offset + (atom_count * 3 * sizeof(float));
+    offset += total_atoms * 3 * sizeof(float);
+    uint64_t velocities_offset = offset + (atom_count * 3 * sizeof(float));
+
+
 
     auto write_tensor = [&](torch::Tensor t, uint32_t off) {
         torch::Tensor cpu_tensor = t.to(torch::kCPU).contiguous();
