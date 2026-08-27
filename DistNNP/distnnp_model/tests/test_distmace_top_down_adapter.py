@@ -7,7 +7,6 @@ fixtures, or monolithic-reference code.
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import os
 import re
@@ -15,6 +14,7 @@ import statistics
 import sys
 import time
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,6 +28,9 @@ from distnnp_model.nnp.MACE_Adaptation.distmace_top_down_adapter import (
     DistMACETopDownAdapter,
     canonicalize_nonperiodic_geometry,
     load_raw_mace_model,
+    resolve_model_head_index,
+    resolve_model_head_name,
+    summarize_model_contract,
 )
 from distnnp_state import (
     DistNNPState,
@@ -50,6 +53,18 @@ try:
 except Exception:  # pragma: no cover - cluster dependency
     HAS_MACE = False
     ASE_ATOMIC_NUMBERS = {}
+
+
+@dataclass
+class PreparedExperiment:
+    raw: Dict[str, Any]
+    sim: SimulationConfig
+    state: DistNNPState
+    model: Any
+    contract: Dict[str, Any]
+    adapter: DistMACETopDownAdapter
+    device: torch.device
+    reference_model: Optional[Any]
 
 
 def natural_chain12() -> Dict[str, Any]:
@@ -347,58 +362,6 @@ def gather_records(record: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [item for item in records if item is not None]
 
 
-def model_contract_summary(model: Any) -> Dict[str, Any]:
-    return {
-        "model_class": model.__class__.__name__,
-        "num_interactions": len(getattr(model, "interactions", ())),
-        "num_products": len(getattr(model, "products", ())),
-        "num_readouts": len(getattr(model, "readouts", ())),
-        "heads": list(getattr(model, "heads", [])),
-        "atomic_number_count": int(getattr(model, "atomic_numbers").numel()),
-        "cutoff": float(model.r_max.detach().cpu()),
-        "interaction_types": [
-            interaction.__class__.__name__
-            for interaction in getattr(model, "interactions", ())
-        ],
-        "product_types": [
-            product.__class__.__name__ for product in getattr(model, "products", ())
-        ],
-        "readout_types": [
-            readout.__class__.__name__ for readout in getattr(model, "readouts", ())
-        ],
-    }
-
-
-def resolve_model_head_name(model: Any, requested_head_name: Optional[str] = None) -> str:
-    heads = list(getattr(model, "heads", []))
-    if requested_head_name:
-        if heads and requested_head_name not in heads:
-            raise ValueError(
-                f"Requested head_name={requested_head_name!r} is not available in model heads {heads}."
-            )
-        return requested_head_name
-    if not heads:
-        return "Default"
-    if len(heads) == 1:
-        return str(heads[0])
-    if "default" in heads:
-        return "default"
-    if "Default" in heads:
-        return "Default"
-    raise ValueError(
-        "A full-validation reference head could not be inferred from the loaded model; "
-        f"available heads: {heads}. Pass --head-name explicitly."
-    )
-
-
-def resolve_model_head_index(model: Any, requested_head_name: Optional[str] = None) -> int:
-    heads = list(getattr(model, "heads", []))
-    if not heads:
-        return 0
-    resolved_head_name = resolve_model_head_name(model, requested_head_name)
-    return heads.index(resolved_head_name)
-
-
 def emit_reference_debug(enabled: bool, stage: str, **payload: Any) -> None:
     if not enabled:
         return
@@ -541,114 +504,128 @@ def benchmark_speedup(
 
     rank = dist.get_rank()
     num_atoms = len(raw["atomic_numbers"])
+    previous_mode = adapter.execution_mode
+    previous_diagnostics = adapter.diagnostics_enabled
+    previous_debug = adapter.debug_tracing
+    adapter.set_execution_mode("benchmark")
     adapter.set_diagnostics(False)
+    adapter.set_debug_tracing(False)
+    assert adapter.execution_mode == "benchmark"
+    assert not adapter.diagnostics_enabled
+    assert not adapter.debug_tracing
+    assert not adapter.model._debug_enabled()
 
-    for _ in range(args.benchmark_warmup):
-        adapter(state)
-    _synchronize(device)
-    dist.barrier()
-
-    distributed_samples: List[float] = []
-    for _ in range(args.benchmark_samples):
-        dist.barrier()
-        _synchronize(device)
-        start = time.perf_counter()
-        for _ in range(args.benchmark_iterations):
+    try:
+        for _ in range(args.benchmark_warmup):
             adapter(state)
         _synchronize(device)
-        local_seconds = (time.perf_counter() - start) / args.benchmark_iterations
-        distributed_samples.append(_critical_path_seconds(local_seconds, device))
-
-    standalone_model = None
-    standalone_positions = None
-    standalone_numbers = None
-    cutoff = adapter.cutoff
-    if rank == 0:
-        standalone_model = load_raw_mace_model(
-            args.model_family, args.model, str(device)
-        ).to(device=device, dtype=COMPUTE_DTYPE).eval()
-        standalone_positions = torch.tensor(
-            raw["positions"], dtype=COMPUTE_DTYPE, device=device
-        )
-        standalone_numbers = torch.tensor(
-            raw["atomic_numbers"], dtype=torch.long, device=device
-        )
-
-    def standalone_step() -> None:
-        assert standalone_model is not None
-        assert standalone_positions is not None
-        assert standalone_numbers is not None
-        positions = standalone_positions.detach().clone()
-        edge_index, unit_shifts = radius_graph(positions, sim, cutoff)
-        batch = explicit_mace_batch_from_tensors(
-            positions,
-            standalone_numbers,
-            standalone_model,
-            sim,
-            edge_index,
-            unit_shifts,
-            head_name=args.head_name or None,
-        )
-        standalone_model(
-            batch,
-            training=False,
-            compute_force=True,
-            compute_stress=False,
-            compute_hessian=False,
-        )
-
-    dist.barrier()
-    if rank == 0:
-        for _ in range(args.benchmark_warmup):
-            standalone_step()
-        _synchronize(device)
-    dist.barrier()
-
-    standalone_samples: List[float] = []
-    for _ in range(args.benchmark_samples):
-        sample = torch.zeros(
-            (),
-            dtype=torch.float64,
-            device=device if dist.get_backend() == "nccl" else torch.device("cpu"),
-        )
         dist.barrier()
-        if rank == 0:
+    
+        distributed_samples: List[float] = []
+        for _ in range(args.benchmark_samples):
+            dist.barrier()
             _synchronize(device)
             start = time.perf_counter()
             for _ in range(args.benchmark_iterations):
+                adapter(state)
+            _synchronize(device)
+            local_seconds = (time.perf_counter() - start) / args.benchmark_iterations
+            distributed_samples.append(_critical_path_seconds(local_seconds, device))
+
+        standalone_model = None
+        standalone_positions = None
+        standalone_numbers = None
+        cutoff = adapter.cutoff
+        if rank == 0:
+            standalone_model = load_raw_mace_model(
+                args.model_family, args.model, str(device)
+            ).to(device=device, dtype=COMPUTE_DTYPE).eval()
+            standalone_positions = torch.tensor(
+                raw["positions"], dtype=COMPUTE_DTYPE, device=device
+            )
+            standalone_numbers = torch.tensor(
+                raw["atomic_numbers"], dtype=torch.long, device=device
+            )
+
+        def standalone_step() -> None:
+            assert standalone_model is not None
+            assert standalone_positions is not None
+            assert standalone_numbers is not None
+            positions = standalone_positions.detach().clone()
+            edge_index, unit_shifts = radius_graph(positions, sim, cutoff)
+            batch = explicit_mace_batch_from_tensors(
+                positions,
+                standalone_numbers,
+                standalone_model,
+                sim,
+                edge_index,
+                unit_shifts,
+                head_name=args.head_name or None,
+            )
+            standalone_model(
+                batch,
+                training=False,
+                compute_force=True,
+                compute_stress=False,
+                compute_hessian=False,
+            )
+
+        dist.barrier()
+        if rank == 0:
+            for _ in range(args.benchmark_warmup):
                 standalone_step()
             _synchronize(device)
-            sample.fill_((time.perf_counter() - start) / args.benchmark_iterations)
-        dist.broadcast(sample, src=0)
-        standalone_samples.append(float(sample.cpu()))
+        dist.barrier()
 
-    dist.barrier()
-    if rank != 0:
-        return None
-    distributed_stats = _timing_statistics(distributed_samples, num_atoms)
-    standalone_stats = _timing_statistics(standalone_samples, num_atoms)
-    speedup = (
-        standalone_stats["median_ms_per_step"]
-        / distributed_stats["median_ms_per_step"]
-    )
-    return {
-        "scope": (
-            "steady-state energy+forces; includes radius graph construction and "
-            "adapter communication; excludes model loading, partitioning, halo-map "
-            "setup, diagnostics, and parity validation"
-        ),
-        "standalone_baseline": "single GPU, full global explicit DistNNP-compatible graph",
-        "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else str(device),
-        "timing_method": "perf_counter with device synchronization; distributed samples use slowest rank",
-        "world_size": dist.get_world_size(),
-        "warmup_steps": args.benchmark_warmup,
-        "iterations_per_sample": args.benchmark_iterations,
-        "num_samples": args.benchmark_samples,
-        "distributed": distributed_stats,
-        "standalone": standalone_stats,
-        "speedup_standalone_over_distributed": speedup,
-        "parallel_efficiency": speedup / dist.get_world_size(),
-    }
+        standalone_samples: List[float] = []
+        for _ in range(args.benchmark_samples):
+            sample = torch.zeros(
+                (),
+                dtype=torch.float64,
+                device=device if dist.get_backend() == "nccl" else torch.device("cpu"),
+            )
+            dist.barrier()
+            if rank == 0:
+                _synchronize(device)
+                start = time.perf_counter()
+                for _ in range(args.benchmark_iterations):
+                    standalone_step()
+                _synchronize(device)
+                sample.fill_((time.perf_counter() - start) / args.benchmark_iterations)
+            dist.broadcast(sample, src=0)
+            standalone_samples.append(float(sample.cpu()))
+
+        dist.barrier()
+        if rank != 0:
+            return None
+        distributed_stats = _timing_statistics(distributed_samples, num_atoms)
+        standalone_stats = _timing_statistics(standalone_samples, num_atoms)
+        speedup = (
+            standalone_stats["median_ms_per_step"]
+            / distributed_stats["median_ms_per_step"]
+        )
+        return {
+            "scope": (
+                "steady-state energy+forces; includes radius graph construction and "
+                "adapter communication; excludes model loading, partitioning, halo-map "
+                "setup, diagnostics, and parity validation"
+            ),
+            "standalone_baseline": "single GPU, full global explicit DistNNP-compatible graph",
+            "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else str(device),
+            "timing_method": "perf_counter with device synchronization; distributed samples use slowest rank",
+            "world_size": dist.get_world_size(),
+            "warmup_steps": args.benchmark_warmup,
+            "iterations_per_sample": args.benchmark_iterations,
+            "num_samples": args.benchmark_samples,
+            "distributed": distributed_stats,
+            "standalone": standalone_stats,
+            "speedup_standalone_over_distributed": speedup,
+            "parallel_efficiency": speedup / dist.get_world_size(),
+        }
+    finally:
+        adapter.set_execution_mode(previous_mode)
+        adapter.set_diagnostics(previous_diagnostics)
+        adapter.set_debug_tracing(previous_debug)
 
 
 def standalone_mace_batch(
@@ -741,18 +718,22 @@ def monolithic_references(
         "standalone_batch_end",
         edge_count=len(standalone_records),
     )
-    emit_reference_debug(args.debug_exchange, "standalone_forward_begin")
-    standalone_out = model(
-        standalone_batch,
-        training=False,
-        compute_force=True,
-        compute_stress=False,
-        compute_hessian=False,
-    )
-    emit_reference_debug(args.debug_exchange, "standalone_forward_end")
     dist_records = edge_records(dist_edges, dist_shifts)
     dist_symmetry, dist_missing_reverse = reverse_edge_symmetry(dist_records)
     mace_symmetry, mace_missing_reverse = reverse_edge_symmetry(standalone_records)
+    graph_builder_agreement = dist_records == standalone_records
+    if graph_builder_agreement:
+        standalone_out = explicit_out
+    else:
+        emit_reference_debug(args.debug_exchange, "standalone_forward_begin")
+        standalone_out = model(
+            standalone_batch,
+            training=False,
+            compute_force=True,
+            compute_stress=False,
+            compute_hessian=False,
+        )
+        emit_reference_debug(args.debug_exchange, "standalone_forward_end")
     return {
         "cutoff": cutoff,
         "distnnp_graph_records": dist_records,
@@ -763,7 +744,7 @@ def monolithic_references(
         "standalone_mace_reverse_edge_symmetry": mace_symmetry,
         "distnnp_missing_reverse_preview": dist_missing_reverse,
         "standalone_mace_missing_reverse_preview": mace_missing_reverse,
-        "graph_builder_agreement": dist_records == standalone_records,
+        "graph_builder_agreement": graph_builder_agreement,
         "distnnp_only_edge_preview": [list(item) for item in sorted(dist_records - standalone_records)[:12]],
         "mace_only_edge_preview": [list(item) for item in sorted(standalone_records - dist_records)[:12]],
         "explicit_energy": float(explicit_out["energy"].detach().cpu().reshape(())),
@@ -1085,28 +1066,18 @@ def print_summary(summary: Dict[str, Any]) -> None:
         print(f"parallel_efficiency: {benchmark['parallel_efficiency']}")
 
 
-def run_experiment(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
+def prepare_experiment(args: argparse.Namespace) -> PreparedExperiment:
     if not HAS_MACE:
         raise ImportError("This experiment requires MACE.")
     if int(os.environ.get("WORLD_SIZE", "1")) < 2:
         raise RuntimeError("Launch this test with torchrun and at least two ranks.")
-    # torchrun provides RANK/WORLD_SIZE/LOCAL_RANK; TorchDistEnv consumes those
-    # variables and initializes the process group.
     torch_env = TorchDistEnv(is_distributed=True)
     if dist.get_world_size() < 2:
         raise RuntimeError("The distributed integration test requires at least two ranks.")
     device = torch_env.device
     raw = load_xyz(args.xyz_path) if args.xyz_path else BUILTIN_SYSTEMS[args.builtin_system]()
     model = load_raw_mace_model(args.model_family, args.model, str(device)).to(device).eval()
-    contract = model_contract_summary(model)
-    reference_model = None
-    if dist.get_rank() == 0 and args.validation_mode == "full":
-        if args.comparison_model:
-            reference_model = load_raw_mace_model(
-                args.model_family, args.comparison_model, str(device)
-            ).to(device=device, dtype=COMPUTE_DTYPE).eval()
-        else:
-            reference_model = copy.deepcopy(model).to(device=device, dtype=COMPUTE_DTYPE).eval()
+    contract = summarize_model_contract(model)
     cutoff = float(model.r_max.detach().cpu())
     if not args.disable_nonperiodic_canonicalization:
         padding = args.nonperiodic_padding
@@ -1121,39 +1092,83 @@ def run_experiment(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
         debug_prefix=args.debug_log_prefix,
     )
     adapter.initialize_buffers(state.local_partition_info, device, dist.get_world_size())
+    reference_model = None
+    if dist.get_rank() == 0 and args.validation_mode == "full":
+        if args.comparison_model:
+            reference_model = load_raw_mace_model(
+                args.model_family, args.comparison_model, str(device)
+            ).to(device=device, dtype=COMPUTE_DTYPE).eval()
+        else:
+            reference_model = model
+    return PreparedExperiment(
+        raw=raw,
+        sim=sim,
+        state=state,
+        model=model,
+        contract=contract,
+        adapter=adapter,
+        device=device,
+        reference_model=reference_model,
+    )
+
+
+def run_distributed_adapter_step(
+    prepared: PreparedExperiment,
+) -> Tuple[float, torch.Tensor, List[Dict[str, Any]]]:
     try:
-        energy, forces = adapter(state)
-        record = adapter.last_observation | {
+        energy, forces = prepared.adapter(prepared.state)
+        record = prepared.adapter.last_observation | {
             "returned_energy": float(energy.cpu()),
             "returned_force_shape": list(forces.shape),
-            "model_contract": contract,
+            "model_contract": prepared.contract,
         }
         record["graph_verification"]["rank"] = dist.get_rank()
         records = gather_records(record)
         dist.barrier()
+        return float(energy.cpu()), forces, records
     except Exception:
         traceback.print_exc(file=sys.stderr)
         sys.stderr.flush()
         if dist.is_initialized() and hasattr(dist, "abort"):
             dist.abort()
         raise
+
+
+def build_validation_summary(
+    prepared: PreparedExperiment,
+    records: List[Dict[str, Any]],
+    args: argparse.Namespace,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     summary = None
     classification = None
     try:
         if dist.get_rank() == 0:
             if args.validation_mode == "full":
-                reference = monolithic_references(raw, sim, args, device, model=reference_model)
-                summary = build_summary(raw, records, reference, args)
+                reference = monolithic_references(
+                    prepared.raw,
+                    prepared.sim,
+                    args,
+                    prepared.device,
+                    model=prepared.reference_model,
+                )
+                summary = build_summary(prepared.raw, records, reference, args)
             else:
-                summary = build_minimal_summary(raw, records)
-            summary["model_contract"] = contract
+                summary = build_minimal_summary(prepared.raw, records)
+            summary["model_contract"] = prepared.contract
             classification = summary["mismatch_classification"]
+        return summary, classification
     except Exception:
         traceback.print_exc(file=sys.stderr)
         sys.stderr.flush()
         if dist.is_initialized() and hasattr(dist, "abort"):
             dist.abort()
         raise
+
+
+def run_experiment(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
+    prepared = prepare_experiment(args)
+    _, _, records = run_distributed_adapter_step(prepared)
+    summary, classification = build_validation_summary(prepared, records, args)
     classification_message = [classification]
     dist.broadcast_object_list(classification_message, src=0)
     classification = classification_message[0]
@@ -1164,7 +1179,14 @@ def run_experiment(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
             raise RuntimeError(
                 f"Benchmark requires parity_ok pre-validation, got {classification}."
             )
-        benchmark = benchmark_speedup(raw, sim, state, adapter, args, device)
+        benchmark = benchmark_speedup(
+            prepared.raw,
+            prepared.sim,
+            prepared.state,
+            prepared.adapter,
+            args,
+            prepared.device,
+        )
         if dist.get_rank() == 0:
             assert summary is not None and benchmark is not None
             summary["benchmark"] = benchmark

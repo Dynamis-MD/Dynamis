@@ -130,7 +130,6 @@ def canonicalize_nonperiodic_geometry(
         )
     return adjusted_positions, adjusted_cell, translation
 
-#Do we have to validate it every single time?
 def validate_partition_info(
     partition_info: PartitionMessagePassingInfo,
     world_size: int,
@@ -198,6 +197,164 @@ def _edge_records(
     }
 
 
+def resolve_model_head_name(model: Any, requested_head_name: Optional[str] = None) -> str:
+    heads = list(getattr(model, "heads", []))
+    if requested_head_name:
+        if heads and requested_head_name not in heads:
+            raise ValueError(
+                f"Requested head_name={requested_head_name!r} is not available in model heads {heads}."
+            )
+        return requested_head_name
+    if not heads:
+        return "Default"
+    if len(heads) == 1:
+        return str(heads[0])
+    if "default" in heads:
+        return "default"
+    if "Default" in heads:
+        return "Default"
+    raise ValueError(
+        "A model head could not be inferred from the loaded model; "
+        f"available heads: {heads}. Pass head_name explicitly."
+    )
+
+
+def resolve_model_head_index(model: Any, requested_head_name: Optional[str] = None) -> int:
+    heads = list(getattr(model, "heads", []))
+    if not heads:
+        return 0
+    return heads.index(resolve_model_head_name(model, requested_head_name))
+
+
+def summarize_model_contract(
+    model: Any,
+    expected_exchange_layers: Optional[List[int]] = None,
+) -> Dict[str, Any]:
+    summary = {
+        "model_class": model.__class__.__name__,
+        "num_interactions": len(getattr(model, "interactions", ())),
+        "num_products": len(getattr(model, "products", ())),
+        "num_readouts": len(getattr(model, "readouts", ())),
+        "heads": list(getattr(model, "heads", [])),
+        "atomic_number_count": int(getattr(model, "atomic_numbers").numel()),
+        "cutoff": float(model.r_max.detach().cpu()),
+        "interaction_types": [
+            interaction.__class__.__name__
+            for interaction in getattr(model, "interactions", ())
+        ],
+        "product_types": [
+            product.__class__.__name__ for product in getattr(model, "products", ())
+        ],
+        "readout_types": [
+            readout.__class__.__name__ for readout in getattr(model, "readouts", ())
+        ],
+    }
+    if expected_exchange_layers is not None:
+        summary["expected_exchange_layers"] = list(expected_exchange_layers)
+    return summary
+
+
+def build_graph_authority_record(
+    view: StructuralHaloView,
+    local_graph: ExplicitOwnedGraph,
+    state: DistNNPState,
+    radius_graph_fn: Any,
+    edge_records_fn: Any,
+) -> Dict[str, Any]:
+    global_positions = state.global_molecular_info.atom_positions
+    global_edge_index, global_unit_shifts = radius_graph_fn(global_positions, state)
+    owner = state.local_partition_info.partition_id.long()
+    rank = int(state.dist_env.global_rank)
+    mask = owner.index_select(0, global_edge_index[1]).eq(rank)
+    global_ids = torch.arange(global_positions.shape[0], device=global_positions.device)
+    expected = edge_records_fn(global_edge_index[:, mask], global_unit_shifts[mask], global_ids)
+    actual = edge_records_fn(
+        local_graph.edge_index, local_graph.unit_shifts, view.expanded_global_indices
+    )
+    owned = set(view.local_global_indices.cpu().tolist())
+    required_remote = sorted(
+        {src for src, dst, *_ in expected if dst in owned and src not in owned}
+    )
+    actual_halo = set(view.halo_global_indices.cpu().tolist())
+    missing_halo = sorted(set(required_remote) - actual_halo)
+    missing_edges = sorted(expected - actual)
+    extra_edges = sorted(actual - expected)
+    halo_issue = bool(missing_halo)
+    reconstruction_issue = not halo_issue and bool(missing_edges or extra_edges)
+    return {
+        "stage": "pre_forward_graph_authority",
+        "radius_graph_authority": "distnnp_state.radius_graph_pbc_cuda",
+        "required_remote_global_indices": required_remote,
+        "actual_halo_global_indices": sorted(actual_halo),
+        "missing_required_halo_global_indices": missing_halo,
+        "halo_builder_issue": halo_issue,
+        "local_graph_matches_global_owned_graph": not (missing_edges or extra_edges),
+        "local_graph_reconstruction_issue": reconstruction_issue,
+        "expected_owned_edge_count": len(expected),
+        "actual_owned_edge_count": len(actual),
+        "missing_owned_edge_preview": [list(item) for item in missing_edges[:12]],
+        "extra_owned_edge_preview": [list(item) for item in extra_edges[:12]],
+        "structural_classification": (
+            "halo_builder_issue"
+            if halo_issue
+            else "local_graph_reconstruction_issue"
+            if reconstruction_issue
+            else "structural_graph_ok"
+        ),
+    }
+
+
+def make_adapter_observation(
+    model: Any,
+    state: DistNNPState,
+    graph_verification: Dict[str, Any],
+    expected_exchange_layers: List[int],
+) -> Dict[str, Any]:
+    return {
+        "rank": int(state.dist_env.global_rank),
+        "feature_exchange_used_ipc": False,
+        "layer_records": [],
+        "graph_verification": graph_verification,
+        "model_contract": summarize_model_contract(
+            model, expected_exchange_layers=expected_exchange_layers
+        ),
+    }
+
+
+def finalize_adapter_observation(
+    observation: Dict[str, Any],
+    partition_validation: Dict[str, Any],
+    view: StructuralHaloView,
+    graph: ExplicitOwnedGraph,
+    outputs: Dict[str, Any],
+    owned_energy: torch.Tensor,
+    owned_forces: torch.Tensor,
+    force_checks: Dict[str, Any],
+    model_parameter_dtype: str,
+) -> Dict[str, Any]:
+    observation.update(
+        {
+            "n_local": view.num_local,
+            "n_halo": view.num_halo,
+            "n_total_after_exchange": view.num_total,
+            "local_global_indices": view.local_global_indices.cpu().tolist(),
+            "halo_global_indices": view.halo_global_indices.cpu().tolist(),
+            "send_counts_by_peer": partition_validation["send_counts_by_peer"],
+            "recv_counts_by_peer": partition_validation["recv_counts_by_peer"],
+            "owned_destination_edge_count": int(graph.edge_index.shape[1]),
+            "compute_dtype": str(view.exchanged_positions.dtype),
+            "model_parameter_dtype": model_parameter_dtype,
+            "position_dtype": str(view.exchanged_positions.dtype),
+            "force_dtype": str(owned_forces.dtype),
+            "owned_node_energy_values": outputs["owned_node_energy"].detach().cpu().tolist(),
+            "owned_local_energy": float(owned_energy.detach().cpu()),
+            "owned_local_force_values": owned_forces.detach().cpu().tolist(),
+            **force_checks,
+        }
+    )
+    return observation
+
+
 class _RadiusGraphInput:
     def __init__(self, positions: torch.Tensor, cell: torch.Tensor, pbc: torch.Tensor) -> None:
         self.pos = positions
@@ -205,6 +362,9 @@ class _RadiusGraphInput:
         self.pbc = pbc.reshape(1, 3)
         self.natoms = torch.tensor([positions.shape[0]], dtype=torch.long, device=positions.device)
 
+##===============================================================
+##--- End of utilites ------
+##===============================================================
 
 class DistScaleShiftMACERuntimeMixin:
     """Runtime mixin for MP/MPA-like ScaleShiftMACE models.
@@ -224,6 +384,7 @@ class DistScaleShiftMACERuntimeMixin:
             "feature_partition_info": None,
             "feature_device": None,
             "feature_width": None,
+            "execution_mode": "validate",
             "debug_tracing": False,
             "debug_prefix": "distmace-debug",
         }
@@ -243,6 +404,12 @@ class DistScaleShiftMACERuntimeMixin:
 
     def _set_debug_tracing(self, enabled: bool, prefix: str = "distmace-debug") -> None:
         self._distmace_context.update(debug_tracing=bool(enabled), debug_prefix=str(prefix))
+
+    def _set_execution_mode(self, mode: str) -> None:
+        self._distmace_context["execution_mode"] = str(mode)
+
+    def _execution_mode(self) -> str:
+        return str(self._distmace_context.get("execution_mode", "validate"))
 
     def _debug_enabled(self) -> bool:
         return bool(self._distmace_context.get("debug_tracing"))
@@ -350,7 +517,7 @@ class DistScaleShiftMACERuntimeMixin:
         return layer_index < max(0, len(interactions) - 1)
 
     def _begin_dist_forward(
-        self, state: DistNNPState, exchange_enabled: bool, observation: Dict[str, Any]
+        self, state: DistNNPState, exchange_enabled: bool, observation: Optional[Dict[str, Any]]
     ) -> None:
         self._distmace_context.update(
             state=state, exchange_enabled=exchange_enabled, observation=observation
@@ -456,8 +623,8 @@ class DistScaleShiftMACERuntimeMixin:
         )
         node_heads = ctx.node_heads.to(torch.int64)
         atom_range = ctx.num_atoms_arange.to(torch.int64)
+        benchmark_mode = self._execution_mode() == "benchmark"
         node_e0 = self.atomic_energies_fn(data["node_attrs"])[atom_range, node_heads]
-        e0 = scatter_sum(node_e0, data["batch"], dim=0, dim_size=ctx.num_graphs).to(ctx.vectors.dtype)
         node_feats = self.node_embedding(data["node_attrs"])
         edge_attrs = self.spherical_harmonics(ctx.vectors)
         edge_feats, cutoff = self.radial_embedding(
@@ -510,6 +677,7 @@ class DistScaleShiftMACERuntimeMixin:
                 node_feats_shape=self._tensor_shape(node_feats),
                 product_type=product.__class__.__name__,
             )
+            # Communication point
             # Exchange after each product block whose outputs feed a later interaction.
             node_feats = self._exchange_after_product(node_feats, layer_index)
             node_feats_list.append(node_feats)
@@ -519,17 +687,24 @@ class DistScaleShiftMACERuntimeMixin:
                 readout(node_feats_list[feature_index], node_heads)[atom_range, node_heads]
             )
         node_inter_es = self.scale_shift(torch.sum(torch.stack(node_es_list), dim=0), node_heads)
-        interaction_energy = scatter_sum(
-            node_inter_es, data["batch"], dim=-1, dim_size=ctx.num_graphs
-        )
-        total_energy = e0 + interaction_energy
-        node_energy = node_e0.clone() + node_inter_es.clone()
+        node_energy = node_e0 + node_inter_es
         state = self._distmace_context["state"]
         owned_node_energy = owned_local_energy = None
         if state is not None:
             num_local = int(state.local_molecular_info.num_atoms)
             owned_node_energy = node_energy.reshape(-1)[:num_local]
             owned_local_energy = owned_node_energy.sum()
+        if benchmark_mode and owned_local_energy is not None and state is not None:
+            return {
+                "owned_node_energy": owned_node_energy,
+                "owned_local_energy": owned_local_energy,
+            }
+
+        interaction_energy = scatter_sum(
+            node_inter_es, data["batch"], dim=-1, dim_size=ctx.num_graphs
+        )
+        e0 = scatter_sum(node_e0, data["batch"], dim=0, dim_size=ctx.num_graphs).to(ctx.vectors.dtype)
+        total_energy = e0 + interaction_energy
 
         forces, virials, stress, hessian, edge_forces = get_outputs(
             energy=interaction_energy,
@@ -572,8 +747,10 @@ class DistScaleShiftMACERuntimeMixin:
             "owned_local_energy": owned_local_energy,
         }
 
-
+#-------------------------------------------------
 # The DistNNP model contract facing adapter class
+#---------------------------------------------
+
 class DistMACETopDownAdapter(DistNNPModel):
     """MP/MPA-focused MACE adapter using DistNNP partitions, halos, graphs, and exchange."""
 
@@ -592,8 +769,10 @@ class DistMACETopDownAdapter(DistNNPModel):
         self.model = model.to(dtype=COMPUTE_DTYPE).eval()
         self.atomic_number_map = dict(atomic_number_map or {})
         self.cutoff = float(model.r_max.detach().cpu().item())
+        
         self.position_exchanger = GPUDirectExchanger()
         self.atom_type_exchanger = GPUDirectExchanger()
+        
         self.exchange_enabled = False
         self.diagnostics_enabled = diagnostics_enabled
         self.partition_validation: Dict[str, Any] = {}
@@ -601,6 +780,8 @@ class DistMACETopDownAdapter(DistNNPModel):
         self.head_name = head_name
         self.debug_tracing = bool(debug_tracing)
         self.debug_prefix = debug_prefix
+        self.execution_mode = "validate"
+        self._static_graph_cache: Dict[str, Any] = {}
         self._install_runtime_subclass()
 
     @staticmethod
@@ -648,6 +829,13 @@ class DistMACETopDownAdapter(DistNNPModel):
             self.debug_prefix = str(prefix)
         self.model._set_debug_tracing(self.debug_tracing, self.debug_prefix)
 
+    def set_execution_mode(self, mode: str) -> None:
+        normalized = str(mode).strip().lower()
+        if normalized not in {"validate", "benchmark", "debug"}:
+            raise ValueError(f"Unsupported execution mode: {mode!r}")
+        self.execution_mode = normalized
+        self.model._set_execution_mode(normalized)
+
     def _install_runtime_subclass(self) -> None:
         if not getattr(self.model.__class__, "__distmace_explicit_graph__", False):
             runtime_class = type(
@@ -657,7 +845,11 @@ class DistMACETopDownAdapter(DistNNPModel):
             )
             self.model.__class__ = runtime_class
         self.model._configure_dist_runtime()
+        self.model._set_execution_mode(self.execution_mode)
         self.model._set_debug_tracing(self.debug_tracing, self.debug_prefix)
+
+    def _reset_static_graph_cache(self) -> None:
+        self._static_graph_cache = {}
 
     def initialize_buffers(
         self,
@@ -671,8 +863,10 @@ class DistMACETopDownAdapter(DistNNPModel):
         self.partition_validation = validate_partition_info(partition_info, world_size)
         total_send = self.partition_validation["total_send"]
         total_recv = self.partition_validation["total_recv"]
+        self._reset_static_graph_cache()
         self.position_exchanger = GPUDirectExchanger()
         self.atom_type_exchanger = GPUDirectExchanger()
+        #for num of layers in the model, defined in prev class
         self.model._configure_feature_exchange_runtime(partition_info, device)
         if total_send == 0 and total_recv == 0:
             self.exchange_enabled = False
@@ -682,6 +876,101 @@ class DistMACETopDownAdapter(DistNNPModel):
         self.position_exchanger.setup_exchanger(3, partition_info, device)
         self.atom_type_exchanger.setup_exchanger(1, partition_info, device)
         self.exchange_enabled = True
+
+    def _map_atomic_numbers(self, atom_types: torch.Tensor) -> torch.Tensor:
+        atom_types = atom_types.to(torch.long)
+        if not self.atomic_number_map:
+            return atom_types
+        max_atom_type = int(atom_types.max().item()) if atom_types.numel() > 0 else -1
+        cache = self._static_graph_cache
+        lookup = cache.get("atomic_number_lookup")
+        lookup_device = cache.get("atomic_number_lookup_device")
+        if (
+            lookup is None
+            or lookup_device != atom_types.device
+            or int(lookup.shape[0]) <= max_atom_type
+        ):
+            max_key = max(int(key) for key in self.atomic_number_map)
+            size = max(max_atom_type, max_key) + 1
+            lookup = torch.full(
+                (size,),
+                -1,
+                dtype=torch.long,
+                device=atom_types.device,
+            )
+            for src, dst in self.atomic_number_map.items():
+                lookup[int(src)] = int(dst)
+            cache["atomic_number_lookup"] = lookup
+            cache["atomic_number_lookup_device"] = atom_types.device
+        mapped = lookup.index_select(0, atom_types.reshape(-1)).reshape(atom_types.shape)
+        missing_mask = mapped.lt(0)
+        if bool(missing_mask.any()):
+            missing = atom_types[missing_mask].unique().cpu().tolist()
+            raise ValueError(
+                "MACE species compatibility check failed: unsupported atomic numbers "
+                f"after remapping {missing}"
+            )
+        return mapped
+
+    def _prepare_static_graph_cache(
+        self,
+        state: DistNNPState,
+        local_types: torch.Tensor,
+        local_global: torch.Tensor,
+        expected_total: int,
+    ) -> Dict[str, Any]:
+        cache = self._static_graph_cache
+        cache_key = (
+            local_types.device,
+            int(local_types.numel()),
+            expected_total,
+            tuple(int(x) for x in local_global.detach().cpu().tolist()),
+            self.head_name,
+            bool(self.exchange_enabled),
+        )
+        if cache.get("cache_key") == cache_key:
+            return cache
+
+        if self.exchange_enabled:
+            with torch.no_grad():
+                exchanged_types = FeaturePushToExchange.apply(
+                    local_types.float().unsqueeze(-1), state, self.atom_type_exchanger
+                ).squeeze(-1).long()
+        else:
+            exchanged_types = local_types
+
+        mapped_atomic_numbers = self._map_atomic_numbers(exchanged_types)
+        model_atomic_numbers = self.model.atomic_numbers.to(
+            device=mapped_atomic_numbers.device, dtype=torch.long
+        )
+        node_attrs = mapped_atomic_numbers[:, None].eq(model_atomic_numbers[None, :]).to(
+            dtype=COMPUTE_DTYPE
+        )
+        row_match_counts = node_attrs.sum(dim=1)
+        if not bool(torch.all(row_match_counts == 1)):
+            missing = mapped_atomic_numbers[row_match_counts == 0].unique()
+            ambiguous = mapped_atomic_numbers[row_match_counts > 1].unique()
+            messages = []
+            if missing.numel() > 0:
+                messages.append(f"unsupported atomic numbers {missing.cpu().tolist()}")
+            if ambiguous.numel() > 0:
+                messages.append(f"ambiguous atomic-number mappings {ambiguous.cpu().tolist()}")
+            raise ValueError("MACE species compatibility check failed: " + "; ".join(messages))
+
+        device = mapped_atomic_numbers.device
+        head_index = resolve_model_head_index(self.model, self.head_name)
+        cache = {
+            "cache_key": cache_key,
+            "exchanged_atomic_numbers": mapped_atomic_numbers,
+            "node_attrs": node_attrs,
+            "model_atomic_numbers": model_atomic_numbers,
+            "batch": torch.zeros(expected_total, dtype=torch.long, device=device),
+            "ptr": torch.tensor([0, expected_total], dtype=torch.long, device=device),
+            "head": torch.tensor([head_index], dtype=torch.long, device=device),
+            "device": device,
+        }
+        self._static_graph_cache = cache
+        return cache
 
     @staticmethod
     def _halo_global_indices(state: DistNNPState) -> torch.Tensor:
@@ -712,16 +1001,6 @@ class DistMACETopDownAdapter(DistNNPModel):
             )
         return ordered
 
-    def _map_atomic_numbers(self, atom_types: torch.Tensor) -> torch.Tensor:
-        atom_types = atom_types.to(torch.long)
-        if not self.atomic_number_map:
-            return atom_types
-        return torch.tensor(
-            [self.atomic_number_map[int(value)] for value in atom_types.cpu()],
-            dtype=torch.long,
-            device=atom_types.device,
-        )
-
     def _build_structural_view(self, state: DistNNPState) -> StructuralHaloView:
         info = state.local_partition_info
         if not self.partition_validation:
@@ -739,25 +1018,27 @@ class DistMACETopDownAdapter(DistNNPModel):
             exchanged_positions = FeaturePushToExchange.apply(
                 local_positions, state, self.position_exchanger
             )
-            with torch.no_grad():
-                exchanged_types = FeaturePushToExchange.apply(
-                    local_types.float().unsqueeze(-1), state, self.atom_type_exchanger
-                ).squeeze(-1).long()
         else:
-            exchanged_positions, exchanged_types = local_positions, local_types
-        exchanged_positions.retain_grad()
+            exchanged_positions = local_positions
+        if self.diagnostics_enabled:
+            exchanged_positions.retain_grad()
         local_global = info.partition_indices.long()
         expected_total = int(local_global.numel() + self.partition_validation["total_recv"])
         if exchanged_positions.shape[0] != expected_total:
             raise ValueError("Structural rows disagree with DistNNP recv metadata.")
-        halo_global = self._halo_global_indices(state)
-        expanded_global = torch.cat((local_global, halo_global))
-        if expanded_global.shape[0] != expected_total:
-            raise ValueError("Halo indices disagree with DistNNP recv metadata.")
+        cache = self._prepare_static_graph_cache(state, local_types, local_global, expected_total)
+        if self.diagnostics_enabled:
+            halo_global = self._halo_global_indices(state)
+            expanded_global = torch.cat((local_global, halo_global))
+            if expanded_global.shape[0] != expected_total:
+                raise ValueError("Halo indices disagree with DistNNP recv metadata.")
+        else:
+            halo_global = torch.empty(0, dtype=torch.long, device=local_global.device)
+            expanded_global = torch.empty(0, dtype=torch.long, device=local_global.device)
         return StructuralHaloView(
             local_positions,
             exchanged_positions,
-            self._map_atomic_numbers(exchanged_types),
+            cache["exchanged_atomic_numbers"],
             local_global,
             halo_global,
             expanded_global,
@@ -779,26 +1060,6 @@ class DistMACETopDownAdapter(DistNNPModel):
         # DistNNP shifts the source image; MACE shifts source-to-destination vectors.
         return edge_index.long(), -cell_offsets
 
-    def _resolve_head_index(self) -> int:
-        heads = list(getattr(self.model, "heads", []))
-        if not heads:
-            return 0
-        if self.head_name is not None:
-            if self.head_name not in heads:
-                raise ValueError(
-                    f"Requested head_name={self.head_name!r} is not available in model heads {heads}."
-                )
-            return heads.index(self.head_name)
-        if len(heads) == 1:
-            return 0
-        if "default" in heads:
-            return heads.index("default")
-        if "Default" in heads:
-            return heads.index("Default")
-        raise ValueError(
-            "The loaded MP/MPA model exposes multiple heads but no explicit head_name was provided."
-        )
-
     def _build_owned_graph(
         self, view: StructuralHaloView, state: DistNNPState
     ) -> ExplicitOwnedGraph:
@@ -808,34 +1069,17 @@ class DistMACETopDownAdapter(DistNNPModel):
         unit_shifts = unit_shifts[owned_destination].to(dtype=COMPUTE_DTYPE)
         cell = state.sim_config.cell.reshape(3, 3).to(dtype=COMPUTE_DTYPE)
         shifts = torch.matmul(unit_shifts, cell)
-        model_atomic_numbers = self.model.atomic_numbers.to(
-            device=view.exchanged_atomic_numbers.device, dtype=torch.long
-        )
-        node_attrs = view.exchanged_atomic_numbers[:, None].eq(
-            model_atomic_numbers[None, :]
-        ).to(dtype=COMPUTE_DTYPE)
-        row_match_counts = node_attrs.sum(dim=1)
-        if not bool(torch.all(row_match_counts == 1)):
-            missing = view.exchanged_atomic_numbers[row_match_counts == 0].unique()
-            ambiguous = view.exchanged_atomic_numbers[row_match_counts > 1].unique()
-            messages = []
-            if missing.numel() > 0:
-                messages.append(f"unsupported atomic numbers {missing.tolist()}")
-            if ambiguous.numel() > 0:
-                messages.append(f"ambiguous atomic-number mappings {ambiguous.tolist()}")
-            raise ValueError("MACE species compatibility check failed: " + "; ".join(messages))
-        device = view.exchanged_positions.device
-        head_index = self._resolve_head_index()
+        cache = self._static_graph_cache
         batch_dict = {
             "positions": view.exchanged_positions,
             "edge_index": edge_index,
             "unit_shifts": unit_shifts,
             "shifts": shifts,
             "cell": cell,
-            "node_attrs": node_attrs,
-            "batch": torch.zeros(view.num_total, dtype=torch.long, device=device),
-            "ptr": torch.tensor([0, view.num_total], dtype=torch.long, device=device),
-            "head": torch.tensor([head_index], dtype=torch.long, device=device),
+            "node_attrs": cache["node_attrs"],
+            "batch": cache["batch"],
+            "ptr": cache["ptr"],
+            "head": cache["head"],
         }
         batch_dict = {
             key: value.to(COMPUTE_DTYPE) if torch.is_floating_point(value) else value
@@ -843,63 +1087,19 @@ class DistMACETopDownAdapter(DistNNPModel):
         }
         return ExplicitOwnedGraph(edge_index, unit_shifts, shifts, batch_dict)
 
-    def _verify_graph_authority(
-        self,
-        view: StructuralHaloView,
-        local_graph: ExplicitOwnedGraph,
-        state: DistNNPState,
-    ) -> Dict[str, Any]:
-        global_positions = state.global_molecular_info.atom_positions
-        global_edge_index, global_unit_shifts = self._radius_graph(global_positions, state)
-        owner = state.local_partition_info.partition_id.long()
-        rank = int(state.dist_env.global_rank)
-        mask = owner.index_select(0, global_edge_index[1]).eq(rank)
-        global_ids = torch.arange(global_positions.shape[0], device=global_positions.device)
-        expected = _edge_records(global_edge_index[:, mask], global_unit_shifts[mask], global_ids)
-        actual = _edge_records(
-            local_graph.edge_index, local_graph.unit_shifts, view.expanded_global_indices
-        )
-        owned = set(view.local_global_indices.cpu().tolist())
-        required_remote = sorted(
-            {src for src, dst, *_ in expected if dst in owned and src not in owned}
-        )
-        actual_halo = set(view.halo_global_indices.cpu().tolist())
-        missing_halo = sorted(set(required_remote) - actual_halo)
-        missing_edges = sorted(expected - actual)
-        extra_edges = sorted(actual - expected)
-        halo_issue = bool(missing_halo)
-        reconstruction_issue = not halo_issue and bool(missing_edges or extra_edges)
-        return {
-            "stage": "pre_forward_graph_authority",
-            "radius_graph_authority": "distnnp_state.radius_graph_pbc_cuda",
-            "required_remote_global_indices": required_remote,
-            "actual_halo_global_indices": sorted(actual_halo),
-            "missing_required_halo_global_indices": missing_halo,
-            "halo_builder_issue": halo_issue,
-            "local_graph_matches_global_owned_graph": not (missing_edges or extra_edges),
-            "local_graph_reconstruction_issue": reconstruction_issue,
-            "expected_owned_edge_count": len(expected),
-            "actual_owned_edge_count": len(actual),
-            "missing_owned_edge_preview": [list(item) for item in missing_edges[:12]],
-            "extra_owned_edge_preview": [list(item) for item in extra_edges[:12]],
-            "structural_classification": (
-                "halo_builder_issue"
-                if halo_issue
-                else "local_graph_reconstruction_issue"
-                if reconstruction_issue
-                else "structural_graph_ok"
-            ),
-        }
-
     @staticmethod
     def _recover_forces(
         owned_energy: torch.Tensor,
         view: StructuralHaloView,
         diagnostics_enabled: bool = True,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        local_grad, exchanged_grad = torch.autograd.grad(
-            owned_energy, [view.local_positions, view.exchanged_positions], allow_unused=False
-        )
+        if diagnostics_enabled:
+            local_grad, exchanged_grad = torch.autograd.grad(
+                owned_energy, [view.local_positions, view.exchanged_positions], allow_unused=False
+            )
+        else:
+            (local_grad,) = torch.autograd.grad(owned_energy, [view.local_positions], allow_unused=False)
+            exchanged_grad = None
         forces = -local_grad
         checks = {}
         if diagnostics_enabled:
@@ -910,34 +1110,42 @@ class DistMACETopDownAdapter(DistNNPModel):
             }
         return forces, checks
 
-    def __call__(self, state: DistNNPState, *args, **kwargs):
-        view = self._build_structural_view(state)
-        graph = self._build_owned_graph(view, state)
-        observation = None
-        if self.diagnostics_enabled:
-            verification = self._verify_graph_authority(view, graph, state)
-            observation = {
-                "rank": int(state.dist_env.global_rank),
-                "feature_exchange_used_ipc": False,
-                "layer_records": [],
-                "model_contract": {
-                    "model_class": self.model.__class__.__mro__[1].__name__
-                    if len(self.model.__class__.__mro__) > 1
-                    else self.model.__class__.__name__,
-                    "runtime_class": self.model.__class__.__name__,
-                    "num_interactions": len(getattr(self.model, "interactions", ())),
-                    "num_products": len(getattr(self.model, "products", ())),
-                    "num_readouts": len(getattr(self.model, "readouts", ())),
-                    "heads": list(getattr(self.model, "heads", [])),
-                    "expected_exchange_layers": [
-                        layer_index
-                        for layer_index in range(len(getattr(self.model, "interactions", ())))
-                        if self.model._should_exchange_after_product(layer_index)
-                    ],
-                },
-                "graph_verification": verification,
-            }
-        self.last_observation = observation or {}
+    def _expected_exchange_layers(self) -> List[int]:
+        return [
+            layer_index
+            for layer_index in range(len(getattr(self.model, "interactions", ())))
+            if self.model._should_exchange_after_product(layer_index)
+        ]
+
+    def _build_observation(
+        self,
+        view: StructuralHaloView,
+        graph: ExplicitOwnedGraph,
+        state: DistNNPState,
+    ) -> Optional[Dict[str, Any]]:
+        if not self.diagnostics_enabled:
+            return None
+        verification = build_graph_authority_record(
+            view=view,
+            local_graph=graph,
+            state=state,
+            radius_graph_fn=self._radius_graph,
+            edge_records_fn=_edge_records,
+        )
+        return make_adapter_observation(
+            self.model,
+            state,
+            graph_verification=verification,
+            expected_exchange_layers=self._expected_exchange_layers(),
+        )
+
+    def _execute_model(
+        self,
+        view: StructuralHaloView,
+        graph: ExplicitOwnedGraph,
+        state: DistNNPState,
+        observation: Optional[Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor, Dict[str, Any]]:
         self.model._begin_dist_forward(state, self.exchange_enabled, observation)
         try:
             outputs = self.model(
@@ -950,17 +1158,20 @@ class DistMACETopDownAdapter(DistNNPModel):
             owned_energy = outputs.get("owned_local_energy")
             if owned_energy is None:
                 raise KeyError("Distributed MACE forward did not return owned_local_energy.")
-            self.model._emit_debug_log(
-                "owned_energy_ready",
-                owned_energy=float(owned_energy.detach().cpu()),
-            )
+            if self.model._debug_enabled():
+                self.model._emit_debug_log(
+                    "owned_energy_ready",
+                    owned_energy=float(owned_energy.detach().cpu()),
+                )
             owned_forces, force_checks = self._recover_forces(
                 owned_energy, view, self.diagnostics_enabled
             )
-            self.model._emit_debug_log(
-                "force_recovery_end",
-                returned_force_shape=list(owned_forces.shape),
-            )
+            if self.model._debug_enabled():
+                self.model._emit_debug_log(
+                    "force_recovery_end",
+                    returned_force_shape=list(owned_forces.shape),
+                )
+            return outputs, owned_energy, owned_forces, force_checks
         except Exception as exc:
             self.model._emit_debug_log(
                 "adapter_exception",
@@ -975,29 +1186,27 @@ class DistMACETopDownAdapter(DistNNPModel):
             raise
         finally:
             self.model._end_dist_forward()
+
+    def __call__(self, state: DistNNPState, *args, **kwargs):
+        view = self._build_structural_view(state)
+        graph = self._build_owned_graph(view, state)
+        observation = self._build_observation(view, graph, state)
+        self.last_observation = observation or {}
+        outputs, owned_energy, owned_forces, force_checks = self._execute_model(
+            view, graph, state, observation
+        )
         if self.diagnostics_enabled:
-            global_edges = _edge_records(
-                graph.edge_index, graph.unit_shifts, view.expanded_global_indices
+            finalize_adapter_observation(
+                self.last_observation,
+                self.partition_validation,
+                view,
+                graph,
+                outputs,
+                owned_energy,
+                owned_forces,
+                force_checks,
+                model_parameter_dtype=str(next(self.model.parameters()).dtype),
             )
-            self.last_observation.update({
-                "n_local": view.num_local,
-                "n_halo": view.num_halo,
-                "n_total_after_exchange": view.num_total,
-                "local_global_indices": view.local_global_indices.cpu().tolist(),
-                "halo_global_indices": view.halo_global_indices.cpu().tolist(),
-                "send_counts_by_peer": self.partition_validation["send_counts_by_peer"],
-                "recv_counts_by_peer": self.partition_validation["recv_counts_by_peer"],
-                "owned_destination_edge_count": int(graph.edge_index.shape[1]),
-                "compute_dtype": str(COMPUTE_DTYPE),
-                "model_parameter_dtype": str(next(self.model.parameters()).dtype),
-                "position_dtype": str(view.exchanged_positions.dtype),
-                "force_dtype": str(owned_forces.dtype),
-                "owned_destination_edge_records": [list(item) for item in sorted(global_edges)],
-                "owned_node_energy_values": outputs["owned_node_energy"].detach().cpu().tolist(),
-                "owned_local_energy": float(owned_energy.detach().cpu()),
-                "owned_local_force_values": owned_forces.detach().cpu().tolist(),
-                **force_checks,
-            })
         return owned_energy.detach(), owned_forces.detach()
 
 
@@ -1006,5 +1215,8 @@ __all__ = [
     "DistMACETopDownAdapter",
     "canonicalize_nonperiodic_geometry",
     "load_raw_mace_model",
+    "resolve_model_head_index",
+    "resolve_model_head_name",
+    "summarize_model_contract",
     "validate_partition_info",
 ]
