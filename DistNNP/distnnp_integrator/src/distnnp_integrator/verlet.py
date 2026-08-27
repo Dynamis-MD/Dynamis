@@ -7,7 +7,7 @@ from distnnp_integrator._data_check import (
     check_shapes_match,
 )
 from distnnp_integrator.integrator import DistNNPIntegrator
-from distnnp_state import DistNNPState, Timer, TimerClass, Where
+from distnnp_state import DistNNPState, Timer
 from distnnp_model import DistNNPModel
 from distnnp_integrator.masses import TORCH_MASSES
 
@@ -87,14 +87,11 @@ class Verlet(DistNNPIntegrator):
             step_size = self.dt
 
         state = dist_state.local_molecular_info
-        device_index = state.atom_positions.device.index
         atom_masses = TORCH_MASSES.to(state.atom_positions.device)[state.atom_types.reshape(-1).to(torch.long)]
 
         # 0. Compute forces (skipped after first step — prev_forces reused)
         if self.prev_forces is None:
-            self._timer.start("model_forward", TimerClass.Compute, Where.Device, device_index)
-            _, atom_forces = model(dist_state)
-            self._timer.stop()
+            _, atom_forces = self._compute_force(dist_state, model)
         else:
             atom_forces = self.prev_forces
 
@@ -109,9 +106,7 @@ class Verlet(DistNNPIntegrator):
         )
 
         # 2. Recompute forces at new positions
-        self._timer.start("model_forward", TimerClass.Compute, Where.Device, device_index)
-        energy, new_forces = model(dist_state)
-        self._timer.stop()
+        energy, new_forces = self._compute_force(dist_state, model)
 
         self.prev_forces = new_forces
 

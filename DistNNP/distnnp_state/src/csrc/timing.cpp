@@ -12,6 +12,7 @@
 namespace distnnp_state {
 
 namespace {
+#ifdef DISTNNP_TIMING
 
 std::string bytes_to_hex(const std::string& bytes) {
     static const char hex[] = "0123456789abcdef";
@@ -57,6 +58,7 @@ void write_line(int fd, const std::string& line) {
     }
 }
 
+#endif
 } // namespace
 
 TimingRegistry& TimingRegistry::instance() {
@@ -67,6 +69,7 @@ TimingRegistry& TimingRegistry::instance() {
 void TimingRegistry::init(uint32_t rank_, uint32_t local_rank_, uint32_t world_size_,
                           const std::string& run_id_, int32_t device_id_,
                           const std::string& output_dir_) {
+#ifdef DISTNNP_TIMING
     if (fd >= 0) { close(fd); fd = -1; }
     call_order.clear();
     call_order_seen.clear();
@@ -109,6 +112,11 @@ void TimingRegistry::init(uint32_t rank_, uint32_t local_rank_, uint32_t world_s
          << ",\"host\":\"" << hostname << "\""
          << "}\n";
     write_line(fd, meta.str());
+#else
+    // This is done to silence parameter warnings
+    (void)rank_; (void)local_rank_; (void)world_size_;
+    (void)run_id_; (void)device_id_; (void)output_dir_;
+#endif
 }
 
 void TimingRegistry::set_level(Level lvl) { level = lvl; }
@@ -118,6 +126,7 @@ bool TimingRegistry::enabled() const { return level != Level::Off; }
 void TimingRegistry::set_step(uint64_t s) { step = s; }
 
 void TimingRegistry::append(const std::string& key, TimerClass cls, Where where, double time_us) {
+#ifdef DISTNNP_TIMING
     if (!enabled()) return;
 
     if (call_order_seen.find(key) == call_order_seen.end()) {
@@ -136,10 +145,15 @@ void TimingRegistry::append(const std::string& key, TimerClass cls, Where where,
          << ",\"time_us\":" << time_buf
          << "}\n";
     write_line(fd, line.str());
+#else
+    // This is done to silence parameter warnings
+    (void)key; (void)cls; (void)where; (void)time_us;
+#endif
 }
 
 void TimingRegistry::append_device(const std::string& key, TimerClass cls,
                                     cudaEvent_t ev_start, cudaEvent_t ev_stop) {
+#ifdef DISTNNP_TIMING
     if (!enabled()) {
         // Timing was disabled between start() and stop(); discard the events.
         cudaEventDestroy(ev_start);
@@ -153,9 +167,14 @@ void TimingRegistry::append_device(const std::string& key, TimerClass cls,
     }
 
     device_records.push_back({key, cls, step, ev_start, ev_stop});
+#else
+    // This is done to silence parameter warnings
+    (void)key; (void)cls; (void)ev_start; (void)ev_stop;
+#endif
 }
 
 void TimingRegistry::flush() {
+#ifdef DISTNNP_TIMING
     if (fd < 0) return;
 
     // Read all pending device records. Swapping out first means any Timer::stop()
@@ -198,6 +217,7 @@ void TimingRegistry::flush() {
     write_line(fd, co.str());
     close(fd);
     fd = -1;
+#endif
 }
 
 // ---------------------------------------------------------------------------
