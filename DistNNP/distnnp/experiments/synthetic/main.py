@@ -1,24 +1,14 @@
-from setup_system import generate_synthetic_dataset, create_dist_sim_state
+import argparse
+import json
+import os
+
+from setup_system import generate_synthetic_dataset, Timer
 from distnnp_model.empirical import LennardJonesPotentialModel
 from distnnp.simulator import Simulator, SimulatorConfig
 from distnnp_integrator import Verlet
-from distnnp import SimState
 import torch
 from distnnp_state import TorchDistEnv
-import os
 import gc
-
-
-def log_state(state: SimState, step_num: int):
-    # Placeholder writer
-    rank = state.dist_env.global_rank
-
-    local_torch_state = {}
-    local_torch_state["pos"] = state._local_molecular_info.atom_positions
-    local_torch_state["vel"] = state._local_molecular_info.atom_velocities
-    local_torch_state["atom"] = state._local_molecular_info.atom_types
-
-    torch.save(local_torch_state, f"rank_{rank}_step_{step_num}.pt")
 
 
 def reset_gpu():
@@ -32,7 +22,29 @@ def get_peak_mb():
     return torch.cuda.max_memory_allocated() / (1024 * 1024)
 
 
-def create_and_run_experiment(num_atoms: int):
+def parse_args():
+    parser = argparse.ArgumentParser(description="Synthetic LJ baseline experiment")
+    parser.add_argument("--num-atoms", type=int, default=1000)
+    parser.add_argument("--box-size", type=float, default=20.0)
+    parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--timestep-fs", type=float, default=0.5)
+    parser.add_argument("--rebalance-interval", type=int, default=100)
+    parser.add_argument("--log-interval", type=int, default=10)
+    parser.add_argument(
+        "--traj-interval",
+        type=int,
+        default=0,
+        help="Write a trajectory snapshot every N steps (0 = disabled, recommended for sweeps).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "results"),
+    )
+    return parser.parse_args()
+
+
+def create_and_run_experiment(args):
     torch_distributed_env = TorchDistEnv()
 
     local_rank = torch_distributed_env.local_rank
@@ -47,29 +59,37 @@ def create_and_run_experiment(num_atoms: int):
             )
         torch_distributed_env.barrier()
 
+    def local_print(*args, **kwargs):
+        if global_rank == 0:
+            print(*args, **kwargs)
+
     sim_config = SimulatorConfig(
-        timestep_fs=0.5,
-        total_steps=1000,
+        timestep_fs=args.timestep_fs,
+        total_steps=args.steps,
         cutoff_angstrom=6.0,
-        side_length_angstrom=20.0,
+        side_length_angstrom=args.box_size,
         ghost_buffer_angstrom=0.5,
         partition_algorithm="sfc_morton",
-        # integrator="verlet",
         edge_weighted_partition=True,
-        rebalance_interval=100,
-        output_dir="./results",
+        rebalance_interval=args.rebalance_interval,
+        output_dir=args.output_dir,
         traj_file="trajectory.traj",
-        traj_interval=100,
-        log_interval=10,
+        traj_interval=args.traj_interval,
+        log_interval=args.log_interval,
         writer_buffer_size=10,
         backend="nccl",
     )
 
     global_molecular_system = generate_synthetic_dataset(
-        num_atoms=1000, box_size=20.0, device=device
+        num_atoms=args.num_atoms, box_size=args.box_size, device=device
     )
 
-    dist_nnp_state = create_dist_sim_state(num_atoms=num_atoms)
+    # Pre-create output_dir on every rank before Simulator/TrajectoryWriter
+    # construction: the C++ TrajectoryWriter does stat()-then-mkdir() with no
+    # EEXIST handling, so two ranks racing to create the same directory can
+    # hard-exit(1) the loser. Creating it up front (idempotent) avoids the race.
+    os.makedirs(args.output_dir, exist_ok=True)
+
     epsilons = torch.rand(100, requires_grad=True).to(device=device)
     sigmas = torch.rand(100, requires_grad=True).to(device=device)
     potential = LennardJonesPotentialModel(epsilon=epsilons, sigma=sigmas)
@@ -83,12 +103,59 @@ def create_and_run_experiment(num_atoms: int):
     )
     simulator.initialize_simulator_state(global_molecular_system, device=device)
     torch_distributed_env.barrier()
-    simulator.step(sim_config.timestep_fs)
+
+    reset_gpu()
+    timer = Timer(
+        "synthetic_baseline",
+        metadata={
+            "world_size": world_size,
+            "num_atoms": args.num_atoms,
+            "box_size": args.box_size,
+            "steps": args.steps,
+        },
+    )
+    with timer:
+        simulator.run()
     torch_distributed_env.barrier()
+
+    elapsed_s = timer.local_total_time / 1000.0
+    steps_per_sec = args.steps / elapsed_s
+    peak_mb = get_peak_mb() if device.type == "cuda" else None
+
+    local_print(
+        f"Completed {args.steps} steps on {world_size} rank(s), {args.num_atoms} atoms: "
+        f"{elapsed_s:.3f}s ({steps_per_sec:.2f} steps/s), peak mem {peak_mb:.1f} MB"
+        if peak_mb is not None
+        else f"Completed {args.steps} steps on {world_size} rank(s), {args.num_atoms} atoms: "
+        f"{elapsed_s:.3f}s ({steps_per_sec:.2f} steps/s)"
+    )
+
+    Timer.add_meta_data(
+        {
+            "world_size": world_size,
+            "num_atoms": args.num_atoms,
+            "box_size": args.box_size,
+            "steps": args.steps,
+            "elapsed_s": elapsed_s,
+            "steps_per_sec": steps_per_sec,
+            "peak_memory_mb": peak_mb,
+        }
+    )
+
+    if global_rank == 0:
+        os.makedirs(args.output_dir, exist_ok=True)
+        result_path = os.path.join(
+            args.output_dir,
+            f"synthetic_baseline_{world_size}gpu_{args.num_atoms}atoms.json",
+        )
+        with open(result_path, "w") as f:
+            f.write(Timer.json())
+        print(f"Wrote results to {result_path}")
 
 
 def main():
-    create_and_run_experiment(100)
+    args = parse_args()
+    create_and_run_experiment(args)
 
 
 if __name__ == "__main__":

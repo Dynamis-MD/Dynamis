@@ -633,7 +633,10 @@ class MaskedHeadWrapper(nn.Module):
             outputs[energy_key] = local_energy
 
             if data.pos.requires_grad:
-                # Calculate gradient of masked energy w.r.t all positions (local + ghost)
+                # Calculate gradient of masked energy w.r.t all positions (local + ghost).
+                # This grad runs in the model's native eV / eV per Angstrom; the eV ->
+                # MD-unit conversion is applied once to both energy and forces where
+                # UMAModel returns them, not here.
                 correct_forces = -1 * torch.autograd.grad(
                     local_energy,
                     data.pos, 

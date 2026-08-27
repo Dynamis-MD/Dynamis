@@ -193,6 +193,10 @@ def test_uma_distributed_parity():
         
     if rank == 0:
         reconstructed_global_forces = torch.sum(torch.stack(gathered_forces), dim=0)
+        # UMAModel returns forces in the integrator's native units (amu·Å/fs²),
+        # not FairChem's eV/Å -- see `_EV_PER_A_TO_AMU_A_PER_FS2` in nnp/uma.py.
+        from distnnp_model.nnp.uma import _EV_PER_A_TO_AMU_A_PER_FS2
+        global_forces = global_forces * _EV_PER_A_TO_AMU_A_PER_FS2
         print(f"Forces from distributed model: {reconstructed_global_forces}, global forces: {global_forces}")
 
         max_diff = torch.max(torch.abs(reconstructed_global_forces - global_forces))
