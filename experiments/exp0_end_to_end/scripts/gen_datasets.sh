@@ -5,8 +5,9 @@
 #
 #   bash scripts/gen_datasets.sh [SIZE_K ...]
 #
-# Default sizes cover smoke (1,2), strong (32), fill (64,128) and the OOM
-# ceiling (192,256). Output: exp_datasets/baselines/ch4_<k>k_splited.xyz
+# Default sizes cover smoke (1,2), the LAMMPS-MACE small-box strong sweep (4,8,16),
+# strong (32), fill (64,128) and the OOM ceiling (192,256).
+# Output: exp_datasets/baselines/ch4_<k>k_splited.xyz
 #
 # Positions are checksum-verified for sizes present in checksums.txt; sizes
 # added later (not in the pinned set) are generated and reported but skipped
@@ -24,7 +25,7 @@ VENV="${EXP0_VENV:-$REPO_ROOT/DistNNP/.venv-uma}"
 PY="$VENV/bin/python"; [ -x "$PY" ] || PY="$(command -v python3)"
 
 SIZES=("$@")
-[ ${#SIZES[@]} -eq 0 ] && SIZES=(1 2 32 64 128 192 256)
+[ ${#SIZES[@]} -eq 0 ] && SIZES=(1 2 4 8 16 32 64 128 192 256)
 
 echo "Generating sizes: ${SIZES[*]}  (python: $PY)"
 "$PY" "$GEN" --sizes "${SIZES[@]}" --variants splited --out-dir "$EXP_DIR/exp_datasets/baselines"

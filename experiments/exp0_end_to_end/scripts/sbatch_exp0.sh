@@ -11,7 +11,7 @@
 #
 # Examples:
 #   scripts/sbatch_exp0.sh --cpu scripts/env_setup.sh
-#   scripts/sbatch_exp0.sh --gpus-per-node=2 scripts/parity.sbatch
+#   scripts/sbatch_exp0.sh --gpus-per-node=2 scripts/smoke.sbatch
 #   scripts/sbatch_exp0.sh --gpus-per-node=4 --time=00:20:00 \
 #       scripts/run_cell.sbatch distnnp-uma exp_datasets/baselines/ch4_32k_splited.xyz 4
 # ---------------------------------------------------------------------------
