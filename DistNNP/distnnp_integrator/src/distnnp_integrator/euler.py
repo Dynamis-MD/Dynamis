@@ -7,7 +7,7 @@ from distnnp_integrator._data_check import (
     check_shapes_match,
 )
 from distnnp_integrator.integrator import DistNNPIntegrator
-from distnnp_state import DistNNPState, Timer, TimerClass, Where
+from distnnp_state import DistNNPState, Timer
 from distnnp_model import DistNNPModel
 from distnnp_integrator.masses import TORCH_MASSES
 
@@ -56,11 +56,8 @@ class Euler(DistNNPIntegrator):
             model (DistNNPModel): The potential model used to compute forces based on the current state.
         """
         molecular_info = state.local_molecular_info
-        device_index = molecular_info.atom_positions.device.index
 
-        self._timer.start("model_forward", TimerClass.Compute, Where.Device, device_index)
-        energy, new_forces = model(state)
-        self._timer.stop()
+        energy, new_forces = self._compute_force(state, model)
 
         if dt is not None:
             step_size = dt
