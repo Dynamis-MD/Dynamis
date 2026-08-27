@@ -61,7 +61,7 @@ def parse_bench_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--engine",
         required=True,
-        choices=["distnnp-uma", "fairchem-uma"],
+        choices=["distnnp-uma", "fairchem-uma", "lammps-mace", "lammps-sevennet"],
     )
     p.add_argument("--model", default="uma-s-1p2")
     p.add_argument("--task", default="omol")
@@ -84,6 +84,34 @@ def parse_bench_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="fairchem InferenceSettings.merge_mole (0/1). 0 = stable "
                         "re-dispatch path; 1 = persistent NCCL loop (faster, "
                         "deadlocks on this cluster)")
+
+    # LAMMPS only. The LAMMPS driver is not launched under torchrun, so it
+    # cannot read WORLD_SIZE from the env -- the rank count is passed explicitly.
+    p.add_argument("--world-size", type=int, default=1,
+                   help="LAMMPS: number of MPI ranks / GPUs (srun -n)")
+    p.add_argument("--lammps-bin", default=None,
+                   help="LAMMPS: path to the `lmp` binary (else EXP0_LAMMPS_BIN)")
+    p.add_argument("--mace-model", default=None,
+                   help="LAMMPS: path to the MACE .model checkpoint")
+    p.add_argument("--mliap-pt", default=None,
+                   help="LAMMPS: path to the pre-converted <model>-mliap_lammps.pt "
+                        "(else derived as <mace-model>-mliap_lammps.pt)")
+    p.add_argument("--elements", default="C H O",
+                   help="LAMMPS: element -> type order for pair_coeff (subset of "
+                        "the model's trained elements)")
+    p.add_argument("--pair-style", default="mliap",
+                   choices=["mliap"],
+                   help="LAMMPS: MACE coupling style (only `mliap unified` for now)")
+    p.add_argument("--comm-cutoff", type=float, default=0.0,
+                   help="LAMMPS: `comm_modify cutoff <A>` for the ghost shell. "
+                        "0 = let LAMMPS/ML-IAP choose (per-layer hooks); set to "
+                        "~n_layers*r_max for the naive extended-cutoff series")
+    p.add_argument("--kokkos-comm", default="device",
+                   choices=["device", "host"],
+                   help="LAMMPS: `-pk kokkos comm <device|host>` (host is the "
+                        "fallback if GPU-aware halo exchange crashes -- mace#1294)")
+    p.add_argument("--lammps-workdir", default=None,
+                   help="LAMMPS: scratch dir for the generated .data / decks / logs")
 
     # Watchdogs -- an OOM here surfaces as a Ray/NCCL hang, not an exception,
     # so we bound the feasibility phase and each step and call a timeout OOM.
@@ -287,10 +315,20 @@ def _env_versions() -> dict[str, str]:
         ("e3nn", "e3nn"),
         ("numpy", "numpy"),
         ("ase", "ase"),
+        ("mace", "mace"),
+        ("cuequivariance_torch", "cuequivariance_torch"),
+        ("lammps", "lammps"),
     ):
         try:
             m = __import__(mod, fromlist=["__version__"])
-            out[key] = getattr(m, "__version__", "unknown")
+            ver = getattr(m, "__version__", None)
+            if ver is None and hasattr(m, "version"):
+                # the `lammps` python module exposes version() -> int (YYYYMMDD)
+                try:
+                    ver = m.version()
+                except Exception:
+                    ver = None
+            out[key] = str(ver) if ver is not None else "unknown"
         except Exception:
             out[key] = "not-installed"
     return out

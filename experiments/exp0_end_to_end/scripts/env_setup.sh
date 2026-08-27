@@ -5,8 +5,8 @@
 #   scripts/sbatch_exp0.sh --cpu scripts/env_setup.sh
 #
 # Runs on the CPU partition -- nvcc cross-compiles the CUDA kernels for
-# EXP0_CUDA_ARCH without a GPU present (~15-25 min). Only parity/smoke need
-# a GPU afterwards.
+# EXP0_CUDA_ARCH without a GPU present (~15-25 min). Only the driver smoke
+# needs a GPU afterwards.
 #
 # Mirrors the repo's proven build (HOW_TO_RUN.md): uv venv on the configured
 # python, torch pinned + cu128, then `requirements-dev.txt` which builds all
@@ -130,4 +130,4 @@ NO_COLOR=1 "$UV" pip freeze --python "$PYBIN" 2>/dev/null \
 
 echo
 echo "DONE. venv: $VENV"
-echo "Next -- parity gate:  scripts/sbatch_exp0.sh --gpus-per-node=2 scripts/parity.sbatch"
+echo "Next -- driver smoke:  scripts/sbatch_exp0.sh --gpus-per-node=2 scripts/smoke.sbatch"
