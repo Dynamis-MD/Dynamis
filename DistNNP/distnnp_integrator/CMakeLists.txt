@@ -152,6 +152,7 @@ set_target_properties(distnnp_integrator_impl
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
     CUDA_EXTENSIONS OFF
+    CUDA_ARCHITECTURES "80;90;100"
 
     INSTALL_RPATH "$ORIGIN/../distnnp_state:$ORIGIN/../torch/lib"
     INSTALL_RPATH_USE_LINK_PATH ON
