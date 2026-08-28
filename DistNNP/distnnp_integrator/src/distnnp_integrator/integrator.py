@@ -1,10 +1,13 @@
 from abc import ABC, abstractmethod
-from distnnp_state import DistNNPState, TimerClass, Where
+from distnnp_state import DistNNPState, Timer, TimerClass, Where
 import torch
 from typing import Tuple
 
 
 class DistNNPIntegrator(ABC):
+    def __init__(self) -> None:
+        self._timer = Timer()
+
     @abstractmethod
     def step(self, state: DistNNPState, *args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         """
