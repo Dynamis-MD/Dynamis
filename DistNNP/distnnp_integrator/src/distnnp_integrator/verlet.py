@@ -7,7 +7,7 @@ from distnnp_integrator._data_check import (
     check_shapes_match,
 )
 from distnnp_integrator.integrator import DistNNPIntegrator
-from distnnp_state import DistNNPState, Timer
+from distnnp_state import DistNNPState
 from distnnp_model import DistNNPModel
 from distnnp_integrator.masses import TORCH_MASSES
 
@@ -18,7 +18,6 @@ class Verlet(DistNNPIntegrator):
         self.dt = dt
         self.cpp_integrator = VerletIntegrator()
         self.prev_forces = None
-        self._timer = Timer()
 
     def reset(self) -> None:
         self.prev_forces = None

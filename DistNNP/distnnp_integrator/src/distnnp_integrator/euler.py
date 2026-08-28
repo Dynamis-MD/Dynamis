@@ -7,7 +7,7 @@ from distnnp_integrator._data_check import (
     check_shapes_match,
 )
 from distnnp_integrator.integrator import DistNNPIntegrator
-from distnnp_state import DistNNPState, Timer
+from distnnp_state import DistNNPState
 from distnnp_model import DistNNPModel
 from distnnp_integrator.masses import TORCH_MASSES
 
@@ -15,7 +15,6 @@ class Euler(DistNNPIntegrator):
     def __init__(self, dt: float) -> None:
         super().__init__()
         self.dt = dt
-        self._timer = Timer()
 
     @staticmethod
     def step_(
