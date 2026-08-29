@@ -115,10 +115,18 @@ for spec in "${CONFIGS[@]}"; do
 
     # A killed cell can leave Ray actors / NCCL shared memory behind that the
     # NEXT cell would then inherit. Clear both before moving on.
-    pkill -u "$USER" -f 'ray::' 2>/dev/null
-    pkill -u "$USER" -f 'raylet'  2>/dev/null
-    pkill -u "$USER" -f 'run_fairchem_uma.py' 2>/dev/null
-    pkill -u "$USER" -f 'run_distnnp_uma.py'  2>/dev/null
+    #
+    # Scope every kill to THIS sweep's process group (`pkill -g 0`): a bare
+    # `pkill -u "$USER" -f run_*_uma.py` is node-local but user-wide, so when two
+    # sweeps (or a sweep + the real matrix) land on the same node -- two exp0
+    # jobs at --gpus-per-node=2 share a 4-GPU node routinely -- each one's
+    # between-cell cleanup SIGKILLs the other's live driver. The whole cell tree
+    # (bash -> timeout -> torchrun/python -> ray) stays in our process group
+    # (nothing calls setsid), and the `-f` pattern never matches this script.
+    pkill -g 0 -f 'ray::' 2>/dev/null
+    pkill -g 0 -f 'raylet'  2>/dev/null
+    pkill -g 0 -f 'run_fairchem_uma.py' 2>/dev/null
+    pkill -g 0 -f 'run_distnnp_uma.py'  2>/dev/null
     sleep 10
     rm -rf /dev/shm/nccl-* 2>/dev/null
     nvidia-smi --query-gpu=index,memory.used --format=csv,noheader || true

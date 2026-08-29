@@ -256,7 +256,7 @@ def main() -> None:
 
     if rank == 0:
         rec = BenchRecord(
-            engine="distnnp-uma",
+            engine=args.engine,
             model=args.model,
             task=args.task,
             integrator="langevin",

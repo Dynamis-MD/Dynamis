@@ -7,7 +7,8 @@
 #   scripts/sbatch_exp0.sh --gpus-per-node=<N> --job-name=<name> --time=00:20:00 \
 #       scripts/run_cell.sbatch <engine> <xyz> <N> [extra driver args]
 #
-#   engine : distnnp-uma | fairchem-uma
+#   engine : distnnp-uma | distnnp-uma-opt | fairchem-uma
+#            (distnnp-uma-opt defaults to --inference-settings turbo)
 #
 # On any failure (crash, timeout, or no result JSON produced) the trap writes
 # a stub JSON with status oom/error so the matrix never has a hole. A Ray
@@ -96,12 +97,23 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
 RC=0
 case "$ENGINE" in
-  distnnp-uma)
+  distnnp-uma|distnnp-uma-opt)
+    # distnnp-uma-opt = the same driver at its fastest safe config. Default it
+    # to `--inference-settings turbo` (tf32 + no-ackpt + merge_mole + compile;
+    # merge_mole/compile are fine here -- no Ray -- and only hang on the FairChem
+    # side, see tune_kernels.sbatch). A caller that passes its own
+    # --inference-settings / --tf32 / --compile / ... still wins.
+    DN_PRE=()
+    if [ "$ENGINE" = "distnnp-uma-opt" ] && \
+       [[ " ${EXTRA_ARGS[*]:-} " != *" --inference-settings "* ]]; then
+        DN_PRE=(--inference-settings turbo)
+    fi
     timeout --signal=TERM --kill-after=30 "$HARD_TIMEOUT" \
         "$TORCHRUN" --standalone --nproc_per_node="$NGPU" \
         "$EXP_DIR/drivers/run_distnnp_uma.py" \
-        --input "$XYZ" --engine distnnp-uma \
-        --output-dir "$RESULTS" ${TAG:+--tag "$TAG"} "${EXTRA_ARGS[@]}" || RC=$?
+        --input "$XYZ" --engine "$ENGINE" \
+        --output-dir "$RESULTS" ${TAG:+--tag "$TAG"} \
+        "${DN_PRE[@]}" "${EXTRA_ARGS[@]}" || RC=$?
     ;;
   fairchem-uma)
     timeout --signal=TERM --kill-after=30 "$HARD_TIMEOUT" \
