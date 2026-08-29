@@ -30,6 +30,8 @@ set(CUDA_INCLUDE_DIRS "${CUDAToolkit_INCLUDE_DIRS}" CACHE PATH "" FORCE)
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(Torch REQUIRED)
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindTorchNCCL.cmake)
+
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
 # Locate torch_python after find_package(Torch) so TORCH_LIBRARIES paths are available.
@@ -67,6 +69,25 @@ python_add_library(distnnp_state_impl
     src/csrc/trajectory_writer.cpp
 )
 
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_INCLUDES "${TORCH_NCCL_INCLUDE_DIR}")
+check_cxx_source_compiles("
+  #include <nccl.h>
+  int main() {
+    ncclWaitSignalDesc_t d{};
+    (void)&ncclPutSignal; (void)&ncclWaitSignal;
+    (void)&ncclCommWindowRegister; (void)&ncclMemAlloc;
+    (void)d.opCnt;
+    return 0;
+  }" DISTNNP_HAVE_NCCL_RMA)
+
+if(DISTNNP_HAVE_NCCL_RMA)
+  target_compile_definitions(distnnp_state_impl PRIVATE DISTNNP_HAVE_NCCL_RMA=1)
+else()
+  message(STATUS "NCCL RMA (PutSignal/WaitSignal) unavailable — "
+                 "RMATransport will raise at construction.")
+endif()
+
 target_include_directories(distnnp_state_impl
     PRIVATE
     include
@@ -84,6 +105,7 @@ target_link_libraries(distnnp_state_impl
     ${TORCH_LIBRARIES}
     torch
     ${TORCH_PYTHON_LIBRARY}
+    TorchNCCL::nccl
 )
 
 set_target_properties(distnnp_state_impl
@@ -98,6 +120,8 @@ set_target_properties(distnnp_state_impl
     CUDA_EXTENSIONS OFF
     CUDA_ARCHITECTURES "80;90;100"
 
+    INSTALL_RPATH "$ORIGIN/../nvidia/nccl/lib:$ORIGIN/../torch/lib"
+    BUILD_WITH_INSTALL_RPATH TRUE
     INSTALL_RPATH_USE_LINK_PATH ON
 )
 
@@ -116,4 +140,3 @@ install(FILES
     DESTINATION .
     OPTIONAL
 )
-
