@@ -24,7 +24,8 @@ systems.
 
 ```
 drivers/
-  bench_common.py       args, warmup+timed loop, OOM capture, JSON schema, unit constants
+  bench_common.py       args, warmup+timed loop, OOM capture, JSON schema, unit constants,
+                        load_system() cell/PBC resolution (orthorhombic/triclinic/non-periodic)
   run_distnnp_uma.py    DistNNP-UMA driver (torchrun, 1 rank/GPU)
   run_fairchem_uma.py   FairChem-UMA driver (1 proc + Ray workers)
   run_lammps.py         LAMMPS-MACE driver (spawns `lmp` / `mpirun`, parses Loop time)
@@ -39,7 +40,8 @@ scripts/
   build_lammps_env.sh   build the SEPARATE .venv-lammps-mace (torch cu126 + mace + cuEq)
   build_lammps.sh       build LAMMPS from source (ML-IAP + KOKKOS/CUDA + PYTHON)
   spike_lammps_mace.sbatch  single- vs multi-GPU gate
-  gen_datasets.sh       wrapper over exp_datasets/scripts/03_generate_ch4.py
+  gen_datasets.sh       wrapper over exp_datasets/scripts/03_generate_ch4.py (CH4 only)
+  setup_datasets.sh     portable all-tiers dataset job (CH4 + real protein/membrane/capsid)
   smoke.sbatch          ≤3 min: 1 tiny cell per UMA engine on 2 GPUs
   smoke_lammps.sbatch   ≤5 min: 1 tiny LAMMPS-MACE cell
   run_cell.sbatch       run ONE (engine,xyz,ngpu) cell; failure → oom/error stub JSON
@@ -76,7 +78,9 @@ a uv venv at `DistNNP/.venv-uma` (torch 2.8.0+cu128, fairchem-core 2.21, ray
 the `uma-s-1p2` checkpoint so compute nodes need no network. Resolved versions
 land in `resolved_versions.txt`. Requires `uv` on PATH (or `EXP0_UV=/path/to/uv`).
 
-### 2. Generate datasets (once, seconds, login node — no Slurm)
+### 2. Obtain datasets (once)
+
+**Synthetic only** (CH₄:O₂ boxes — seconds, login node, no Slurm):
 
 ```bash
 scripts/gen_datasets.sh                 # default: k ∈ {1,2,32,64,128,192,256}
@@ -86,6 +90,26 @@ scripts/gen_datasets.sh 32 64 128 192   # a subset
 Writes `exp_datasets/baselines/ch4_<k>k_splited.xyz`. Positions are
 bit-reproducible; pinned sizes are checksum-verified against
 `exp_datasets/scripts/checksums.txt`, newer sizes are generated and reported.
+
+**Everything, incl. the real-world protein/membrane/capsid systems**
+(Workstream A, §11) — one portable job:
+
+```bash
+scripts/sbatch_exp0.sh --cpu scripts/setup_datasets.sh   # or: bash scripts/setup_datasets.sh
+```
+
+Builds all four tiers (see the header of `scripts/setup_datasets.sh`): generates
+the CH₄ baselines + the solvated/electrochemical systems, downloads the RCSB
+PDBs, and fetches the checksummed Tier-3 archive
+(`protein_vacuum/`, `membrane/`, `protein_solvated/dhfr`, `capsid/`). Select a
+subset with `EXP0_DATA_TIERS` / `EXP0_DATA_CH4_SIZES` / `EXP0_DATA_SOLVATED` /
+`EXP0_DATA_ELECTROCHEM` (defaults in `scripts/cluster.env`).
+
+Tiers 2–3 need outbound network. On a cluster whose compute nodes have none,
+either run just those tiers on a login node first
+(`EXP0_DATA_TIERS="2 3" bash scripts/setup_datasets.sh`) or stage the 23 MB
+archive and set `DISTNNP_ARCHIVE_LOCAL=<path>` (see `scripts/cluster.env`).
+Tiers 1 + 4 are pure compute and run anywhere.
 
 ### 3. Smoke-test the drivers (2 GPUs, ~3 min, optional)
 
@@ -128,6 +152,47 @@ DistNNP/.venv-uma/bin/python experiments/exp0_end_to_end/analysis/summarize.py
 
 → `analysis/summary.csv`, `analysis/headline_table.md`, and
 `analysis/figures/{strong_scaling,fill_scaling,oom_ceiling}.png`.
+
+---
+
+## Real-system inputs (Workstream A, plan §11)
+
+The synthetic CH₄:O₂ boxes are cubic and fully periodic. The
+`exp_datasets/protein_*`, `membrane/`, `electrochemical/`, `capsid/` systems are
+not — they are orthorhombic, triclinic (Pt slab), or carry no `Lattice` header
+at all (heavy-atom PDB dumps). Both UMA drivers resolve this through
+`bench_common.load_system()`:
+
+| driver flag | default | effect |
+|---|---|---|
+| `--pbc {auto,true,false}` | `auto` | `auto` uses the file's `Lattice`/`pbc`; if the file has no usable cell **or** its pbc flags are all false, the system is wrapped in a non-periodic padded box (atoms shifted in, `pbc` off). `true` forces the file cell + full PBC. `false` always builds the non-periodic box. |
+| `--nonperiodic-pad <Å>` | `2·(cutoff+ghost)` | padding on each side of the synthesised box |
+| `--partition-algorithm` | `sfc_morton` | use `kdtree` for anisotropic real systems (§11.1); `sfc_morton` for the isotropic matrix |
+
+`load_system()` parses the file through **`distnnp_state.TrajectoryWriter`** —
+the same reader `Simulator.setup()` uses — and pulls the cell/PBC back out with
+`get_cell()` / `get_pbc()`. It returns a `MolecularInfo` (fed straight to
+`setup()`, no on-disk round trip; non-periodic coordinates are shifted in
+memory) plus `to_ase()` for the FairChem side, so both engines get one parse.
+The installed `distnnp` package is untouched — the DistNNP driver injects the
+resolved cell/PBC by patching its `Simulator` instance's
+`_get_simulation_config()` (`drivers/run_distnnp_uma.py:_inject_cell`); an unset
+box is still the cubic `side_length_angstrom` path, so the isotropic matrix is
+unchanged.
+
+A one-cell example (9GMO + water, 1.5 M atoms, orthorhombic 229×233×291 Å):
+
+```bash
+scripts/sbatch_exp0.sh --gpus-per-node=4 --time=00:25:00 scripts/run_cell.sbatch \
+    distnnp-uma exp_datasets/protein_solvated/9gmo_density.xyz 4 \
+    --partition-algorithm kdtree --timed-steps 12 --warmup-steps 8 --rebalance-interval 1000
+```
+
+> **Not yet wired:** `SimulatorConfig.edge_weighted_partition` is currently a
+> no-op — `SimState` calls the unweighted `partition(mol, env)` overload, so
+> KDTree/SFC balance by atom count, not edge count. Edge-weighted balance (the
+> §11.1 mechanism) needs the 3-arg `partition(mol, env, sim_config)` call
+> threaded through `SimState`. Tracked separately from the non-cubic-cell work.
 
 ---
 
@@ -195,14 +260,17 @@ the Delta defaults need to be set:
 | `EXP0_GPU_ACCOUNT` / `EXP0_CPU_ACCOUNT` | `bcpt-delta-gpu` / `bcpt-delta-cpu` | Slurm `--account` |
 | `EXP0_GPU_PARTITION` / `EXP0_CPU_PARTITION` | `gpuA100x4` / `cpu` | Slurm `--partition` |
 | `EXP0_GPUS_PER_NODE_MAX` | `4` | cap on `--gpus-per-node` per cell |
-| `EXP0_GPU_MEM` / `EXP0_CPU_MEM` | `200g` / `48g` | Slurm `--mem` |
+| `EXP0_NODES` | `1` | Slurm `--nodes` for every job (raise for a multi-node run) |
+| `EXP0_GPU_MEM` / `EXP0_CPU_MEM` | `200g` / `48g` | Slurm `--mem` (`0` = whole node) |
 | `EXP0_CPUS_PER_TASK` | `16` | Slurm `--cpus-per-task` |
 | `EXP0_SBATCH_EXTRA` | *(empty)* | extra flags for every job, e.g. `--qos=high` |
+| `EXP0_DATA_TIERS` / `EXP0_DATA_CH4_SIZES` / `EXP0_DATA_SOLVATED` / `EXP0_DATA_ELECTROCHEM` | `1 2 3 4` / `1 2 32 64 128` / `9gmo 2rik 1aki` / `12k 17k` | what `setup_datasets.sh` builds |
+| `DISTNNP_ARCHIVE_LOCAL` / `DISTNNP_ARCHIVE_SHARED_DIR` | *(empty)* / `/projects/bcpt/public/distnnp_datasets` | staged Tier-3 archive / group cache dir |
 | `EXP0_MODULES` | `python/3.13.5-gcc13.3.1 cudatoolkit/26.5_12.9-unsupported gcc-native/14 aws-ofi-nccl` | args to one `module load`; **set empty** on conda/container clusters |
 | `EXP0_MODULE_UNLOAD` | `cudatoolkit` | `module unload` these first |
 | `EXP0_MODULE_PURGE` | `0` | `module purge` before loading |
 | `EXP0_NCCL_SOCKET_IFNAME` | `hsn` | high-speed fabric iface; empty ⇒ NCCL auto-detects |
-| `EXP0_CUDA_ARCH` | `80;90` | extension build target (A100=80, H100/H200=90, A40=86) |
+| `EXP0_CUDA_ARCH` | `80;90` | extension build target (A100=80, H100/H200=90, A40=86, B200=100) |
 | `EXP0_VENV` | `<repo>/DistNNP/.venv-uma` | reuse an existing venv |
 | `EXP0_UV` | `uv` | uv binary for `env_setup.sh` |
 

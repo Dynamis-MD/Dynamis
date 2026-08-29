@@ -77,6 +77,33 @@ def parse_bench_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--rebalance-interval", type=int, default=50)
     p.add_argument("--cutoff-angstrom", type=float, default=6.0)
     p.add_argument("--ghost-buffer-angstrom", type=float, default=0.5)
+    p.add_argument(
+        "--partition-algorithm",
+        default="sfc_morton",
+        choices=["sfc_morton", "sfc_hilbert", "kdtree", "simple"],
+        help="DistNNP spatial partitioner. Use 'kdtree' for anisotropic / "
+        "real systems (Workstream A); 'sfc_morton' for the isotropic matrix.",
+    )
+
+    # Real-system cells (Workstream A). The synthetic CH4:O2 boxes are cubic +
+    # fully periodic; real inputs may be orthorhombic, triclinic, or have no
+    # cell at all (heavy-atom PDB dumps).
+    p.add_argument(
+        "--pbc",
+        default="auto",
+        choices=["auto", "true", "false"],
+        help="auto: use the file's Lattice/pbc; if the file has no usable cell "
+        "OR its pbc flags are all false, wrap it in a non-periodic padded box. "
+        "true: force the file cell + full PBC. false: always build a "
+        "non-periodic padded box (centre atoms, pbc off).",
+    )
+    p.add_argument(
+        "--nonperiodic-pad",
+        type=float,
+        default=None,
+        help="padding (Å) added on every side when a non-periodic box is "
+        "synthesised (default: 2*(cutoff + ghost buffer)).",
+    )
 
     # FairChem only (= number of GPUs on the node)
     p.add_argument("--workers", type=int, default=1)
@@ -130,6 +157,142 @@ def parse_bench_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "(thermostat parity gate, plan section 8.4)",
     )
     return p.parse_args(argv)
+
+
+# ---------------------------------------------------------------------------
+# System / cell resolution  (Workstream A -- real, non-cubic inputs)
+# ---------------------------------------------------------------------------
+@dataclass
+class SystemSpec:
+    """Simulation cell + PBC resolved from an input file, parsed through the
+    SAME reader the DistNNP simulator uses (`distnnp_state.TrajectoryWriter`), so
+    both engines get one parse -- element table, velocity-column detection and
+    `Lattice=` handling all identical.
+
+    `info` is a `distnnp_state.MolecularInfo` -- pass it straight to
+    `Simulator.setup()`; no on-disk round trip. For a non-periodic system its
+    `atom_positions` are already shifted into the synthesised box. `to_ase()`
+    rebuilds the equivalent `ase.Atoms` for the FairChem driver.
+    """
+    info: Any                       # distnnp_state.MolecularInfo
+    cell: list                      # 3x3 row-vector matrix
+    pbc: list                       # [bool, bool, bool]
+    box_angstrom: float             # representative size for the JSON record
+    num_atoms: int
+    periodic: bool
+
+    def to_ase(self):
+        import ase
+        import numpy as np
+
+        numbers = np.asarray(self.info.atom_types.detach().cpu(), dtype=int).reshape(-1)
+        positions = np.asarray(self.info.atom_positions.detach().cpu(), dtype=float)
+        return ase.Atoms(numbers=numbers, positions=positions,
+                         cell=self.cell, pbc=self.pbc)
+
+
+def _read_molecular_info(input_path: str):
+    """Parse an .xyz/.distnnp file through `distnnp_state.TrajectoryWriter` --
+    the exact path `Simulator.setup()` takes -- and also recover the cell/pbc it
+    caches from the `Lattice=` / `pbc=` header via `get_cell()` / `get_pbc()`
+    (which `MolecularInfoReader.read_struct` drops).
+
+    Returns `(MolecularInfo, cell_3x3_tensor_or_None, pbc_tensor_or_None)`; the
+    cell is None when the header carried no usable `Lattice=` (degenerate/zero).
+    Imported lazily so the module still imports in the LAMMPS venv.
+    """
+    import tempfile
+
+    import torch
+    from distnnp_state import TrajectoryWriter
+
+    assert os.path.exists(input_path), f"{input_path} could not be found"
+    with tempfile.TemporaryDirectory() as scratch:
+        # TrajectoryWriter truncates its output on construction, so the read
+        # goes through a throwaway scratch file, never input_path.
+        with TrajectoryWriter(0, bytes(16), "exp0-load-system", scratch,
+                              "_scratch.distnnp") as w:
+            info = w.initialize(os.fspath(input_path), 1.0, 1)
+            try:
+                cell = w.get_cell().detach().clone().to(torch.float32)
+                pbc = w.get_pbc().detach().clone()
+            except Exception:
+                cell, pbc = None, None
+    if cell is not None and float(torch.det(cell).abs()) <= 1e-6:
+        cell = None
+    return info, cell, pbc
+
+
+def load_system(
+    input_path: str,
+    *,
+    pbc_mode: str = "auto",
+    cutoff_angstrom: float = 6.0,
+    ghost_buffer_angstrom: float = 0.5,
+    nonperiodic_pad: Optional[float] = None,
+) -> SystemSpec:
+    """Resolve the simulation cell for `input_path`.
+
+    pbc_mode:
+      "auto"  -- use the file's `Lattice` + `pbc`. If the file has no usable
+                 cell, or its pbc flags are all False, fall back to a
+                 non-periodic padded box.
+      "true"  -- require a usable file cell; use it with full PBC.
+      "false" -- always synthesise a non-periodic padded box (centre atoms).
+
+    A non-periodic box is orthorhombic: side = atom_extent + 2*pad, with
+    pad = nonperiodic_pad or 2*(cutoff + ghost_buffer). `info.atom_positions`
+    are translated so the system sits at [pad, pad+extent] on every axis (the
+    radius-graph kernel wraps fractional coords into [0,1), which is only
+    correct if the atoms actually lie inside the box).
+    """
+    import numpy as np
+    import torch
+
+    info, file_cell, file_pbc = _read_molecular_info(input_path)
+    n = int(info.num_atoms)
+    pos = info.atom_positions.detach().cpu().to(torch.float32)
+    extent = (pos.max(0).values - pos.min(0).values).numpy()
+
+    have_cell = file_cell is not None
+    have_pbc = bool(file_pbc is not None and file_pbc.to(torch.bool).any())
+
+    pad = nonperiodic_pad
+    if pad is None:
+        pad = 2.0 * (cutoff_angstrom + ghost_buffer_angstrom)
+
+    if pbc_mode == "true" and not have_cell:
+        raise ValueError(f"--pbc true but {input_path} has no usable Lattice= header")
+
+    make_nonperiodic = (
+        pbc_mode == "false"
+        or (pbc_mode == "auto" and (not have_cell or not have_pbc))
+    )
+
+    if make_nonperiodic:
+        side = extent + 2.0 * pad
+        shifted = pos - pos.min(0).values + pad          # into [pad, pad+extent]
+        info.atom_positions = shifted.to(info.atom_positions.dtype)
+        cell = np.diag(side)
+        pbc = [False, False, False]
+        periodic = False
+    else:
+        cell = file_cell.numpy().astype(float)
+        pbc = [bool(x) for x in (
+            file_pbc.to(torch.bool).tolist() if have_pbc else [True, True, True]
+        )]
+        periodic = True
+
+    box_angstrom = float(abs(np.linalg.det(cell)) ** (1.0 / 3.0))
+    cell_list = [[float(v) for v in row] for row in np.asarray(cell)]
+    return SystemSpec(
+        info=info,
+        cell=cell_list,
+        pbc=[bool(x) for x in pbc],
+        box_angstrom=box_angstrom,
+        num_atoms=n,
+        periodic=periodic,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -48,7 +48,7 @@ RUN=(sbatch)
 exec "${RUN[@]}" \
   --account="$ACCT" \
   --partition="$PART" \
-  --nodes=1 \
+  --nodes="${EXP0_NODES:-1}" \
   --cpus-per-task="$EXP0_CPUS_PER_TASK" \
   --mem="$MEM" \
   --output="$EXP_DIR/results/logs/%x_%j.out" \
