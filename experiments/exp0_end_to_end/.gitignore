@@ -1,0 +1,17 @@
+# Site-specific Slurm config (README: "sourced first, wins", git-ignored)
+scripts/cluster.local.env
+
+# Benchmark outputs — one JSON per cell + Slurm logs
+results/
+
+# Datasets are obtained on demand, never committed (see exp_datasets/scripts/README.md)
+exp_datasets/baselines/*.xyz
+exp_datasets/capsid/*.xyz
+exp_datasets/capsid/*.cif*
+exp_datasets/**/*.xyz
+exp_datasets/**/*.pdb
+exp_datasets/**/*.cif
+exp_datasets/**/*.tar.xz
+
+# Resolved-version freeze from env_setup.sh
+resolved_versions.txt

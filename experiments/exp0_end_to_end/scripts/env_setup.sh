@@ -34,6 +34,13 @@ source "$_S/_lib.sh"
 UV="${EXP0_UV:-uv}"
 TORCH_VERSION="${EXP0_TORCH_VERSION:-2.8.0}"
 CUDA_ARCH="${EXP0_CUDA_ARCH:-80;90}"
+# PyTorch wheel channel. Delta default is cu128; override on a box whose driver
+# / GPU needs a different CUDA (e.g. GB200 aarch64 has no cu128 torch 2.8 wheel
+# -> use cu129).  TORCH_LOCAL must match the "+cuXXX" local-version suffix the
+# wheels on that index carry (used in the resolver constraint).
+TORCH_INDEX="${EXP0_TORCH_INDEX:-https://download.pytorch.org/whl/cu128}"
+TORCH_LOCAL="${EXP0_TORCH_LOCAL:-+cu128}"
+PYVER="${EXP0_PYTHON:-3.12}"
 
 mkdir -p "$RESULTS_DIR/logs"
 
@@ -41,24 +48,64 @@ echo "=== [1/8] modules ==="
 exp0_load_modules
 command -v "$UV" >/dev/null || { echo "uv not found ('$UV'); set EXP0_UV"; exit 1; }
 
-echo "=== [2/8] fresh venv: $VENV ==="
+echo "=== [2/8] fresh venv: $VENV (python $PYVER) ==="
 rm -rf "$VENV"
-"$UV" venv --python "$(command -v python3)" "$VENV"
+"$UV" venv --python "$PYVER" "$VENV"
 PYBIN="$VENV/bin/python"
 PIP=("$UV" pip install --python "$PYBIN")
 
-echo "=== [3/8] torch $TORCH_VERSION + cu128 + build backend ==="
-"${PIP[@]}" "torch==${TORCH_VERSION}" torchvision --index-url https://download.pytorch.org/whl/cu128
+echo "=== [3/8] torch $TORCH_VERSION ($TORCH_INDEX) + build backend ==="
+"${PIP[@]}" "torch==${TORCH_VERSION}" torchvision --index-url "$TORCH_INDEX"
 # Build deps live IN the target venv so step 6 can use --no-build-isolation:
 # that forces CMake's find_package(Torch) to resolve THIS venv's torch instead
 # of a sibling .venv (ABI clash -> "sym_node has no attribute 'DynamicInt'").
 "${PIP[@]}" ninja "scikit-build-core>=0.5" cmake pybind11 setuptools wheel
 "$PYBIN" -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
 
+# --- [3b] link torch's bundled CUDA math libraries into CUDA_HOME -----------
+# A minimal redistributable toolkit (repo scripts/install_cuda_redist.sh) has
+# nvcc + cudart + cccl but NO cuBLAS/cuSPARSE/cuSOLVER/cuFFT/cuRAND -- and
+# Torch's ATen CUDA headers #include <cublas_v2.h>, <cusparse.h>, ... The exact
+# matching versions ship inside the torch wheel; symlink them in so the toolkit
+# is a complete standard layout. No-op when CUDA_HOME already has them (a full
+# module-provided toolkit on Delta).
+_CUDA_HOME="${CUDA_HOME:-${CUDATOOLKIT_HOME:-}}"
+if [ -n "$_CUDA_HOME" ] && [ ! -e "$_CUDA_HOME/include/cusparse.h" ]; then
+    echo "=== [3b] linking torch's CUDA math libs into $_CUDA_HOME ==="
+    "$PYBIN" - "$_CUDA_HOME" <<'PY' || echo "  (no nvidia/* wheels -- toolkit must already carry cuBLAS/cuSPARSE headers; see CUDA_COMPONENTS in install_cuda_redist.sh)"
+import os, sys, glob, pathlib
+cuda_home = pathlib.Path(sys.argv[1])
+try:
+    import nvidia
+except ModuleNotFoundError:
+    raise SystemExit("no nvidia namespace package")
+roots = [pathlib.Path(p) for p in nvidia.__path__]
+# torch <=2.8 ships separate nvidia/{cublas,cusparse,...}/ ; >=2.13 a single
+# nvidia/cu13/ . Handle both.
+subs = []
+for r in roots:
+    subs += [d for d in r.iterdir() if d.is_dir()]
+linked = 0
+for d in subs:
+    for kind in ("include", "lib"):
+        src_dir = d / kind
+        if not src_dir.is_dir():
+            continue
+        dst_dir = cuda_home / ("lib64" if kind == "lib" else "include")
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for src in src_dir.iterdir():
+            dst = dst_dir / src.name
+            if not dst.exists():
+                dst.symlink_to(src)
+                linked += 1
+print(f"  linked {linked} math-lib entries")
+PY
+fi
+
 echo "=== [4/8] constraints ==="
 CONSTRAINTS="$(mktemp)"
 cat > "$CONSTRAINTS" <<EOF
-torch==${TORCH_VERSION}+cu128
+torch==${TORCH_VERSION}${TORCH_LOCAL}
 fairchem-core<2.22
 EOF
 cat "$CONSTRAINTS"

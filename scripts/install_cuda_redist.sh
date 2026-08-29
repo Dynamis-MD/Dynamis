@@ -23,9 +23,12 @@ PLATFORM="${CUDA_PLATFORM:-linux-sbsa}"   # aarch64 server (Grace/GB200)
 BASE="https://developer.download.nvidia.com/compute/cuda/redist"
 MANIFEST_URL="$BASE/redistrib_${CUDA_VER}.json"
 # CUDA 13 split the old monolithic nvcc package: crt headers (crt/host_config.h)
-# are in cuda_crt, and the NVVM backend (cicc + libnvvm) is in libnvvm.
+# are in cuda_crt, and the NVVM backend (cicc + libnvvm) is in libnvvm. On
+# CUDA <=12.9 those are still bundled inside cuda_nvcc and have no standalone
+# manifest entry -- the loop below silently skips any component the manifest
+# for this CUDA_VER does not list.
 # cuda_nvrtc is needed because Torch's CMake config links CUDA_nvrtc_LIBRARY.
-COMPONENTS=(cuda_nvcc cuda_crt libnvvm cuda_nvrtc cuda_cudart cuda_cccl cuda_cuobjdump cuda_nvdisasm)
+COMPONENTS=(${CUDA_COMPONENTS:-cuda_nvcc cuda_crt libnvvm cuda_nvrtc cuda_cudart cuda_cccl cuda_cuobjdump cuda_nvdisasm})
 
 echo ">> CUDA $CUDA_VER ($PLATFORM)  ->  $CUDA_PREFIX"
 
@@ -46,13 +49,21 @@ curl -fsSL "$MANIFEST_URL" -o "$work/manifest.json"
 mkdir -p "$CUDA_PREFIX"
 
 for comp in "${COMPONENTS[@]}"; do
+    rel="" sha=""
+    # `|| true`: an absent component prints nothing and `read` then returns 1,
+    # which would abort the script under `set -e`.
     read -r rel sha < <(python3 - "$work/manifest.json" "$comp" "$PLATFORM" <<'PY'
 import json, sys
 manifest, comp, platform = sys.argv[1], sys.argv[2], sys.argv[3]
-d = json.load(open(manifest))[comp][platform]
-print(d["relative_path"], d["sha256"])
+d = json.load(open(manifest)).get(comp, {}).get(platform)
+if d:
+    print(d["relative_path"], d["sha256"])
 PY
-)
+) || true
+    if [ -z "${rel:-}" ]; then
+        echo ">> Skipping $comp (not in redistrib_${CUDA_VER}.json for $PLATFORM)"
+        continue
+    fi
     url="$BASE/$rel"
     tarball="$work/$(basename "$rel")"
     echo ">> Downloading $comp"
