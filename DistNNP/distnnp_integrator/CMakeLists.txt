@@ -108,7 +108,9 @@ target_link_libraries(distnnp_integrator_impl
     ${TORCH_LIBRARIES}
     torch
     ${TORCH_PYTHON_LIBRARY}
-    ${DISTNNP_STATE_IMPL_LIBRARY}
+    # Passed through to the linker verbatim: the file has no 'lib' prefix, so
+    # CMake would otherwise rewrite the path into an unresolvable -L/-l pair.
+    "-Wl,${DISTNNP_STATE_IMPL_LIBRARY}"
 )
 
 set_target_properties(distnnp_integrator_impl
