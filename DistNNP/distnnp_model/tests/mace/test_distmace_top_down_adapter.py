@@ -205,7 +205,7 @@ def resolve_xyz_path(path: Path) -> Path:
         candidates = [Path.cwd() / path, TEST_FILE_DIR / path]
         candidates.extend(parent / path for parent in TEST_FILE_DIR.parents)
         if len(path.parts) == 1:
-            candidates.append(TEST_FILE_DIR / "data" / "mace" / path)
+            candidates.append(TEST_FILE_DIR / "data" / path)
 
     attempted: List[Path] = []
     seen = set()
@@ -223,7 +223,7 @@ def resolve_xyz_path(path: Path) -> Path:
         f"XYZ input does not exist: {path}\n"
         f"torchrun working directory: {Path.cwd()}\n"
         f"Attempted paths:\n{attempted_text}\n"
-        "If this is a bundled fixture, ensure distnnp_model/tests/data/mace was "
+        "If this is a bundled fixture, ensure distnnp_model/tests/mace/data was "
         "copied or committed with the test driver."
     )
 
