@@ -107,10 +107,42 @@ def parse_bench_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
     # FairChem only (= number of GPUs on the node)
     p.add_argument("--workers", type=int, default=1)
-    p.add_argument("--merge-mole", type=int, default=0,
-                   help="fairchem InferenceSettings.merge_mole (0/1). 0 = stable "
-                        "re-dispatch path; 1 = persistent NCCL loop (faster, "
-                        "deadlocks on this cluster)")
+
+    # ---- UMA InferenceSettings (BOTH engines; see build_inference_settings) --
+    # `default` is fairchem's *most general, not speed-optimised* preset:
+    # tf32=False, activation_checkpointing=True, merge_mole=False, compile=False.
+    # With merge_mole=False / activation_checkpointing=True the predictor also
+    # cannot select the `umas_fast_gpu` (Triton) execution backend and silently
+    # falls back to `general`. `turbo` flips all four.
+    p.add_argument("--inference-settings", default="default",
+                   choices=["default", "turbo", "traineval"],
+                   help="fairchem InferenceSettings preset applied to BOTH the "
+                        "DistNNP UMAModel and the FairChem baseline. The "
+                        "individual --tf32/--compile/... flags override fields "
+                        "of the chosen preset.")
+    p.add_argument("--tf32", type=int, default=-1, choices=[-1, 0, 1],
+                   help="InferenceSettings.tf32; -1 = keep the preset's value. "
+                        "Large speedup on Ampere+ at a small accuracy cost.")
+    p.add_argument("--activation-checkpointing", type=int, default=-1,
+                   choices=[-1, 0, 1],
+                   help="InferenceSettings.activation_checkpointing; -1 = preset. "
+                        "1 trades speed for a much smaller memory footprint; it "
+                        "also disqualifies the umas_fast_* execution backends.")
+    p.add_argument("--compile", type=int, default=-1, choices=[-1, 0, 1],
+                   help="InferenceSettings.compile; -1 = preset. torch.compile "
+                        "costs minutes of warmup and recompiles on every new "
+                        "shape -- with --warmup-steps in the single digits it is "
+                        "usually a net loss.")
+    p.add_argument("--merge-mole", type=int, default=-1, choices=[-1, 0, 1],
+                   help="InferenceSettings.merge_mole; -1 = preset. 0 = stable "
+                        "re-dispatch path; 1 = merged experts (required by the "
+                        "umas_fast_gpu backend, but on the FairChem side it "
+                        "keeps a persistent NCCL broadcast loop alive in the Ray "
+                        "workers and deadlocks on this cluster)")
+    p.add_argument("--execution-mode", default=None,
+                   choices=["general", "umas_fast_pytorch", "umas_fast_gpu"],
+                   help="InferenceSettings.execution_mode; unset = let fairchem "
+                        "auto-select (umas_fast_gpu when the preset allows it).")
 
     # LAMMPS only. The LAMMPS driver is not launched under torchrun, so it
     # cannot read WORLD_SIZE from the env -- the rank count is passed explicitly.
@@ -157,6 +189,73 @@ def parse_bench_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "(thermostat parity gate, plan section 8.4)",
     )
     return p.parse_args(argv)
+
+
+# ---------------------------------------------------------------------------
+# UMA InferenceSettings  (shared by both engines)
+# ---------------------------------------------------------------------------
+def build_inference_settings(args):
+    """Resolve `args` into a fairchem `InferenceSettings` object.
+
+    Both drivers call this so the two engines are provably running the same
+    kernel configuration -- the only thing exp0 wants to vary is the
+    *distribution strategy*, not the precision / checkpointing / compile policy.
+
+    `NAME_TO_INFERENCE_SETTING` hands out shared module-level singletons, so we
+    deep-ish copy via `dataclasses.replace` before touching any field; mutating
+    the preset in place would leak into every later `guess_inference_settings`
+    call in the process (including the one inside `UMAModel.__init__`).
+    """
+    import dataclasses
+
+    from fairchem.core.units.mlip_unit.api.inference import (
+        guess_inference_settings,
+    )
+
+    settings = dataclasses.replace(
+        guess_inference_settings(args.inference_settings)
+    )
+
+    overrides: dict[str, Any] = {}
+    if args.tf32 >= 0:
+        overrides["tf32"] = bool(args.tf32)
+    if args.activation_checkpointing >= 0:
+        overrides["activation_checkpointing"] = bool(args.activation_checkpointing)
+    if args.compile >= 0:
+        overrides["compile"] = bool(args.compile)
+    if args.merge_mole >= 0:
+        overrides["merge_mole"] = bool(args.merge_mole)
+    if args.execution_mode is not None:
+        overrides["execution_mode"] = args.execution_mode
+
+    if overrides:
+        settings = dataclasses.replace(settings, **overrides)
+    return settings
+
+
+def inference_settings_summary(settings) -> dict[str, Any]:
+    """The speed/memory-relevant subset of `settings`, for the JSON record.
+
+    `execution_mode=None` means fairchem auto-selects at load time; that
+    selection needs `merge_mole=True` *and* `activation_checkpointing=False`
+    (see `UMASFastGPUBackend.validate`), so we note what it will resolve to
+    rather than recording an ambiguous null.
+    """
+    auto_fast = (
+        settings.execution_mode is None
+        and settings.merge_mole
+        and not settings.activation_checkpointing
+    )
+    return {
+        "tf32": settings.tf32,
+        "activation_checkpointing": settings.activation_checkpointing,
+        "merge_mole": settings.merge_mole,
+        "compile": settings.compile,
+        "execution_mode": settings.execution_mode,
+        "execution_mode_auto_eligible_for_fast_gpu": bool(auto_fast),
+        "base_precision_dtype": str(settings.base_precision_dtype),
+        "internal_graph_gen_version": settings.internal_graph_gen_version,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +615,9 @@ class BenchRecord:
     status: str
     input_file: str = ""
     tag: Optional[str] = None
+    # resolved UMA InferenceSettings (see build_inference_settings); None for
+    # engines that do not go through fairchem, e.g. lammps-mace.
+    inference_settings: Optional[dict] = None
     elapsed_s: Optional[float] = None
     steps_per_sec: Optional[float] = None
     ns_per_day: Optional[float] = None

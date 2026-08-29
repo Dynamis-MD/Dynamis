@@ -321,6 +321,19 @@ From `resolved_versions.txt`; python 3.13.5, CUDA 12.9
 **System:** isotropic CH₄:O₂ dense fluid, ρ ≈ 0.037 atoms/Å³.
 Regenerate with `analysis/summarize.py` (→ `analysis/headline_table.md`).
 
+> **Caveat — UMA kernel configuration.** Every number below was measured with
+> fairchem's `inference_settings_default()`: `tf32=False`,
+> `activation_checkpointing=True`, `merge_mole=False`, `compile=False`, and
+> therefore the unoptimised `general` execution backend (the `umas_fast_gpu`
+> Triton path requires `merge_mole=True` *and* `activation_checkpointing=False`).
+> The comparison between the two engines is matched and valid, but the absolute
+> steps/s are far below what UMA reaches under `turbo`, and both engines being
+> kernel-bound compresses the DistNNP/FairChem gap. Drivers now take
+> `--inference-settings {default,turbo,traineval}` (plus per-field
+> `--tf32/--activation-checkpointing/--compile/--merge-mole`), applied
+> identically to both engines and recorded in each JSON. Staged re-run plan:
+> **`RESTART.md` §6**.
+
 ### Throughput (steps/s) — corrected physics, both engines at ~250 K
 
 | atoms | GPUs | atoms/GPU | DistNNP | FairChem | speedup |
