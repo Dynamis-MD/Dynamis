@@ -24,8 +24,10 @@ from bench_common import (
     BenchRecord,
     RunOutcome,
     TimedLoop,
+    build_inference_settings,
     capture_oom,
     deadline,
+    inference_settings_summary,
     kT_native,
     load_system,
     parse_bench_args,
@@ -141,8 +143,23 @@ def main() -> None:
     if rank == 0:
         print(f"[rank 0] cell={spec.cell} pbc={spec.pbc} periodic={spec.periodic}")
 
+    # UMAModel's own default is inference_settings="default" -- fairchem's
+    # *most general, least optimised* preset (tf32 off, activation checkpointing
+    # on, MOLE unmerged, no compile), which also disqualifies the umas_fast_gpu
+    # execution backend. Resolve it here instead, from the same helper the
+    # FairChem driver uses, so both engines run identical kernels.
+    settings = build_inference_settings(args)
+    settings_rec = inference_settings_summary(settings)
+    if rank == 0:
+        print(f"InferenceSettings[{args.inference_settings}] -> {settings_rec}")
+
     torch.manual_seed(1234)
-    model = UMAModel(args.model, dataset=args.task, device=device.type)
+    model = UMAModel(
+        args.model,
+        dataset=args.task,
+        device=device.type,
+        inference_settings=settings,
+    )
     integ = Langevin(
         dt=args.timestep_fs,
         gamma=args.friction_inv_fs,
@@ -256,6 +273,7 @@ def main() -> None:
             status=status,
             input_file=os.path.abspath(args.input),
             tag=args.tag,
+            inference_settings=settings_rec,
             elapsed_s=loop.elapsed_s if loop else None,
             steps_per_sec=loop.steps_per_sec if loop else None,
             ns_per_day=loop.ns_per_day if loop else None,

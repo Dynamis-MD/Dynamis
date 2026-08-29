@@ -28,8 +28,10 @@ from bench_common import (
     BenchRecord,
     RunOutcome,
     TimedLoop,
+    build_inference_settings,
     capture_oom,
     deadline,
+    inference_settings_summary,
     load_system,
     parse_bench_args,
     peak_mem_mb,
@@ -38,25 +40,27 @@ from bench_common import (
 )
 
 
-def _build_predictor(args):
+def _build_predictor(args, settings):
     from fairchem.core.calculate.ase_calculator import FAIRChemCalculator
     from fairchem.core.calculate.pretrained_mlip import get_predict_unit
-    from fairchem.core.units.mlip_unit.api.inference import inference_settings_default
 
-    # Match DistNNP's `UMAModel` exactly: it builds the predictor with
-    # inference_settings="default" (activation_checkpointing=True, merge_mole=False,
-    # tf32=True). Using turbo() here instead (activation_checkpointing=False) gave
-    # the baseline a memory handicap DistNNP never pays -> FairChem OOM'd at 16k
-    # atoms on a 40 GB A100 while DistNNP ran 128k. The only difference we want to
-    # measure is the distribution strategy, not the checkpointing policy.
-    settings = inference_settings_default()
-    # merge_mole=True keeps a persistent NCCL broadcast loop alive in the Ray
-    # workers; on this cluster rank0's forward and the workers' broadcast loop
-    # desync on the first predict -> 600 s collective timeout -> SIGABRT. default()
-    # already sets merge_mole=False (the stable re-dispatch path); --merge-mole 1
-    # can force the faster-but-deadlock-prone loop back on.
-    settings.merge_mole = bool(args.merge_mole)
-    settings.compile = False  # match run_md.py; compile adds minutes of warmup
+    # `settings` comes from bench_common.build_inference_settings, i.e. the SAME
+    # resolution the DistNNP driver feeds to `UMAModel(inference_settings=...)`.
+    # The only difference exp0 wants to measure is the distribution strategy, so
+    # the precision / checkpointing / compile policy must be identical on both
+    # sides -- do not special-case it here.
+    #
+    # Caveat specific to this driver: merge_mole=True keeps a persistent NCCL
+    # broadcast loop alive in the Ray workers; on this cluster rank0's forward
+    # and the workers' broadcast loop desync on the first predict -> 600 s
+    # collective timeout -> SIGABRT. It is safe at --workers 1 and with the
+    # DistNNP engine; with Ray graph parallel it is the known-fragile path.
+    if settings.merge_mole and args.workers > 1:
+        print(
+            "WARNING: merge_mole=True with Ray graph parallel (--workers "
+            f"{args.workers}) has deadlocked on this cluster; the build "
+            "watchdog will record it as an OOM/timeout if it hangs."
+        )
 
     predictor = get_predict_unit(
         args.model,
@@ -110,6 +114,10 @@ def main() -> None:
     world_size = max(1, args.workers)
     gpus_per_node = torch.cuda.device_count() or 1
 
+    settings = build_inference_settings(args)
+    settings_rec = inference_settings_summary(settings)
+    print(f"InferenceSettings[{args.inference_settings}] -> {settings_rec}")
+
     # Same parser + cell resolution as the DistNNP driver (distnnp_state's
     # TrajectoryWriter), rebuilt as an ase.Atoms so both engines see an
     # identical box (orthorhombic / triclinic / non-periodic padded).
@@ -138,7 +146,7 @@ def main() -> None:
     # is no point timing anything.
     def _probe():
         with deadline(args.build_timeout_s, "fairchem build + feasibility step"):
-            predictor, calc = _build_predictor(args)
+            predictor, calc = _build_predictor(args, settings)
             state["predictor"] = predictor
             atoms.calc = calc
             dyn = ase.md.langevin.Langevin(
@@ -208,6 +216,7 @@ def main() -> None:
         status=status,
         input_file=os.path.abspath(args.input),
         tag=args.tag,
+        inference_settings=settings_rec,
         elapsed_s=loop.elapsed_s if loop else None,
         steps_per_sec=loop.steps_per_sec if loop else None,
         ns_per_day=loop.ns_per_day if loop else None,

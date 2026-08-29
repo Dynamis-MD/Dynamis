@@ -22,7 +22,10 @@ EXP_DIR="$(cd "$SCRIPTS_DIR/.." && pwd)"
 
 REPO_ROOT="${EXP0_REPO_ROOT:-$(cd "$EXP_DIR/../.." && pwd)}"
 MONO="$REPO_ROOT/DistNNP"
-RESULTS_DIR="$EXP_DIR/results"
+# Overridable so a sweep (e.g. tune_kernels.sbatch) can keep its cells out of
+# the main matrix dir -- mixing kernel configurations in one dir makes steps/s
+# incomparable (summarize.py warns about it).
+RESULTS_DIR="${EXP0_RESULTS_DIR:-$EXP_DIR/results}"
 VENV="${EXP0_VENV:-$MONO/.venv-uma}"
 PY="$VENV/bin/python"
 TORCHRUN="$VENV/bin/torchrun"
