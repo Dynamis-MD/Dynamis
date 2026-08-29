@@ -409,7 +409,17 @@ h = cat([h[:N_local], ghost_h], dim=0)  # caller's responsibility
 
 This matches the `FeaturePushToExchange` API contract: it returns ghost features only; the caller concatenates with local features.
 
-**One-time IPC setup, cheap per-layer reconfiguration.** Opening IPC handles (`cudaIpcOpenMemHandle`) is an expensive kernel-mode operation requiring cross-process coordination. It must not be repeated per GNN layer. The design separates two concerns:
+### CUDA 12 Fabric Handles & Multi-Node NVLink (NVL72)
+
+For multi-node NVLink architectures (such as NVIDIA NVL72, GH200, and GB200 clusters), legacy `cudaIpc*` APIs cannot cross OS / node boundaries. DistNNP supports CUDA 12+ Fabric Handles (`CU_MEM_HANDLE_TYPE_FABRIC` via the Virtual Memory Management `cuMem*` APIs) with automatic fallback to legacy IPC on single-node or older systems:
+
+- **Dynamic Detection:** `supports_fabric_handles(device_id)` queries `CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED`. If supported and running CUDA 12+, Fabric VMM allocations are used.
+- **Physical Allocation & Export:** `cuMemCreate` allocates physical GPU memory with `CU_MEM_HANDLE_TYPE_FABRIC`, exported via `cuMemExportToShareableHandle` as a 64-byte `CUDA_MEM_FABRIC_HANDLE`.
+- **Remote Import & Virtual Address Mapping:** Receiving ranks import the handle via `cuMemImportFromShareableHandle`, reserve virtual address space (`cuMemAddressReserve`), map the allocation (`cuMemMap`), and set permissions (`cuMemSetAccess`).
+- **Push Synchronization:** Both SM push kernels and the Copy Engine DMA paths operate directly on mapped virtual addresses across multi-node NVLink Fabric. Synchronization counters also utilize Fabric handles.
+- **Backward Compatibility:** On systems without Fabric support, the implementation seamlessly falls back to legacy `cudaMalloc`, `cudaIpcGetMemHandle`, and `cudaIpcOpenMemHandle`.
+
+**One-time IPC / Fabric setup, cheap per-layer reconfiguration.** Opening IPC/Fabric handles is an expensive kernel-mode operation requiring cross-process coordination. It must not be repeated per GNN layer. The design separates two concerns:
 
 - **Topology setup** (once per partition): allocate `x_buffer [N_ghost, max_F]` and `grad_recv_buffer [total_send, max_F]` for the maximum feature dimension across all layers; export and exchange handles via a single `all_gather`; open remote handles; compute and upload `PushTarget` arrays.
 - **Feature dimension reconfiguration** (once per layer, O(1)): call `reconfigure_feature_dim(F_l)` to update the active column count. This writes a single integer field — no IPC operations, no collectives, no buffer reallocation.
