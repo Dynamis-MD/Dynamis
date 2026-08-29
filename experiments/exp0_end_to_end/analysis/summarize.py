@@ -24,17 +24,24 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-ENGINES = ["distnnp-uma", "fairchem-uma", "lammps-mace"]
+ENGINES = ["distnnp-uma", "distnnp-uma-opt", "fairchem-uma", "lammps-mace"]
 ENGINE_LABEL = {
     "distnnp-uma": "DistNNP-UMA",
+    "distnnp-uma-opt": "DistNNP-UMA-opt",
     "fairchem-uma": "FairChem-UMA",
     "lammps-mace": "LAMMPS-MACE",
 }
 COLOR = {
     "distnnp-uma": "#1f77b4",
+    "distnnp-uma-opt": "#ff7f0e",
     "fairchem-uma": "#d62728",
     "lammps-mace": "#2ca02c",
 }
+
+# distnnp-uma-opt is DELIBERATELY on a different UMA kernel path (turbo) from the
+# matched distnnp-uma/fairchem-uma pair, so it is exempt from the "one kernel
+# config per results dir" check in headline_table().
+OPT_ENGINES = {"distnnp-uma-opt"}
 
 FIELDS = [
     "engine", "model", "tag", "num_atoms", "box_angstrom", "world_size",
@@ -250,25 +257,41 @@ def headline_table(rows, out_path, ref_engine="distnnp-uma"):
         for e in engines
     )
 
-    # A results dir holding more than one UMA kernel configuration cannot be
-    # tabulated as one comparison -- steps/s from `default` and `turbo` differ by
-    # the kernel path, not by the distribution strategy. Say so loudly.
-    kernels = sorted({r["inference_kernels"] for r in rows if r.get("inference_kernels")})
+    # The MATCHED engines (everything except distnnp-uma-opt) must share one UMA
+    # kernel configuration -- steps/s from `default` and `turbo` differ by the
+    # kernel path, not the distribution strategy. distnnp-uma-opt is expected to
+    # differ and is reported on its own line.
+    kernels = sorted({r["inference_kernels"] for r in rows
+                      if r.get("inference_kernels")
+                      and r.get("engine") not in OPT_ENGINES})
+    opt_kernels = sorted({r["inference_kernels"] for r in rows
+                          if r.get("inference_kernels")
+                          and r.get("engine") in OPT_ENGINES})
     kernel_note = ""
     if len(kernels) > 1:
         kernel_note = (
-            "\n> **WARNING — mixed UMA kernel configurations in this results "
-            "dir; steps/s across rows are NOT comparable:**\n> "
+            "\n> **WARNING — mixed UMA kernel configurations among the matched "
+            "engines; steps/s across rows are NOT comparable:**\n> "
             + "\n> ".join(f"- `{k}`" for k in kernels)
-            + "\n> \n> Re-run every cell at one configuration before "
-              "publishing this table (see RESTART.md §6).\n"
+            + "\n> \n> Re-run every matched cell at one configuration before "
+              "publishing this table.\n"
         )
     elif kernels:
-        kernel_note = f"\n_UMA kernels: `{kernels[0]}`._\n"
+        kernel_note = f"\n_Matched-engine UMA kernels: `{kernels[0]}`._\n"
+    if opt_kernels:
+        kernel_note += (f"_DistNNP-UMA-opt kernels: `{'`, `'.join(opt_kernels)}` "
+                        "(separate curve, not a matched comparison)._\n")
+
+    # For the matched engines the ratio is ref/other (the headline "DistNNP is
+    # Nx FairChem"); for distnnp-uma-opt it is other/ref, so the speedup of the
+    # optimised kernels over the matched DistNNP reads as a number > 1.
+    def _ratio_head(e):
+        if e in OPT_ENGINES:
+            return f"{ENGINE_LABEL.get(e, e)}/{ENGINE_LABEL.get(ref_engine, ref_engine)}"
+        return f"{ENGINE_LABEL.get(ref_engine, ref_engine)}/{ENGINE_LABEL.get(e, e)}"
 
     head = ["atoms", "GPUs"] + [f"{ENGINE_LABEL.get(e, e)} steps/s" for e in engines]
-    head += [f"{ENGINE_LABEL.get(ref_engine, ref_engine)}/{ENGINE_LABEL.get(e, e)}"
-             for e in others]
+    head += [_ratio_head(e) for e in others]
     head += ["notes"]
     lines = [f"_Model per engine: {legend}._",
              kernel_note,
@@ -290,7 +313,8 @@ def headline_table(rows, out_path, ref_engine="distnnp-uma"):
             # they ran the SAME model. Cross-family (UMA vs MACE) ratios are
             # model-confounded -- blank them rather than invite a false read.
             if ref_s and e_s and (e_r or {}).get("model") == ref_model:
-                row.append(f"{ref_s / e_s:.2f}x")
+                ratio = e_s / ref_s if e in OPT_ENGINES else ref_s / e_s
+                row.append(f"{ratio:.2f}x")
             else:
                 row.append("-")
                 if ref_s and e_s:

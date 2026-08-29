@@ -26,11 +26,21 @@ COMMON=(--warmup-steps 3 --timed-steps 10)
 
 echo "=== smoke: fairchem-uma (workers 2) ==="
 "$PY" "$EXP_DIR/drivers/run_fairchem_uma.py" --input "$XYZ" --engine fairchem-uma \
-    --workers 2 --output-dir "$RESULTS" --tag smoke "${COMMON[@]}" || true
+    --workers 2 --output-dir "$RESULTS" --tag smoke \
+    --tf32 1 --activation-checkpointing 0 "${COMMON[@]}" || true
 
 echo "=== smoke: distnnp-uma (2 ranks) ==="
 "$TORCHRUN" --standalone --nproc_per_node=2 "$EXP_DIR/drivers/run_distnnp_uma.py" \
-    --input "$XYZ" --engine distnnp-uma --output-dir "$RESULTS" --tag smoke "${COMMON[@]}" || true
+    --input "$XYZ" --engine distnnp-uma --output-dir "$RESULTS" --tag smoke \
+    --tf32 1 --activation-checkpointing 0 "${COMMON[@]}" || true
+
+# distnnp-uma-opt: same driver, `--inference-settings turbo` (merge_mole +
+# compile). The first compile trace is slow, hence the deeper warmup; run_cell
+# injects `turbo` in the real matrix but here we call the driver directly.
+echo "=== smoke: distnnp-uma-opt (2 ranks, turbo) ==="
+"$TORCHRUN" --standalone --nproc_per_node=2 "$EXP_DIR/drivers/run_distnnp_uma.py" \
+    --input "$XYZ" --engine distnnp-uma-opt --output-dir "$RESULTS" --tag smoke \
+    --inference-settings turbo --warmup-steps 8 --timed-steps 10 || true
 
 echo "=== validate ==="
 "$PY" - "$RESULTS" <<'PY'

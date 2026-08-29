@@ -61,7 +61,11 @@ def parse_bench_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--engine",
         required=True,
-        choices=["distnnp-uma", "fairchem-uma", "lammps-mace", "lammps-sevennet"],
+        choices=["distnnp-uma", "distnnp-uma-opt", "fairchem-uma",
+                 "lammps-mace", "lammps-sevennet"],
+        help="distnnp-uma / fairchem-uma run the MATCHED kernel config (exp0's "
+        "apples-to-apples axis); distnnp-uma-opt is the same DistNNP driver at "
+        "its fastest safe config (turbo: tf32 + no-ackpt + merge_mole + compile).",
     )
     p.add_argument("--model", default="uma-s-1p2")
     p.add_argument("--task", default="omol")

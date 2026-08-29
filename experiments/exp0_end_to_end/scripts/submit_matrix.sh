@@ -4,7 +4,12 @@
 #
 #   bash scripts/submit_matrix.sh [--dry-run] [--with-lammps] \
 #        [--only strong|fill|ceiling|lammps|lammps-1gpu|lammps-naive] \
-#        [--engine distnnp-uma|fairchem-uma|lammps-mace]
+#        [--engine distnnp-uma|distnnp-uma-opt|fairchem-uma|lammps-mace]
+#
+# distnnp-uma / fairchem-uma run the MATCHED kernel config (k1: tf32 + no
+# activation checkpointing -- the fastest config FairChem's Ray path survives).
+# distnnp-uma-opt is the SAME DistNNP driver at `--inference-settings turbo`
+# (+ merge_mole + compile) -- its own curve, ~1.6x faster in the triage.
 #
 # Matrix (see implementation_plan.md / README). This is a *performance*
 # benchmark on synthetic isotropic dense-fluid boxes -- short warmup that still
@@ -32,6 +37,12 @@ RUN_CELL="$SCRIPTS_DIR/run_cell.sbatch"
 SBATCH="$SCRIPTS_DIR/sbatch_exp0.sh"
 
 WARMUP=8
+# distnnp-uma-opt runs `--inference-settings turbo` -> torch.compile. fairchem
+# compiles with `dynamic=True` (predict.py), so varying node/edge counts do NOT
+# retrace; the only extra warmup cost is the one-time first trace plus a few
+# dynamo 0/1-dim specializations, which a warmup of 8 already covers. The real
+# compile budget is wall-time, handled by `hard` below, not by warmup count.
+OPT_WARMUP="${OPT_WARMUP:-8}"
 GPU_MAX="${EXP0_GPUS_PER_NODE_MAX:-4}"
 MAX_INFLIGHT="${MAX_INFLIGHT:-8}"
 
@@ -79,6 +90,9 @@ submit() {
   fi
   local timed=20;  [ "$size_k" -ge 192 ] && timed=12
   local hard=700;  [ "$size_k" -ge 192 ] && hard=900
+  # torch.compile's first trace on eSCN is minutes -- the -opt cells need a much
+  # larger wall budget so a slow compile is not misreported as an OOM/hang.
+  case "$engine" in distnnp-uma-opt) hard=$((hard + 1200));; esac
   local model_tag="uma-s-1p2"; case "$engine" in lammps-*) model_tag="${EXP0_MACE_MODEL_NAME:-mace-mpa-0}";; esac
   local name="exp0-${subexp}-${engine}-${size_k}k-${ngpu}gpu"
   local extra=(--timed-steps "$timed" --warmup-steps "$WARMUP" --rebalance-interval 1000)
@@ -87,8 +101,23 @@ submit() {
       extra=(--timed-steps "$timed" --warmup-steps "$WARMUP")
       [ "$comm_cutoff" != "0" ] && extra+=(--comm-cutoff "$comm_cutoff")
       ;;
+    distnnp-uma|fairchem-uma)
+      # The MATCHED axis: k1 -- the highest kernel config FairChem can run
+      # (merge_mole deadlocks its Ray workers, compile breaks MOLE under dynamo;
+      # see analysis/tune_report.py). Applied identically to both engines.
+      extra+=(--tf32 1 --activation-checkpointing 0)
+      ;;
+    distnnp-uma-opt)
+      # DistNNP's fastest safe config -- run_cell.sbatch injects
+      # `--inference-settings turbo` (tf32 + no-ackpt + merge_mole + compile).
+      # No kernel flags here; only the (env-overridable) warmup.
+      extra=(--timed-steps "$timed" --warmup-steps "$OPT_WARMUP" --rebalance-interval 1000)
+      ;;
   esac
-  local cmd=("$SBATCH" --job-name="$name" --gpus-per-node="$ngpu" --time="00:25:00"
+  # Walltime tracks the hard cell timeout + model-load slack; the -opt compile
+  # cells run long enough to need more than the 25 min the rest use.
+  local wall="00:25:00"; case "$engine" in distnnp-uma-opt) wall="00:50:00";; esac
+  local cmd=("$SBATCH" --job-name="$name" --gpus-per-node="$ngpu" --time="$wall"
              --export=ALL,CELL_TAG="${subexp}",HARD_TIMEOUT="${hard}",CELL_MODEL="${model_tag}"
              "$RUN_CELL" "$engine" "$xyz" "$ngpu" "${extra[@]}")
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -99,7 +128,7 @@ submit() {
   fi
 }
 
-for engine in distnnp-uma fairchem-uma "${LAMMPS_ENGINES[@]}"; do
+for engine in distnnp-uma distnnp-uma-opt fairchem-uma "${LAMMPS_ENGINES[@]}"; do
   # strong scaling -- fixed 32k, vary GPUs
   for ngpu in 1 2 4; do submit strong "$engine" 32 "$ngpu"; done
   # fill scaling -- ~32k atoms/GPU

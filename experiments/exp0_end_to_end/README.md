@@ -333,6 +333,17 @@ Regenerate with `analysis/summarize.py` (→ `analysis/headline_table.md`).
 > `--tf32/--activation-checkpointing/--compile/--merge-mole`), applied
 > identically to both engines and recorded in each JSON. Staged re-run plan:
 > **`RESTART.md` §6**.
+>
+> **Kernel triage result** (`scripts/tune_kernels.sbatch` →
+> `analysis/tune_report.py`, 2× B200): `compile` breaks MOLE under dynamo on
+> *both* engines; `merge_mole` deadlocks FairChem's Ray workers (NCCL collective
+> timeout). The highest config both engines survive is **k1 = `--tf32 1
+> --activation-checkpointing 0`** (`general` backend, ≈1.2× over the default
+> preset) — this is now the MATCHED config `submit_matrix.sh` passes to
+> `distnnp-uma` and `fairchem-uma`. A third engine, **`distnnp-uma-opt`**, runs
+> the same DistNNP driver at `--inference-settings turbo` (tf32 + no-ackpt +
+> `merge_mole` + `compile`, `umas_fast_gpu` backend, ≈1.6× over k1 in the
+> triage) as its own curve — not a matched comparison.
 
 ### Throughput (steps/s) — corrected physics, both engines at ~250 K
 
