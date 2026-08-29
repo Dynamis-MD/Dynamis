@@ -84,7 +84,7 @@ class ExplicitOwnedGraph:
     shifts: torch.Tensor
     batch_dict: Dict[str, torch.Tensor]
 
-
+#long term issue to be fixed in radius graph pbc cuda fn?
 def canonicalize_nonperiodic_geometry(
     positions: torch.Tensor,
     cell: torch.Tensor,
@@ -694,6 +694,8 @@ class DistScaleShiftMACERuntimeMixin:
             num_local = int(state.local_molecular_info.num_atoms)
             owned_node_energy = node_energy.reshape(-1)[:num_local]
             owned_local_energy = owned_node_energy.sum()
+
+        #earlier return since forces from MACE are redundant during benchmark
         if benchmark_mode and owned_local_energy is not None and state is not None:
             return {
                 "owned_node_energy": owned_node_energy,
@@ -1058,7 +1060,7 @@ class DistMACETopDownAdapter(DistNNPModel):
                 enforce_max_neighbors_strictly=False,
             )
         # DistNNP shifts the source image; MACE shifts source-to-destination vectors.
-        return edge_index.long(), -cell_offsets
+        return edge_index.long(), -cell_offsets # verify if this line is syntactically correct
 
     def _build_owned_graph(
         self, view: StructuralHaloView, state: DistNNPState

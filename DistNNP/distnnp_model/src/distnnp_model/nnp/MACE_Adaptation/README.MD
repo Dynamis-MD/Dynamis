@@ -1,15 +1,17 @@
-# DistMACE Top-Down Adapter
+# DistMACE Adapters
 
 ------------------------------------------------------------
 
 ## Purpose
 
-This folder now centers on the current MP/MPA distributed MACE adapter:
+This folder now centers on the current distributed MACE adapters:
 
 - `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_top_down_adapter.py`
-- `distnnp_model/tests/test_distmace_top_down_adapter.py`
+- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_thin_adapter.py`
+- `distnnp_model/tests/mace/test_distmace_top_down_adapter.py`
+- `distnnp_model/tests/mace/test_distmace_thin_adapter.py`
 
-The adapter is designed to let DistNNP drive:
+The adapters are designed to let DistNNP drive:
 
 - partition ownership
 - halo communication
@@ -23,9 +25,9 @@ while MACE still provides:
 - interaction and product blocks
 - per-node energy prediction
 
-This README is meant to help collaborators understand where the adapter is
-today, how its internal pieces fit together, and how to run validation and
-benchmark experiments against standalone MACE.
+This README is meant to help collaborators understand where the adapters are
+today, how their internal pieces fit together, and how to run validation,
+benchmark, and trajectory experiments against standalone MACE.
 
 ------------------------------------------------------------
 
@@ -57,9 +59,23 @@ Primary implementation:
 
 - `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_top_down_adapter.py`
 
-Primary distributed test and benchmark driver:
+Primary distributed top-down test and benchmark driver:
 
-- `distnnp_model/tests/test_distmace_top_down_adapter.py`
+- `distnnp_model/tests/mace/test_distmace_top_down_adapter.py`
+
+Primary distributed thin-adapter test and benchmark driver:
+
+- `distnnp_model/tests/mace/test_distmace_thin_adapter.py`
+
+Detached standalone MACE reference generator for the thin-adapter flow:
+
+- `distnnp_model/tests/mace/mace_standalone_reference.py`
+
+Thin-adapter trajectory validation trio:
+
+- `distnnp_model/tests/mace/md_test_common.py`
+- `distnnp_model/tests/mace/run_distributed_trajectory.py`
+- `distnnp_model/tests/mace/test_md.py`
 
 Historical design notes and earlier milestones:
 
@@ -68,7 +84,57 @@ Historical design notes and earlier milestones:
 - `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/FINAL_ADAPTER_README.md`
 
 Those older files are still useful for history, but the current operational
-surface is the top-down adapter and its dedicated test driver.
+surface is the top-down adapter, the thin adapter, and the MACE-specific test
+drivers under `distnnp_model/tests/mace/`.
+
+------------------------------------------------------------
+
+## Thin Adapter
+
+The thin adapter is implemented in:
+
+- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_thin_adapter.py`
+
+Its main validation and benchmark driver is:
+
+- `distnnp_model/tests/mace/test_distmace_thin_adapter.py`
+
+Its detached standalone reference generator is:
+
+- `distnnp_model/tests/mace/mace_standalone_reference.py`
+
+Its MD trajectory validation flow is:
+
+- `distnnp_model/tests/mace/run_distributed_trajectory.py`
+- `distnnp_model/tests/mace/test_md.py`
+
+### Thin-adapter role
+
+`DistMACEThinAdapter` keeps the distributed contract intentionally narrow:
+
+- DistNNP owns partitioning and structural exchange
+- the adapter reconstructs the smallest MACE-compatible owned graph it needs
+- the runtime executes the loaded raw MACE model with minimal adapter-side interpretation
+- force recovery is taken from owned-local energy autograd
+- returned energy is reduced to the global total potential energy on every rank
+
+### Thin-adapter validation story
+
+The thin-adapter test surface is split into three distinct workflows:
+
+1. Detached standalone reference generation:
+   - `mace_standalone_reference.py`
+2. Distributed explicit parity and benchmark validation:
+   - `test_distmace_thin_adapter.py`
+3. End-to-end MD trajectory validation:
+   - `run_distributed_trajectory.py`
+   - `test_md.py`
+
+This split is deliberate. It keeps:
+
+- standalone MACE baselines independent of DistNNP graph construction
+- explicit parity checks independent of long-horizon MD behavior
+- trajectory validation focused on simulator stability rather than static parity alone
 
 ------------------------------------------------------------
 
@@ -351,7 +417,7 @@ yet a thin, performance-first rewrite.
 Relevant code:
 
 - benchmark execution mode inside `DistScaleShiftMACERuntimeMixin.forward(...)`
-- benchmark control in `benchmark_speedup(...)` from `distnnp_model/tests/test_distmace_top_down_adapter.py`
+- benchmark control in `benchmark_speedup(...)` from `distnnp_model/tests/mace/test_distmace_top_down_adapter.py`
 
 ### Improvements already present
 
@@ -435,7 +501,7 @@ system without paying the full monolithic reference cost.
 
 ```bash
 torchrun --nproc_per_node=2 \
-  distnnp_model/tests/test_distmace_top_down_adapter.py \
+  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
   --builtin-system natural_chain12 \
   --model-family mp \
   --model medium-mpa-0 \
@@ -450,7 +516,7 @@ standalone MACE on `medium-mpa-0`.
 
 ```bash
 torchrun --nproc_per_node=2 \
-  distnnp_model/tests/test_distmace_top_down_adapter.py \
+  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
   --builtin-system natural_chain12 \
   --model-family mp \
   --model medium-mpa-0 \
@@ -463,8 +529,8 @@ torchrun --nproc_per_node=2 \
 
 ```bash
 torchrun --nproc_per_node=2 \
-  distnnp_model/tests/test_distmace_top_down_adapter.py \
-  --xyz-path distnnp_model/tests/data/mace/benchmark_scaling_molecular_3750.xyz \
+  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
+  --xyz-path distnnp_model/tests/mace/data/benchmark_scaling_molecular_3750.xyz \
   --model-family mp \
   --model medium-mpa-0 \
   --validation-mode full \
@@ -476,8 +542,8 @@ torchrun --nproc_per_node=2 \
 
 ```bash
 torchrun --nproc_per_node=2 \
-  distnnp_model/tests/test_distmace_top_down_adapter.py \
-  --xyz-path distnnp_model/tests/data/mace/benchmark_scaling_molecular_3750.xyz \
+  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
+  --xyz-path distnnp_model/tests/mace/data/benchmark_scaling_molecular_3750.xyz \
   --model-family mp \
   --model medium-mpa-0 \
   --validation-mode full \
@@ -492,8 +558,8 @@ torchrun --nproc_per_node=2 \
 
 ```bash
 torchrun --nproc_per_node=2 \
-  distnnp_model/tests/test_distmace_top_down_adapter.py \
-  --xyz-path distnnp_model/tests/data/mace/benchmark_scaling_molecular_3750.xyz \
+  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
+  --xyz-path distnnp_model/tests/mace/data/benchmark_scaling_molecular_3750.xyz \
   --model-family mp \
   --model medium-mpa-0 \
   --validation-mode full \
@@ -509,7 +575,7 @@ torchrun --nproc_per_node=2 \
 
 ```bash
 torchrun --nproc_per_node=2 \
-  distnnp_model/tests/test_distmace_top_down_adapter.py \
+  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
   --builtin-system natural_chain12 \
   --model-family mp \
   --model medium-mpa-0 \

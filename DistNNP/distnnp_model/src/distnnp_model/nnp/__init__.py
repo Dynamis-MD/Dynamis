@@ -11,9 +11,13 @@ from distnnp_model.nnp.MACE_Adaptation.distmace_top_down_adapter import (
     load_raw_mace_model,
     validate_partition_info,
 )
+from distnnp_model.nnp.MACE_Adaptation.distmace_thin_adapter import (
+    DistMACEThinAdapter,
+)
 
 __all__ = [
     "COMPUTE_DTYPE",
+    "DistMACEThinAdapter",
     "DistMACETopDownAdapter",
     "canonicalize_nonperiodic_geometry",
     "load_raw_mace_model",
