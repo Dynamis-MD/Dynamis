@@ -79,6 +79,18 @@ bool supports_fabric_handles(int device_id)
     }
 
 #if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
+    // Cache the probe result per device — this is called repeatedly during
+    // setup() and allocate_ipc_buffer().
+    static std::mutex probe_mutex;
+    static std::unordered_map<int, bool> probe_cache;
+    {
+        std::lock_guard<std::mutex> lock(probe_mutex);
+        auto it = probe_cache.find(dev);
+        if (it != probe_cache.end())
+            return it->second;
+    }
+
+    bool ok = false;
     cuInit(0);
     int fabric_supported = 0;
     CUresult res = cuDeviceGetAttribute(&fabric_supported,
@@ -86,10 +98,40 @@ bool supports_fabric_handles(int device_id)
                                         dev);
     if (res == CUDA_SUCCESS && fabric_supported != 0)
     {
-        return true;
+        // CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED only reports hardware
+        // capability. Creating a CU_MEM_HANDLE_TYPE_FABRIC allocation *also*
+        // requires the IMEX (Internode Memory Exchange) service to be provisioned
+        // for the job — without it cuMemCreate returns CUDA_ERROR_NOT_PERMITTED
+        // (800). Probe once with a minimal allocation so callers fall back to
+        // legacy CUDA IPC cleanly instead of hard-failing during setup.
+        CUmemAllocationProp prop = {};
+        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+        prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        prop.location.id = dev;
+        prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+
+        size_t granularity = 0;
+        if (cuMemGetAllocationGranularity(&granularity, &prop,
+                                          CU_MEM_ALLOC_GRANULARITY_MINIMUM) == CUDA_SUCCESS &&
+            granularity > 0)
+        {
+            CUmemGenericAllocationHandle probe_handle;
+            if (cuMemCreate(&probe_handle, granularity, &prop, 0) == CUDA_SUCCESS)
+            {
+                cuMemRelease(probe_handle);
+                ok = true;
+            }
+        }
     }
-#endif
+
+    {
+        std::lock_guard<std::mutex> lock(probe_mutex);
+        probe_cache[dev] = ok;
+    }
+    return ok;
+#else
     return false;
+#endif
 }
 
 bool IPCExchanger::supports_fabric_handles(int device_id)
