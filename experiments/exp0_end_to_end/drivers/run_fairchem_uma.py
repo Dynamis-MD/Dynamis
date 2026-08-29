@@ -18,8 +18,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import ase
-import ase.io
 import ase.md.langevin
 import ase.md.velocitydistribution
 import numpy as np
@@ -32,6 +30,7 @@ from bench_common import (
     TimedLoop,
     capture_oom,
     deadline,
+    load_system,
     parse_bench_args,
     peak_mem_mb,
     reset_peak_mem,
@@ -111,12 +110,22 @@ def main() -> None:
     world_size = max(1, args.workers)
     gpus_per_node = torch.cuda.device_count() or 1
 
-    atoms = ase.io.read(args.input)
-    atoms.set_pbc(True)
+    # Same parser + cell resolution as the DistNNP driver (distnnp_state's
+    # TrajectoryWriter), rebuilt as an ase.Atoms so both engines see an
+    # identical box (orthorhombic / triclinic / non-periodic padded).
+    spec = load_system(
+        args.input,
+        pbc_mode=args.pbc,
+        cutoff_angstrom=args.cutoff_angstrom,
+        ghost_buffer_angstrom=args.ghost_buffer_angstrom,
+        nonperiodic_pad=args.nonperiodic_pad,
+    )
+    atoms = spec.to_ase()
     atoms.info["charge"] = 0
     atoms.info["spin"] = 1
-    num_atoms = len(atoms)
-    box = float(atoms.cell.lengths()[0])
+    num_atoms = spec.num_atoms
+    box = spec.box_angstrom
+    print(f"cell={spec.cell} pbc={spec.pbc} periodic={spec.periodic}")
 
     ase.md.velocitydistribution.MaxwellBoltzmannDistribution(
         atoms, temperature_K=args.temperature_k

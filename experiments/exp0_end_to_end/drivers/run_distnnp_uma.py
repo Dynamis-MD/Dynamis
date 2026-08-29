@@ -17,7 +17,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import ase.io
 import torch
 import torch.distributed as dist
 
@@ -28,6 +27,7 @@ from bench_common import (
     capture_oom,
     deadline,
     kT_native,
+    load_system,
     parse_bench_args,
     peak_mem_mb,
     reset_peak_mem,
@@ -41,6 +41,25 @@ def _global_num_atoms(sim) -> int:
         return int(gmi.atom_positions.shape[0])
     except Exception:
         return 0
+
+
+def _inject_cell(sim, cell, pbc) -> None:
+    """Override the cubic cell the stock Simulator builds from
+    `side_length_angstrom` with the resolved (possibly orthorhombic / triclinic
+    / non-periodic) box -- an instance-level patch, so the installed `distnnp`
+    package is untouched. `_get_simulation_config()` is what feeds the
+    partitioner + the CUDA radius graph (`SimState` -> `build_halo_maps`)."""
+    cell_t = torch.as_tensor(cell, dtype=torch.float32)
+    pbc_t = torch.as_tensor(pbc, dtype=torch.bool)
+    _orig = sim._get_simulation_config
+
+    def _patched():
+        sc = _orig()
+        sc.cell = cell_t
+        sc.pbc = pbc_t
+        return sc
+
+    sim._get_simulation_config = _patched
 
 
 def _kinetic_temperature(sim) -> float:
@@ -105,11 +124,22 @@ def main() -> None:
     # ranks otherwise trip over each other.
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # DistNNP's Simulator ignores the xyz `Lattice=` header and builds its cell
-    # from side_length_angstrom, so read the box explicitly.
-    _atoms0 = ase.io.read(args.input)
-    box = float(_atoms0.cell.lengths()[0])
-    file_num_atoms = len(_atoms0)
+    # Resolve the simulation cell via the SAME C++ reader Simulator.setup() uses
+    # (distnnp_state.TrajectoryWriter): the file's `Lattice=` may be orthorhombic,
+    # triclinic, or absent (-> a non-periodic padded box, coordinates shifted in
+    # `spec.info` in memory). No temp file, no barrier -- `spec.info` goes
+    # straight to setup().
+    spec = load_system(
+        args.input,
+        pbc_mode=args.pbc,
+        cutoff_angstrom=args.cutoff_angstrom,
+        ghost_buffer_angstrom=args.ghost_buffer_angstrom,
+        nonperiodic_pad=args.nonperiodic_pad,
+    )
+    box = spec.box_angstrom
+    file_num_atoms = spec.num_atoms
+    if rank == 0:
+        print(f"[rank 0] cell={spec.cell} pbc={spec.pbc} periodic={spec.periodic}")
 
     torch.manual_seed(1234)
     model = UMAModel(args.model, dataset=args.task, device=device.type)
@@ -124,7 +154,7 @@ def main() -> None:
         side_length_angstrom=box,
         cutoff_angstrom=args.cutoff_angstrom,
         ghost_buffer_angstrom=args.ghost_buffer_angstrom,
-        partition_algorithm="sfc_morton",
+        partition_algorithm=args.partition_algorithm,
         edge_weighted_partition=True,
         rebalance_interval=args.rebalance_interval,
         traj_interval=0,
@@ -141,7 +171,8 @@ def main() -> None:
     def _probe():
         with deadline(args.build_timeout_s, "distnnp build + setup + feasibility step"):
             sim = Simulator(model, integ, dist_env, cfg, device)
-            sim.setup(args.input)
+            _inject_cell(sim, spec.cell, spec.pbc)
+            sim.setup(spec.info)
             sim_holder["sim"] = sim
             if sim.should_rebalance(0):
                 sim.sync_and_repartition()
