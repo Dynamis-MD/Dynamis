@@ -41,7 +41,7 @@ def main():
     dist.barrier()  # other ranks must not read the file until rank 0 has written it
 
     torch.manual_seed(1234)
-    model = UMAModel("uma-s-1p2", dataset="omol", device=torch_dist_env.device.type)
+    model = UMAModel("uma-s-1p2", dataset="omol", device=torch_dist_env.device)
     integrator = Verlet(dt=0.5)
     config = make_config(output_dir)
 
