@@ -2,7 +2,7 @@
 #include "distnnp_integrator/macros.hpp"
 #include "distnnp_state/timing.hpp"
 #include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAStream.h>
 
 
 namespace
