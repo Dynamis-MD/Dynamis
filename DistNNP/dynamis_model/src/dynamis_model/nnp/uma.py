@@ -657,7 +657,7 @@ class UMAModel(DynamisModel):
         inference_settings: InferenceSettings | str = "default", #"turbo",
         overrides: dict | None = None,
         device: str | torch.device | None = None,
-        exchanger: Exchanger | None = None,
+        exchanger: Exchanger | type[Exchanger] | None = None,
     ):
         if isinstance(device, torch.device):
             self.device = device.type # make sure this is a str because fairchem needs str (with no ordinal)
@@ -677,15 +677,28 @@ class UMAModel(DynamisModel):
         self.main_model.output_heads["energyandforcehead"].head = MaskedHeadWrapper(self.main_model.output_heads["energyandforcehead"].head)
 
         self.num_layers = self.main_model.backbone.num_layers
-        self.position_exchanger = (
-            GPUDirectExchanger() if exchanger is None else exchanger
-        )
-        self.atom_type_exchanger = (
-            GPUDirectExchanger() if exchanger is None else exchanger
-        )
-        self.feature_exchangers = [(
-            GPUDirectExchanger() if exchanger is None else exchanger
-        ) for i in range(self.num_layers + 1)]
+
+        # `exchanger` may be:
+        #   None                 -> a fresh GPUDirectExchanger per slot (default)
+        #   an Exchanger subclass -> a fresh instance of it per slot
+        #                            (use this for PythonNCCLExchanger on
+        #                             multi-node runs, where CUDA-IPC has no
+        #                             cross-node peer)
+        #   an Exchanger instance -> that one instance, shared across slots
+        #                            (back-compat; only safe for stateless-setup
+        #                             exchangers)
+        if exchanger is None:
+            make_exchanger = GPUDirectExchanger
+        elif isinstance(exchanger, type):
+            make_exchanger = exchanger
+        else:
+            make_exchanger = lambda: exchanger  # noqa: E731  (shared instance)
+
+        self.position_exchanger = make_exchanger()
+        self.atom_type_exchanger = make_exchanger()
+        self.feature_exchangers = [
+            make_exchanger() for _ in range(self.num_layers + 1)
+        ]
 
     def initialize_buffers(
         self,

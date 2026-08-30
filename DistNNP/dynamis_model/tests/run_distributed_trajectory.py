@@ -27,7 +27,19 @@ from md_test_common import (
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", required=True)
+    parser.add_argument(
+        "--exchanger",
+        choices=["gpudirect", "nccl"],
+        default="gpudirect",
+        help="halo-exchange backend: gpudirect (CUDA IPC, single-node) or "
+        "nccl (torch.distributed all_to_all, multi-node capable)",
+    )
     args = parser.parse_args()
+
+    exchanger_cls = {
+        "gpudirect": GPUDirectExchanger,
+        "nccl": PythonNCCLExchanger,
+    }[args.exchanger]
 
     structure = f"{args.path}/system.xyz"
     output_dir = f"{args.path}/dist_out"
@@ -41,7 +53,12 @@ def main():
     dist.barrier()  # other ranks must not read the file until rank 0 has written it
 
     torch.manual_seed(1234)
-    model = UMAModel("uma-s-1p2", dataset="omol", device=torch_dist_env.device)
+    model = UMAModel(
+        "uma-s-1p2",
+        dataset="omol",
+        device=torch_dist_env.device.type,
+        exchanger=exchanger_cls,
+    )
     integrator = Verlet(dt=0.5)
     config = make_config(output_dir)
 
