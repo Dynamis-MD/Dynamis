@@ -48,7 +48,13 @@ exp0_load_modules() {
     if [ -n "${EXP0_MODULES:-}" ]; then
         echo "[_lib] module load ${EXP0_MODULES}"
         # shellcheck disable=SC2086
-        module load ${EXP0_MODULES}
+        if ! module load ${EXP0_MODULES} 2>&1; then
+            echo "[_lib] WARNING: that 'module load' failed. EXP0_MODULES holds the DELTA"
+            echo "[_lib]   module names -- on another cluster, set EXP0_MODULES in"
+            echo "[_lib]   scripts/cluster.local.env to your cluster's python / CUDA /"
+            echo "[_lib]   compiler modules, or to \"\" if the toolchain is already on PATH."
+            echo "[_lib]   Continuing anyway -- steps that truly need a module will say so."
+        fi
     fi
     module list 2>&1 || true
 }
