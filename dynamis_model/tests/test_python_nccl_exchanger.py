@@ -9,6 +9,8 @@ Tests:
 5. RuntimeError when backward is invoked before forward.
 """
 
+import socket
+
 import pytest
 import torch
 import torch.multiprocessing as mp
@@ -354,16 +356,36 @@ def test_python_nccl_exchanger_backward_without_forward_2gpu():
 
 
 def test_python_nccl_exchanger_single_rank():
-    """PythonNCCLExchanger acts as identity when world_size == 1 or single rank."""
-    exchanger = PythonNCCLExchanger()
-    n_local = 10
-    F = 16
-    features = torch.randn(n_local, F)
-    info = PartitionMessagePassingInfo()
+    """PythonNCCLExchanger acts as identity when world_size == 1.
 
-    out = exchanger.feature_push_forward(features, info)
-    assert torch.equal(out, features)
+    Exchanger._is_single_rank() only takes the identity fast path when a
+    process group is actually initialized, so a genuine world_size=1 group is
+    required here (matching the rest of the exchanger test-suite).
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        port = s.getsockname()[1]
 
-    grad_out = torch.randn(n_local, F)
-    grad_in = exchanger.feature_push_backward(grad_out, torch.Size([n_local, F]), info)
-    assert torch.equal(grad_in, grad_out)
+    dist.init_process_group(
+        "gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=0,
+        world_size=1,
+    )
+    try:
+        exchanger = PythonNCCLExchanger()
+        n_local = 10
+        F = 16
+        features = torch.randn(n_local, F)
+        info = PartitionMessagePassingInfo()
+
+        out = exchanger.feature_push_forward(features, info)
+        assert torch.equal(out, features)
+
+        grad_out = torch.randn(n_local, F)
+        grad_in = exchanger.feature_push_backward(
+            grad_out, torch.Size([n_local, F]), info
+        )
+        assert torch.equal(grad_in, grad_out)
+    finally:
+        dist.destroy_process_group()

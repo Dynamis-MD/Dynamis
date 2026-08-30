@@ -17,6 +17,7 @@ from dynamis import Simulator
 from dynamis_state import TorchDistEnv
 from dynamis_integrator import Verlet
 from dynamis_model.nnp import UMAModel
+from dynamis_model.comm.exchanger import GPUDirectExchanger, PythonNCCLExchanger
 
 from md_test_common import (
     ensure_test_structure,
