@@ -114,7 +114,13 @@ def main() -> None:
     from distnnp import Simulator, SimulatorConfig
     from distnnp_integrator import Langevin
     from distnnp_model.nnp import UMAModel
+    from distnnp_model.comm.exchanger import GPUDirectExchanger, PythonNCCLExchanger
     from distnnp_state import TorchDistEnv
+
+    exchanger_cls = {
+        "gpudirect": GPUDirectExchanger,
+        "nccl": PythonNCCLExchanger,
+    }[args.exchanger]
 
     torch_dist_env = TorchDistEnv(is_distributed=True)
     dist_env = torch_dist_env.dist_env
@@ -159,7 +165,10 @@ def main() -> None:
         dataset=args.task,
         device=device.type,
         inference_settings=settings,
+        exchanger=exchanger_cls,
     )
+    if rank == 0:
+        print(f"halo exchanger: {args.exchanger} ({exchanger_cls.__name__})")
     integ = Langevin(
         dt=args.timestep_fs,
         gamma=args.friction_inv_fs,
@@ -273,6 +282,7 @@ def main() -> None:
             status=status,
             input_file=os.path.abspath(args.input),
             tag=args.tag,
+            exchanger=args.exchanger,
             inference_settings=settings_rec,
             elapsed_s=loop.elapsed_s if loop else None,
             steps_per_sec=loop.steps_per_sec if loop else None,

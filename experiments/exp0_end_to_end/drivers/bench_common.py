@@ -88,6 +88,15 @@ def parse_bench_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="DistNNP spatial partitioner. Use 'kdtree' for anisotropic / "
         "real systems (Workstream A); 'sfc_morton' for the isotropic matrix.",
     )
+    p.add_argument(
+        "--exchanger",
+        default="gpudirect",
+        choices=["gpudirect", "nccl"],
+        help="DistNNP halo-exchange backend. 'gpudirect' (CUDA-IPC, default) "
+        "peers GPUs on ONE node only -- any >1-node run hangs in the NCCL "
+        "watchdog. 'nccl' (torch.distributed all_to_all) is multi-node "
+        "capable; use it for the >1-node hero runs.",
+    )
 
     # Real-system cells (Workstream A). The synthetic CH4:O2 boxes are cubic +
     # fully periodic; real inputs may be orthorhombic, triclinic, or have no
@@ -619,6 +628,9 @@ class BenchRecord:
     status: str
     input_file: str = ""
     tag: Optional[str] = None
+    # DistNNP halo-exchange backend: "gpudirect" (CUDA-IPC, 1 node) or "nccl"
+    # (torch.distributed all_to_all, multi-node). None for non-DistNNP engines.
+    exchanger: Optional[str] = None
     # resolved UMA InferenceSettings (see build_inference_settings); None for
     # engines that do not go through fairchem, e.g. lammps-mace.
     inference_settings: Optional[dict] = None
