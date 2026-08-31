@@ -18,6 +18,7 @@ from distnnp_state import DistNNPState, radius_graph_pbc_cuda
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 from distnnp_model.comm.exchanger import GPUDirectExchanger
 
+_EV_PER_A_TO_AMU_A_PER_FS2 = 0.0096485332
 # missing conservative architechure params
 
 # when has_electrostatic is true the energy head is replace with a ChargeConditionedEnergyHead + LatentChargeHEad + CoulombModule(conservative regressor) (long range electrostatics)
@@ -290,7 +291,7 @@ class ORBModel(DistNNPModel, nn.Module):
         # Free here — all matmuls are done — and autograd casts back at the fp32 leaf.
         local_energy = (
             interaction_contribution.double() + zbl_local.double() + reference_local.double()
-        )
+        ) * _EV_PER_A_TO_AMU_A_PER_FS2 # ev -> amu * A^2 / fs^2
 
         if os.environ.get("ORB_DEBUG") == "1" and world_size > 1:
             # Unfiltered gns.forward over all n_atoms this rank sees. Valid only
