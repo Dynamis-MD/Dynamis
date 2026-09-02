@@ -45,6 +45,90 @@ def _global_num_atoms(sim) -> int:
         return 0
 
 
+class _ScalableHaloPartitioner:
+    """Wraps a C++ partitioner and replaces its ``build_halo_maps`` with a
+    per-rank build.
+
+    Stock ``AbstractPartitioner::build_halo_maps`` runs ``radius_graph_pbc``
+    over **all N atoms on every rank** (see distnnp_state/src/csrc/
+    build_halo_maps.cpp) -> peak memory scales with the *total* system size,
+    not with the per-GPU partition, and a 1.5M-atom system needs ~8 GB per
+    rank for the halo build alone regardless of node count.
+
+    This wrapper instead builds edges only into this rank's atoms
+    (``radius_graph_pbc_ex(target_indices=my_atoms)``) and derives the
+    send/recv/interior plan locally via graph symmetry
+    (``extract_halo_info``) -- both already compiled in
+    ``distnnp_state_impl``. Output is byte-identical to the C++ path
+    (send_offsets / recv_offsets / interior_mask verified equal on 1aki /
+    dhfr / 9gmo at W=8 and W=64) but peak memory scales with N/W.
+
+    Opt in with ``EXP0_SCALABLE_HALO=1``.
+    """
+
+    _HALO_MAX_NUM_NEIGHBORS = 1000  # matches build_halo_maps.cpp
+
+    def __init__(self, inner, rank: int, world_size: int):
+        self._inner = inner
+        self._rank = int(rank)
+        self._world_size = int(world_size)
+
+    def partition(self, molecular_system, dist_env):
+        return self._inner.partition(molecular_system, dist_env)
+
+    def build_halo_maps(self, info, global_state, dist_env, config) -> None:
+        import distnnp_state.distnnp_state_impl as _impl
+
+        pos = global_state.atom_positions
+        dev = pos.device
+        n_atoms = int(global_state.num_atoms)
+        r = float(config.cutoff) + float(config.ghost_cutoff_buffer)
+        cell = config.cell.to(dev).to(torch.float32)
+        pbc = config.pbc.to(dev)
+
+        pid = info.partition_id.to(device=dev, dtype=torch.long).contiguous()  # [N]
+        my_outer = torch.nonzero(pid.eq(self._rank), as_tuple=False).squeeze(-1).contiguous()
+        num_local = int(my_outer.numel())
+
+        edges, _cell_shifts, _nbi, _nc = _impl.radius_graph_pbc_ex(
+            pos.to(torch.float32), cell, pbc, r,
+            self._HALO_MAX_NUM_NEIGHBORS, False, my_outer,
+        )
+        send_off, send_local_idx, recv_off, recv_ghost_idx, interior_mask, _recv_global = \
+            _impl.extract_halo_info(
+                edges, pid, my_outer, self._rank, self._world_size, n_atoms,
+            )
+
+        info.send_offsets = send_off
+        info.send_local_indices = send_local_idx
+        info.recv_offsets = recv_off
+        info.recv_ghost_indices = recv_ghost_idx
+        info.interior_mask = interior_mask
+        info.edge_index_halo = edges
+
+        m = info.global_send_recv_matrix
+        counts = (send_off[1:] - send_off[:-1]).to(m.dtype)
+        m[self._rank].copy_(counts)
+        m[self._rank, self._rank] = num_local
+        info.global_send_recv_matrix = m
+
+
+def _maybe_wrap_scalable_halo(sim, rank: int, world_size: int) -> None:
+    """If ``EXP0_SCALABLE_HALO=1``, make ``Simulator`` hand ``SimState`` a
+    partitioner whose ``build_halo_maps`` scales with N/W instead of N.
+    Instance-level patch; the installed ``distnnp`` package is untouched."""
+    if os.environ.get("EXP0_SCALABLE_HALO", "0") != "1":
+        return
+    _orig = sim._get_partitioner
+
+    def _patched():
+        return _ScalableHaloPartitioner(_orig(), rank, world_size)
+
+    sim._get_partitioner = _patched
+    if rank == 0:
+        print("halo maps: SCALABLE per-rank build (EXP0_SCALABLE_HALO=1)")
+
+
 def _inject_cell(sim, cell, pbc) -> None:
     """Override the cubic cell the stock Simulator builds from
     `side_length_angstrom` with the resolved (possibly orthorhombic / triclinic
@@ -198,6 +282,7 @@ def main() -> None:
         with deadline(args.build_timeout_s, "distnnp build + setup + feasibility step"):
             sim = Simulator(model, integ, dist_env, cfg, device)
             _inject_cell(sim, spec.cell, spec.pbc)
+            _maybe_wrap_scalable_halo(sim, rank, world_size)
             sim.setup(spec.info)
             sim_holder["sim"] = sim
             if sim.should_rebalance(0):
