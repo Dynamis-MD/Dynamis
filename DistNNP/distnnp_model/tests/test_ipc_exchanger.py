@@ -176,8 +176,13 @@ requires_multi_gpu = pytest.mark.skipif(
 @requires_multi_gpu
 class TestIPCExchanger:
 
+    def test_supports_fabric_handles(self):
+        """Check fabric handles query runs without error and returns bool."""
+        supported = IPCExchanger.supports_fabric_handles(0)
+        assert isinstance(supported, bool)
+
     def test_export_handle_size(self):
-        """cudaIpcMemHandle_t should be 64 bytes."""
+        """Handle (CUDA IPC or Fabric) should be 64 bytes."""
         buf = IPCExchanger.allocate_ipc_buffer(10, 4, 0)
         exchanger = IPCExchanger()
         handle = exchanger.export_ipc_handle(buf)
