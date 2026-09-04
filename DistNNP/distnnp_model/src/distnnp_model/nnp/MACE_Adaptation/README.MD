@@ -1,645 +1,188 @@
-# DistMACE Thin Adapter
-
-------------------------------------------------------------
+# DistMACE Thin Adapter: Design and Support Model
 
 ## Purpose
 
-This folder's supported distributed MACE path is the thin adapter:
+`DistMACEThinAdapter` is the supported bridge between DistNNP's distributed
+atom ownership model and MACE's `ScaleShiftMACE` inference path. Its purpose is
+not to reimplement partitioning or to modify a loaded MACE model. Instead, it
+keeps the boundary narrow:
 
-- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_thin_adapter.py`
-- `distnnp_model/tests/mace/test_distmace_thin_adapter.py`
+- DistNNP owns partitioning, halo membership, peer order, and repartitioning.
+- The adapter converts the current owned-plus-halo state into the minimum MACE
+  graph required to evaluate rank-owned atoms.
+- MACE owns its learned representation, interaction/product blocks, readouts,
+  and scale/shift semantics.
+- The adapter returns rank-owned potential energy and forces derived from that
+  same owned energy.
 
-The adapters are designed to let DistNNP drive:
+The implementation is deliberately explicit rather than subclass-based. It
+does not mutate `model.__class__`, install diagnostics in the forward path, or
+expose execution-mode switches in production inference.
 
-- partition ownership
-- halo communication
-- rank-local structural reconstruction
-- owned-energy semantics
+## Adapter contract
 
-while MACE still provides:
+The adapter accepts a raw, public MACE foundation model loaded by
+`load_raw_mace_model(...)`. It requires the `ScaleShiftMACE`-compatible surface:
+`r_max`, `atomic_numbers`, node/edge embeddings, matched `interactions` and
+`products`, `readouts`, `atomic_energies_fn`, and `scale_shift`.
 
-- node embedding
-- edge featurization
-- interaction and product blocks
-- per-node energy prediction
+The adapter supports either one final readout or one readout per interaction
+layer. It resolves a requested MACE head at construction time; ambiguous
+multi-head models must name a head explicitly. `atomic_number_map` is an
+optional input-side remapping mechanism, not a conversion of model chemistry.
+Every exchanged species must map to exactly one atomic number supported by the
+loaded checkpoint.
 
-`DistMACETopDownAdapter` remains in this directory as a diagnostic fallback for
-investigating failures. It dynamically changes the loaded model runtime class
-and is not the primary validation or benchmark path.
+The public return contract is:
 
-------------------------------------------------------------
+```text
+owned_energy, owned_forces = adapter(state)
+```
 
-## Current Scope
+`owned_energy` is local to a rank. Callers that need a system energy must sum
+it once across ranks. `owned_forces` corresponds only to rank-owned atoms in
+the current local ordering. Static parity preserves MACE units (eV and
+eV/Angstrom); the trajectory harness presently performs its own force-unit
+conversion for the DistNNP Verlet integrator.
 
-The current implementation is intentionally scoped to MP/MPA-style foundation
-models loaded through:
+## Design phases
 
-- `load_raw_mace_model(...)` in `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_thin_adapter.py`
+### 1. Buffer initialization and partition validation
 
-and validated against the `ScaleShiftMACE`-compatible contract enforced in:
+`initialize_buffers(...)` is required after initial partitioning and after
+every repartition. It validates DistNNP's peer-grouped CSR send/receive
+metadata, including offset monotonicity, send-index bounds, and contiguous
+ghost-slot layout. It then recreates position, atom-type, and feature
+exchangers and invalidates static caches.
 
-- `DistMACEThinAdapter._validate_model_contract(...)` in `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_thin_adapter.py`
+This is a deliberate correctness boundary: a state carrying a new partition
+cannot be evaluated with exchangers or cached attributes built for an older
+partition. The adapter records the partition-object identity and rejects stale
+use rather than attempting to infer a safe update.
 
-In practice, this means the adapter is aimed at checkpoints such as:
+### 2. Static species and head preparation
 
-- `medium-mpa-0`
-- `medium-0b3`
-- `large`
+On the first forward for a partition, `_build_static_partition_cache(...)`
+exchanges atom types once, applies optional atomic-number remapping, and builds
+MACE node attributes, batch metadata, pointer metadata, head index, expected
+row count, and owned-row count. These values depend on partition membership and
+species, not positions, so caching keeps them out of the steady-state path.
 
-It is not yet a fully generic MACE-family adapter across every model family or
-specialized conditioning path.
+The cache is invalidated by `initialize_buffers(...)`. A workflow that changes
+species without rebuilding partition buffers is outside the current contract.
 
-------------------------------------------------------------
+### 3. Structural view and graph construction
 
-## File Map
+Each call clones owned positions into a floating-point autograd leaf and
+exchanges positions to construct `[owned | halo]` rows. DistNNP's periodic
+radius-graph implementation produces edge indices and cell offsets. The adapter
+retains only edges whose destination is owned; halo atoms remain valid source
+nodes but never receive rank-owned output responsibility.
 
-Primary implementation:
+This owned-destination filtering is the central ownership decision. It prevents
+duplicate node-energy accumulation across ranks while preserving all geometric
+senders required by local MACE messages. The MACE batch dictionary keeps the
+complete structural view but supplies this filtered edge list.
 
-- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_thin_adapter.py`
+For nonperiodic fixtures, `canonicalize_nonperiodic_geometry(...)` can place
+coordinates in a padded orthorhombic cell before halo construction. It is a
+test/input preparation utility, not a second graph or neighbor-list policy.
 
-Primary distributed thin-adapter test and benchmark driver:
+### 4. Explicit distributed MACE forward
 
-- `distnnp_model/tests/mace/test_distmace_thin_adapter.py`
+`ThinDistScaleShiftMACERuntime.forward(...)` mirrors the relevant
+`ScaleShiftMACE` stages:
 
-Diagnostic fallback implementation and driver:
+1. Prepare graph vectors, lengths, heads, and atom ranges with MACE's
+   `prepare_graph` helper.
+2. Compute baseline atomic energies, node embedding, spherical harmonics,
+   radial features, and optional pair repulsion.
+3. Run each interaction/product pair.
+4. Exchange the owned feature rows after every non-final product block, then
+   reconstruct the halo feature rows through DistNNP communication.
+5. Apply the configured readout(s), scale/shift the learned contribution, add
+   baseline energy, and sum only owned node energies.
 
-- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_top_down_adapter.py`
-- `distnnp_model/tests/mace/test_distmace_top_down_adapter.py`
+The exchange boundary is after `product(...)` because later interaction layers
+need remote many-body features, while the first interaction can be evaluated
+from exchanged structure alone. The runtime lazily sizes its feature exchanger
+from the first node-feature tensor and asserts that later layers keep the same
+width.
 
-Detached standalone MACE reference generator for the thin-adapter flow:
+### 5. Force recovery and lifecycle cleanup
 
-- `distnnp_model/tests/mace/mace_standalone_reference.py`
+The adapter differentiates only `owned_local_energy` with respect to the owned
+position leaf and returns its negative gradient. This preserves force ownership
+and avoids MACE's broader force/stress/virial output path. Runtime state is
+installed immediately before forward and always cleared in `finally`, including
+when MACE raises.
 
-Thin-adapter trajectory validation trio:
+## Design choices and consequences
 
-- `distnnp_model/tests/mace/md_test_common.py`
-- `distnnp_model/tests/mace/run_distributed_trajectory.py`
-- `distnnp_model/tests/mace/test_md.py`
+| Choice | Rationale | Consequence |
+| --- | --- | --- |
+| Composition over dynamic subclassing | Preserve loaded-model identity and a small inspectable hot path. | New MACE forward-schema changes must be reflected explicitly in the runtime. |
+| Owned-destination graph edges | Each rank computes only the energy it owns. | Global energy requires caller-side reduction. |
+| Position exchange with autograd connectivity | Halo-dependent energy contributes correctly to owned-position forces. | The exchanged structural view is rebuilt every call. |
+| Feature exchange after non-final products | Later MACE layers see remote updated many-body features. | The current implementation assumes a stable 2-D feature width. |
+| Cached species-side tensors | Avoid repeat type exchange and one-hot construction. | `initialize_buffers(...)` is mandatory after repartition. |
+| No diagnostics in the hot path | Keep production behavior and benchmarks focused. | Deep stage inspection belongs to the experimental top-down fallback. |
 
-Historical design notes and earlier milestones:
+## Family support
 
-- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/TOP_DOWN_SINGLE_FILE_ADAPTER_DESIGN.md`
-- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/DISTMACE PERFORMANCE REDESIGN.txt`
-- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/FINAL_SUBCLASS_ADAPTER_README.md`
+The loader recognizes public `mp`, `off`, `omol`, and `polar` foundation-model
+families. Recognition is not equivalent to thin-adapter support: the adapter
+only supports a family/checkpoint once its raw model satisfies the contract
+above and passes static parity plus distributed trajectory validation.
 
-Those files describe historical or diagnostic work. The supported operational
-surface is the thin adapter and the SLURM workflows documented in
+Current supported target: MP/MPA `ScaleShiftMACE` checkpoints, including the
+standard `medium-mpa-0` trajectory baseline. The thin runtime is intentionally
+not yet a generic abstraction over arbitrary MACE architectures, specialized
+conditioning paths, stress/virial output, or changing per-layer feature widths.
+
+`off` and `polar` remain loadable candidates, not documented support claims,
+until they have the same contract and validation evidence. This distinction
+prevents a successful public-calculator load from being mistaken for distributed
+semantic support.
+
+## Immediate OMOL support plan
+
+OMOL is the next family to qualify because the loader already exposes
+`mace_omol`. Qualification should proceed without adding family-specific
+branches to the thin hot path unless the raw model contract proves different.
+
+1. **Characterize a raw OMOL checkpoint.** Load the intended checkpoint with
+   `return_raw_model=True`; record its Python class, `heads`, supported atomic
+   numbers, cutoff, interaction/product/readout counts, feature shapes, and
+   available pair-repulsion behavior. Compare these with the current
+   `ScaleShiftMACE` contract.
+2. **Establish molecular fixtures.** Select an OMOL-supported molecular fixture
+   containing only checkpoint-supported elements, plus a nonperiodic halo case.
+   Canonicalize nonperiodic geometry before partitioning and retain the exact
+   fixture and head in reference-artifact metadata.
+3. **Prove static semantics first.** Generate detached calculator and raw-core
+   references, then require two-rank strict energy/force parity, global vertex
+   ownership assembly, and buffer-reinitialization parity.
+4. **Run trajectory qualification.** Use the existing trajectory architecture
+   only after the monolithic OMOL calculator can serve as the singleton oracle.
+   Confirm force-unit handling, head selection, metadata equality, early-frame
+   agreement, RMSD schedule, drift, and RDF behavior.
+5. **Promote only after parity.** If OMOL passes unchanged, list its exact
+   checkpoint/head/fixture as supported. If its raw forward schema differs,
+   introduce a small named runtime-contract adapter outside the steady-state
+   communication logic; do not add scattered `model_family == "omol"` branches.
+
+The immediate acceptance criterion is therefore not merely successful loading:
+it is unchanged ownership semantics and independent calculator/core-model
+parity for a documented OMOL checkpoint.
+
+## Experimental top-down fallback
+
+`DistMACETopDownAdapter` is retained for diagnostic investigation only. It
+modifies the raw model's runtime class and carries richer observation and mode
+machinery. It must not share a raw model instance with the thin adapter in one
+process. It is not the supported production path, benchmark interface, or
+default source of correctness claims.
+
+For commands, SLURM variables, artifact locations, and test orchestration, see
 `distnnp_model/tests/mace/README.md`.
-
-------------------------------------------------------------
-
-## Thin Adapter
-
-The thin adapter is implemented in:
-
-- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_thin_adapter.py`
-
-Its main validation and benchmark driver is:
-
-- `distnnp_model/tests/mace/test_distmace_thin_adapter.py`
-
-Its detached standalone reference generator is:
-
-- `distnnp_model/tests/mace/mace_standalone_reference.py`
-
-Its MD trajectory validation flow is:
-
-- `distnnp_model/tests/mace/run_distributed_trajectory.py`
-- `distnnp_model/tests/mace/test_md.py`
-
-### Thin-adapter role
-
-`DistMACEThinAdapter` keeps the distributed contract intentionally narrow:
-
-- DistNNP owns partitioning and structural exchange
-- the adapter reconstructs the smallest MACE-compatible owned graph it needs
-- the runtime executes the loaded raw MACE model with minimal adapter-side interpretation
-- force recovery is taken from owned-local energy autograd
-- returned energy is the rank-owned local potential energy
-
-The trajectory producer sums rank-owned energies into each saved global frame.
-The test-local wrapper converts MACE forces from eV/Angstrom to the current
-Verlet input unit, amu*Angstrom/fs^2. That conversion is not part of the thin
-adapter API and will move only with a future model/integrator contract change.
-
-### Thin-adapter validation story
-
-The thin-adapter test surface is split into three distinct workflows:
-
-1. Detached standalone reference generation:
-   - `mace_standalone_reference.py`
-2. Distributed explicit parity and benchmark validation:
-   - `test_distmace_thin_adapter.py`
-3. End-to-end MD trajectory validation:
-   - `run_distributed_trajectory.py`
-   - `test_md.py`
-
-This split is deliberate. It keeps:
-
-- standalone MACE baselines independent of DistNNP graph construction
-- explicit parity checks independent of long-horizon MD behavior
-- trajectory validation focused on simulator stability rather than static parity alone
-
-------------------------------------------------------------
-
-## Diagnostic fallback details: top-down adapter
-
-The remaining sections describe the retained top-down implementation and its
-diagnostic controls. They are useful for investigating a thin-path failure, not
-for routine validation or benchmark execution.
-
-### Utilities And Top-Level Helpers
-
-The top of the adapter file contains the utilities that the rest of the
-implementation builds on.
-
-### Model loading
-
-- `load_raw_mace_model(...)`
-
-This loads a raw public MACE foundation model without the ASE calculator
-wrapper. It currently supports the `mp`, `off`, `omol`, and `polar` loader
-names, although the adapter contract itself is only validated for the MP/MPA
-style path.
-
-### Structural view containers
-
-- `StructuralHaloView`
-- `ExplicitOwnedGraph`
-
-These are the two main adapter-side dataclasses:
-
-- `StructuralHaloView` stores the local positions, exchanged positions,
-  exchanged atomic numbers, and local/halo/global indexing information.
-- `ExplicitOwnedGraph` stores the rank-local MACE graph tensors that are
-  ultimately passed into the model forward.
-
-### Geometry and partition helpers
-
-- `canonicalize_nonperiodic_geometry(...)`
-- `validate_partition_info(...)`
-
-`canonicalize_nonperiodic_geometry(...)` translates nonperiodic coordinates
-into a padded orthorhombic box so DistNNP’s current radius-graph behavior does
-not wrap atoms unexpectedly.
-
-`validate_partition_info(...)` checks the send/recv CSR metadata used by both
-structural exchange and learned-feature exchange. This is one of the most
-important early correctness gates in the file.
-
-### Head and contract helpers
-
-- `resolve_model_head_name(...)`
-- `resolve_model_head_index(...)`
-- `summarize_model_contract(...)`
-
-These helpers are shared by both the adapter and the test file so that:
-
-- head selection stays consistent across distributed and monolithic paths
-- model structure is summarized the same way in test output and diagnostics
-
-### Diagnostic record helpers
-
-- `build_graph_authority_record(...)`
-- `make_adapter_observation(...)`
-- `finalize_adapter_observation(...)`
-
-These build the structured per-rank observation record that later feeds the
-validation summary in the test harness.
-
-------------------------------------------------------------
-
-## Runtime Mixin
-
-The model-internal distributed behavior lives in:
-
-- `DistScaleShiftMACERuntimeMixin`
-
-This mixin is dynamically installed onto the loaded raw MACE model so the
-adapter can keep the normal MACE execution loop while inserting one learned
-feature exchange boundary.
-
-### What the mixin owns
-
-Runtime state and exchange context:
-
-- `_configure_dist_runtime(...)`
-- `_configure_feature_exchange_runtime(...)`
-
-Debug and execution modes:
-
-- `_set_debug_tracing(...)`
-- `_set_execution_mode(...)`
-- `_emit_debug_log(...)`
-
-Interaction output normalization and exchanger setup:
-
-- `_normalize_interaction_output(...)`
-- `_ensure_feature_exchanger_ready(...)`
-
-Exchange policy:
-
-- `_should_exchange_after_product(...)`
-- `_exchange_after_product(...)`
-
-Forward override:
-
-- `forward(...)`
-
-### What the mixin actually changes
-
-The mixin keeps the native MACE sequence:
-
-1. `prepare_graph(...)`
-2. node embedding
-3. spherical harmonics and radial embedding
-4. interaction/product loop
-5. readouts
-6. per-node energy accumulation
-
-The distributed change is that after each product block with a downstream
-consumer, the mixin may exchange owned local node features through:
-
-- `FeaturePushToExchange.apply(...)`
-
-Today, for the current two-interaction MP/MPA checkpoints, this means the
-exchange happens once after layer 0 and before layer 1 consumes the updated
-remote features.
-
-### Execution modes
-
-The mixin supports three execution modes:
-
-- `validate`
-- `benchmark`
-- `debug`
-
-The most important practical difference is in:
-
-- `forward(...)`
-
-In `benchmark` mode, the forward returns early with:
-
-- `owned_node_energy`
-- `owned_local_energy`
-
-and skips richer graph-level outputs that the adapter does not consume during
-timed runs.
-
-------------------------------------------------------------
-
-## Adapter Class
-
-The DistNNP-facing orchestrator is:
-
-- `DistMACETopDownAdapter`
-
-This is the class collaborators should think of as "the adapter".
-
-### Construction and contract
-
-Key entry points:
-
-- `__init__(...)`
-- `_validate_model_contract(...)`
-- `_install_runtime_subclass(...)`
-
-Important design points:
-
-- the adapter currently accepts a raw MACE model object
-- it validates the MP/MPA-facing `ScaleShiftMACE` contract up front
-- it dynamically installs the runtime mixin onto that model
-
-### Buffer and mode control
-
-- `set_diagnostics(...)`
-- `set_debug_tracing(...)`
-- `set_execution_mode(...)`
-- `initialize_buffers(...)`
-
-`initialize_buffers(...)` is where the adapter binds the current partition to:
-
-- position exchange
-- atom-type exchange
-- learned-feature exchange runtime metadata
-
-### Structural reconstruction
-
-The main structural helpers are:
-
-- `_prepare_static_graph_cache(...)`
-- `_halo_global_indices(...)`
-- `_build_structural_view(...)`
-
-This stage:
-
-- takes the owned local positions from `DistNNPState`
-- exchanges them into a `[local | halo]` structural view
-- exchanges and caches atom-type-derived metadata
-- optionally reconstructs halo global IDs for diagnostics
-
-### Rank-local graph construction
-
-- `_radius_graph(...)`
-- `_build_owned_graph(...)`
-
-This is the point where the adapter turns the structural halo view into the
-actual MACE batch dictionary. The current policy is:
-
-- build the graph over `[local | halo]`
-- keep only edges whose destination is locally owned
-- pass the resulting tensors to the MACE forward
-
-### Force recovery and observations
-
-- `_recover_forces(...)`
-- `_build_observation(...)`
-- `_execute_model(...)`
-- `__call__(...)`
-
-The core adapter contract is:
-
-1. run the distributed MACE forward
-2. recover owned local forces from autograd on `owned_local_energy`
-3. return:
-   - owned local energy
-   - owned local forces
-
-This is the main reason the adapter does not use the raw MACE force tensor as
-its final distributed answer.
-
-------------------------------------------------------------
-
-## End-To-End Flow
-
-The current top-down execution path is:
-
-1. load a raw model through `load_raw_mace_model(...)`
-2. build a `DistNNPState` in the test harness
-3. construct `DistMACETopDownAdapter`
-4. call `initialize_buffers(...)`
-5. call `adapter(state)`
-6. inside the adapter:
-   - build the structural halo view
-   - build the owned-destination graph
-   - run the runtime-mixed MACE forward
-   - recover forces by autograd
-
-------------------------------------------------------------
-
-## Generalizability Status
-
-The adapter is more generic than the earlier single-exchange prototype, but it
-is still intentionally limited.
-
-### What is generalized already
-
-- it no longer hardcodes a single head name; head resolution now goes through
-  `resolve_model_head_name(...)`
-- it supports readout layouts with either one final readout or one readout per
-  interaction layer, validated in `DistMACETopDownAdapter._validate_model_contract(...)`
-- it supports two-interaction MP/MPA checkpoints that differ in skip-connection
-  behavior and hidden widths
-
-### What is still intentionally narrow
-
-- the model contract is still tied to MP/MPA-style `ScaleShiftMACE`
-- force recovery is still centered on owned-energy autograd
-- the graph policy is still owned-destination filtering after a full local plus
-  halo radius-graph build
-- the exchange policy is still effectively "after each product block with a
-  downstream consumer", which for current MP/MPA models means one exchange
-
-### What is left for a future generic adapter
-
-- broader support beyond MP/MPA
-- explicit support for charge/spin-conditioned variants
-- a formal capability layer across different MACE families
-- deeper exchange-policy generalization
-
-------------------------------------------------------------
-
-## Performance Notes
-
-The current adapter includes a benchmark-oriented execution mode, but it is not
-yet a thin, performance-first rewrite.
-
-Relevant code:
-
-- benchmark execution mode inside `DistScaleShiftMACERuntimeMixin.forward(...)`
-- benchmark control in `benchmark_speedup(...)` from `distnnp_model/tests/mace/test_distmace_top_down_adapter.py`
-
-### Improvements already present
-
-- debug-only CPU conversions are guarded
-- diagnostics are disabled during timed runs
-- static species-side graph metadata is cached
-- benchmark mode skips richer outputs the adapter does not use
-
-### Major remaining bottlenecks
-
-- full radius-graph build over `[local | halo]`
-- owned-destination edge filtering after graph construction
-- synchronous feature exchange
-- force recovery through a real backward pass
-
-So collaborators should view the current implementation as:
-
-- correctness-first
-- benchmark-capable
-- not yet the final performance architecture
-
-------------------------------------------------------------
-
-## Test Driver Overview
-
-The main experimental entrypoint is:
-
-- `build_parser(...)`
-- `prepare_experiment(...)`
-- `run_experiment(...)`
-
-### What the test driver does
-
-It combines four responsibilities:
-
-1. parse CLI inputs
-2. build the distributed `DistNNPState`
-3. run the distributed adapter
-4. optionally compare against monolithic MACE and benchmark the result
-
-### Validation modes
-
-CLI option:
-
-- `--validation-mode {full,minimal}`
-
-`minimal`:
-
-- runs the distributed adapter
-- checks structural and ownership diagnostics
-- skips monolithic parity references
-
-`full`:
-
-- runs the distributed adapter
-- builds monolithic MACE references through `monolithic_references(...)`
-- compares energy, forces, node energies, and graph agreement
-
-### Benchmark mode
-
-Benchmark entrypoint:
-
-- `benchmark_speedup(...)`
-
-The benchmark:
-
-- requires successful full validation first
-- switches the adapter to `benchmark` mode
-- disables diagnostics and debug tracing
-- times the slowest rank as the distributed step metric
-- compares that against a single-GPU standalone MACE baseline
-
-------------------------------------------------------------
-
-## Recommended Workflows
-
-### 1. Quick distributed sanity check
-
-Use this when you want to confirm the adapter still runs on a small built-in
-system without paying the full monolithic reference cost.
-
-```bash
-torchrun --nproc_per_node=2 \
-  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
-  --builtin-system natural_chain12 \
-  --model-family mp \
-  --model medium-mpa-0 \
-  --validation-mode minimal \
-  --no-benchmark
-```
-
-### 2. Full parity validation on the user’s target model
-
-This is the recommended command for comparing the distributed adapter against
-standalone MACE on `medium-mpa-0`.
-
-```bash
-torchrun --nproc_per_node=2 \
-  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
-  --builtin-system natural_chain12 \
-  --model-family mp \
-  --model medium-mpa-0 \
-  --validation-mode full \
-  --strict-parity \
-  --no-benchmark
-```
-
-### 3. Full validation on the 3750-atom benchmark structure
-
-```bash
-torchrun --nproc_per_node=2 \
-  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
-  --xyz-path distnnp_model/tests/mace/data/benchmark_scaling_molecular_3750.xyz \
-  --model-family mp \
-  --model medium-mpa-0 \
-  --validation-mode full \
-  --strict-parity \
-  --no-benchmark
-```
-
-### 4. Full validation plus benchmark
-
-```bash
-torchrun --nproc_per_node=2 \
-  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
-  --xyz-path distnnp_model/tests/mace/data/benchmark_scaling_molecular_3750.xyz \
-  --model-family mp \
-  --model medium-mpa-0 \
-  --validation-mode full \
-  --strict-parity \
-  --benchmark \
-  --benchmark-warmup 5 \
-  --benchmark-iterations 20 \
-  --benchmark-samples 7
-```
-
-### 5. Save a JSON report for collaborators
-
-```bash
-torchrun --nproc_per_node=2 \
-  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
-  --xyz-path distnnp_model/tests/mace/data/benchmark_scaling_molecular_3750.xyz \
-  --model-family mp \
-  --model medium-mpa-0 \
-  --validation-mode full \
-  --strict-parity \
-  --benchmark \
-  --benchmark-warmup 5 \
-  --benchmark-iterations 20 \
-  --benchmark-samples 7 \
-  --output-json results/distmace_medium_mpa0_2gpu.json
-```
-
-### 6. Debug a failing exchange
-
-```bash
-torchrun --nproc_per_node=2 \
-  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
-  --builtin-system natural_chain12 \
-  --model-family mp \
-  --model medium-mpa-0 \
-  --validation-mode minimal \
-  --no-benchmark \
-  --debug-exchange
-```
-
-------------------------------------------------------------
-
-## Notes For Standalone MACE Comparison
-
-If the immediate goal is to compare the user’s standalone MACE
-`medium-mpa-0` result against the distributed adapter, the most relevant path
-is:
-
-- distributed adapter run through `run_experiment(...)`
-- monolithic references from `monolithic_references(...)`
-
-During `full` validation, rank 0 reports:
-
-- `distributed_energy`
-- `explicit_distnnp_graph_energy`
-- `standalone_mace_energy`
-- `explicit_force_mae`
-- `standalone_force_mae`
-
-Those are the most useful fields for direct collaborator-facing comparison.
-
-------------------------------------------------------------
-
-## Practical Limitations
-
-Collaborators should keep these caveats in mind:
-
-- the adapter currently requires at least two ranks in the distributed test
-  driver
-- the performance benchmark is useful for trend comparison, but it is not yet
-  the final thin-adapter performance story
-- the validation path is intentionally richer and heavier than the benchmark
-  path
-- the current model support target is MP/MPA, not every MACE-family variant
-
-------------------------------------------------------------
-
-## Recommended Reading Order
-
-For someone new to this adaptation, the most efficient reading order is:
-
-1. this README
-2. `DistMACEThinAdapter`
-3. `ThinDistScaleShiftMACERuntime.forward(...)`
-4. `distnnp_model/tests/mace/README.md`
-5. the thin static and trajectory SLURM workflows
-
-That sequence usually gives enough context to run, validate, and interpret the
-current adapter without first reading the older phase files.
