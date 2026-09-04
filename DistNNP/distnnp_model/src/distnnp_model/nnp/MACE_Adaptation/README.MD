@@ -1,14 +1,12 @@
-# DistMACE Adapters
+# DistMACE Thin Adapter
 
 ------------------------------------------------------------
 
 ## Purpose
 
-This folder now centers on the current distributed MACE adapters:
+This folder's supported distributed MACE path is the thin adapter:
 
-- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_top_down_adapter.py`
 - `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_thin_adapter.py`
-- `distnnp_model/tests/mace/test_distmace_top_down_adapter.py`
 - `distnnp_model/tests/mace/test_distmace_thin_adapter.py`
 
 The adapters are designed to let DistNNP drive:
@@ -25,9 +23,9 @@ while MACE still provides:
 - interaction and product blocks
 - per-node energy prediction
 
-This README is meant to help collaborators understand where the adapters are
-today, how their internal pieces fit together, and how to run validation,
-benchmark, and trajectory experiments against standalone MACE.
+`DistMACETopDownAdapter` remains in this directory as a diagnostic fallback for
+investigating failures. It dynamically changes the loaded model runtime class
+and is not the primary validation or benchmark path.
 
 ------------------------------------------------------------
 
@@ -36,11 +34,11 @@ benchmark, and trajectory experiments against standalone MACE.
 The current implementation is intentionally scoped to MP/MPA-style foundation
 models loaded through:
 
-- `load_raw_mace_model(...)` in `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_top_down_adapter.py`
+- `load_raw_mace_model(...)` in `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_thin_adapter.py`
 
 and validated against the `ScaleShiftMACE`-compatible contract enforced in:
 
-- `DistMACETopDownAdapter._validate_model_contract(...)` in `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_top_down_adapter.py`
+- `DistMACEThinAdapter._validate_model_contract(...)` in `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_thin_adapter.py`
 
 In practice, this means the adapter is aimed at checkpoints such as:
 
@@ -57,15 +55,16 @@ specialized conditioning path.
 
 Primary implementation:
 
-- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_top_down_adapter.py`
-
-Primary distributed top-down test and benchmark driver:
-
-- `distnnp_model/tests/mace/test_distmace_top_down_adapter.py`
+- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_thin_adapter.py`
 
 Primary distributed thin-adapter test and benchmark driver:
 
 - `distnnp_model/tests/mace/test_distmace_thin_adapter.py`
+
+Diagnostic fallback implementation and driver:
+
+- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/distmace_top_down_adapter.py`
+- `distnnp_model/tests/mace/test_distmace_top_down_adapter.py`
 
 Detached standalone MACE reference generator for the thin-adapter flow:
 
@@ -81,11 +80,11 @@ Historical design notes and earlier milestones:
 
 - `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/TOP_DOWN_SINGLE_FILE_ADAPTER_DESIGN.md`
 - `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/DISTMACE PERFORMANCE REDESIGN.txt`
-- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/FINAL_ADAPTER_README.md`
+- `distnnp_model/src/distnnp_model/nnp/MACE_Adaptation/FINAL_SUBCLASS_ADAPTER_README.md`
 
-Those older files are still useful for history, but the current operational
-surface is the top-down adapter, the thin adapter, and the MACE-specific test
-drivers under `distnnp_model/tests/mace/`.
+Those files describe historical or diagnostic work. The supported operational
+surface is the thin adapter and the SLURM workflows documented in
+`distnnp_model/tests/mace/README.md`.
 
 ------------------------------------------------------------
 
@@ -116,7 +115,12 @@ Its MD trajectory validation flow is:
 - the adapter reconstructs the smallest MACE-compatible owned graph it needs
 - the runtime executes the loaded raw MACE model with minimal adapter-side interpretation
 - force recovery is taken from owned-local energy autograd
-- returned energy is reduced to the global total potential energy on every rank
+- returned energy is the rank-owned local potential energy
+
+The trajectory producer sums rank-owned energies into each saved global frame.
+The test-local wrapper converts MACE forces from eV/Angstrom to the current
+Verlet input unit, amu*Angstrom/fs^2. That conversion is not part of the thin
+adapter API and will move only with a future model/integrator contract change.
 
 ### Thin-adapter validation story
 
@@ -138,7 +142,13 @@ This split is deliberate. It keeps:
 
 ------------------------------------------------------------
 
-## Utilities And Top-Level Helpers
+## Diagnostic fallback details: top-down adapter
+
+The remaining sections describe the retained top-down implementation and its
+diagnostic controls. They are useful for investigating a thin-path failure, not
+for routine validation or benchmark execution.
+
+### Utilities And Top-Level Helpers
 
 The top of the adapter file contains the utilities that the rest of the
 implementation builds on.
@@ -626,10 +636,10 @@ Collaborators should keep these caveats in mind:
 For someone new to this adaptation, the most efficient reading order is:
 
 1. this README
-2. `DistMACETopDownAdapter`
-3. `DistScaleShiftMACERuntimeMixin.forward(...)`
-4. `build_parser(...)`
-5. `run_experiment(...)`
+2. `DistMACEThinAdapter`
+3. `ThinDistScaleShiftMACERuntime.forward(...)`
+4. `distnnp_model/tests/mace/README.md`
+5. the thin static and trajectory SLURM workflows
 
 That sequence usually gives enough context to run, validate, and interpret the
 current adapter without first reading the older phase files.

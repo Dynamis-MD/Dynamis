@@ -8,6 +8,7 @@ producer and singleton thin or public-calculator reference models.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import socket
 from pathlib import Path
@@ -22,7 +23,23 @@ from distnnp_model.nnp.MACE_Adaptation.distmace_thin_adapter import (
     DistMACEThinAdapter,
     load_raw_mace_model,
 )
-from distnnp_state import TrajectoryWriter as BoundTrajectoryWriter
+
+
+def install_trajectory_simulator_import_compatibility() -> None:
+    """Supply only the imports missing from pre-upstream Simulator builds.
+
+    This does not alter Simulator behavior, native bindings, state tensors, or
+    repartitioning. It is a no-op once the upstream imports are present.
+    """
+    import distnnp.simulator as simulator_module
+
+    def is_pathlike(value: object) -> bool:
+        return isinstance(value, (str, os.PathLike))
+
+    if not hasattr(simulator_module, "is_pathlike"):
+        simulator_module.is_pathlike = is_pathlike
+    if not hasattr(simulator_module, "os"):
+        simulator_module.os = os
 
 try:
     from ase import Atoms
@@ -75,7 +92,7 @@ DEFAULT_GHOST_CUTOFF_BUFFER = 0.5
 # DistNNP's Verlet kernel uses mass in amu, positions in Angstrom, and time in
 # fs, so its force input must be amu * Angstrom / fs^2. MACE returns the
 # derivative of its eV energy with respect to Angstrom coordinates (eV / A).
-# Keep energy in eV for diagnostics and scale only the force passed to MD.
+# Keep energy in eV and scale only the force passed to MD.
 EV_PER_ANGSTROM_TO_AMU_ANGSTROM_PER_FS2 = 0.0096485332
 
 EARLY_PHASE_STEPS = 4
@@ -97,151 +114,6 @@ RDF_LAST_K_FRAMES = 20
 RDF_N_BINS = 50
 RDF_R_MAX = 8.0
 RDF_TOL = 0.3
-DIAGNOSTIC_TARGET_VERTEX_ID = 71
-
-
-
-def _is_pathlike(file_path: object) -> bool:
-    return isinstance(file_path, (str, os.PathLike))
-
-
-def _infer_atom_counts(partition_info, world_size: int, device: torch.device) -> torch.Tensor:
-    atom_counts = getattr(partition_info, "atom_counts", None)
-    if atom_counts is not None:
-        return atom_counts.to(device=device, dtype=torch.long)
-
-    partition_id = getattr(partition_info, "partition_id", None)
-    if partition_id is not None:
-        return torch.bincount(
-            partition_id.to(device=device, dtype=torch.long),
-            minlength=world_size,
-        )
-
-    partition_indices = getattr(partition_info, "partition_indices", None)
-    if partition_indices is not None and world_size == 1:
-        return torch.tensor([int(partition_indices.numel())], device=device, dtype=torch.long)
-
-    raise AttributeError(
-        "Could not infer per-rank atom counts: PartitionMessagePassingInfo exposes neither "
-        "'atom_counts' nor 'partition_id'."
-    )
-
-
-## Why does this function define like three other functions and creates a programming file within it?>
-## Break this one down!
-def patch_simulator_trajectory_writer_compat() -> None:
-    """Patch distnnp.simulator compatibility gaps for test-only execution.
-
-    Keep the trajectory tests usable while the Python simulator compatibility
-    fixes are landing across branches. Current native bindings receive atom
-    counts as a ``torch.uint32`` tensor; do not convert that tensor to the
-    Python-list contract used by older, stale extensions.
-
-    The same simulator module also calls ``is_pathlike`` and ``os.path.exists``
-    inside ``setup()`` without importing either symbol. Patch those missing
-    names here with a local helper so the trajectory tests do not depend on
-    importing ``distnnp_state.io`` on Python 3.9 environments.
-
-    Some builds also surface non-integer ``atom_vertex_numbers`` /
-    ``partition_indices`` tensors at the simulator boundary when loading XYZ /
-    EXTXYZ input. The simulator-state path assumes integer indexing tensors, so
-    this shim normalizes them to ``torch.long`` before any advanced indexing.
-    """
-    import distnnp.simulator as simulator_module
-    import distnnp.simulatorState as simulator_state_module
-
-    if not getattr(simulator_module, "_mace_test_init_dtype_patch", False):
-        original_initialize_simulator_state = simulator_module.Simulator.initialize_simulator_state
-
-        def _compat_initialize_simulator_state(self, molecular_system, device=None):
-            target_device = self.device if device is None else device
-            if hasattr(molecular_system, "atom_vertex_numbers") and molecular_system.atom_vertex_numbers is not None:
-                molecular_system.atom_vertex_numbers = molecular_system.atom_vertex_numbers.to(
-                    device=target_device, dtype=torch.long
-                )
-            return original_initialize_simulator_state(self, molecular_system, device=device)
-
-        simulator_module.Simulator.initialize_simulator_state = _compat_initialize_simulator_state
-        simulator_module._mace_test_init_dtype_patch = True
-
-    if not getattr(simulator_module, "_mace_test_sync_patch", False):
-        def _compat_sync_and_repartition(self, device=None):
-            self.state.sync_and_repartition()
-            target_device = device if device else self.device
-            self.model.initialize_buffers(self.state.local_partition_info, device=target_device)
-
-            counts = _infer_atom_counts(
-                self.state.local_partition_info,
-                world_size=self.dist_environment.world_size,
-                device=target_device,
-            )
-            self.writer.update_atom_counts(counts.to(dtype=torch.uint32))
-
-            reset = getattr(self.integrator, "reset", None)
-            if callable(reset):
-                reset()
-
-        simulator_module.Simulator.sync_and_repartition = _compat_sync_and_repartition
-        simulator_module._mace_test_sync_patch = True
-
-    if not getattr(simulator_state_module, "_mace_test_partition_index_patch", False):
-        original_setup_mass_and_forces = simulator_state_module.SimState.setup_mass_and_forces
-        original_sync_and_repartition = simulator_state_module.SimState.sync_and_repartition
-
-        def _compat_setup_mass_and_forces(self, partition_info, molecular_system):
-            partition_info.partition_indices = partition_info.partition_indices.to(
-                device=molecular_system.atom_positions.device, dtype=torch.long
-            )
-            if hasattr(molecular_system, "atom_vertex_numbers") and molecular_system.atom_vertex_numbers is not None:
-                molecular_system.atom_vertex_numbers = molecular_system.atom_vertex_numbers.to(
-                    device=molecular_system.atom_positions.device, dtype=torch.long
-                )
-            return original_setup_mass_and_forces(self, partition_info, molecular_system)
-
-        def _compat_sync_and_repartition(self, paritioner=None, comm_backend="nccl"):
-            if hasattr(self._state.global_molecular_info, "atom_vertex_numbers"):
-                self._state.global_molecular_info.atom_vertex_numbers = (
-                    self._state.global_molecular_info.atom_vertex_numbers.to(
-                        device=self.device, dtype=torch.long
-                    )
-                )
-            self._state.local_partition_info.partition_indices = (
-                self._state.local_partition_info.partition_indices.to(
-                    device=self.device, dtype=torch.long
-                )
-            )
-            return original_sync_and_repartition(self, paritioner=paritioner, comm_backend=comm_backend)
-
-        simulator_state_module.SimState.setup_mass_and_forces = _compat_setup_mass_and_forces
-        simulator_state_module.SimState.sync_and_repartition = _compat_sync_and_repartition
-        simulator_state_module._mace_test_partition_index_patch = True
-
-    current = simulator_module.TrajectoryWriter
-    if getattr(current, "__name__", "") == "_CompatTrajectoryWriter":
-        simulator_module.is_pathlike = _is_pathlike
-        simulator_module.os = os
-        return
-
-    class _CompatTrajectoryWriter:
-        def __new__(
-            cls,
-            global_rank: int,
-            run_id: bytes,
-            author: str,
-            output_dir: str = "./trajectory",
-            output_file: str = "trajectory.distnnp",
-        ):
-            try:
-                return BoundTrajectoryWriter(global_rank, run_id, author, output_dir, output_file)
-            except TypeError as exc:
-                message = str(exc)
-                if "incompatible constructor arguments" not in message:
-                    raise
-                return BoundTrajectoryWriter(global_rank, run_id, author, output_dir)
-
-    simulator_module.TrajectoryWriter = _CompatTrajectoryWriter
-    simulator_module.is_pathlike = _is_pathlike
-    simulator_module.os = os
 
 
 def _require_ase() -> None:
@@ -344,6 +216,11 @@ def ensure_test_structure(
     print(f"Wrote {description} to {path}")
 
 
+def structure_sha256(path: str | Path) -> str:
+    """Return the identity of the exact structure consumed by both trajectory runs."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("", 0))
@@ -379,8 +256,6 @@ class MACEForceUnitConversionAdapter:
 
     def __init__(self, adapter: DistMACEThinAdapter) -> None:
         self._adapter = adapter
-        self._force_diagnostic_limit = 0
-        self.force_diagnostics: list[Dict[str, Any]] = []
 
     @property
     def cutoff(self) -> float:
@@ -389,50 +264,11 @@ class MACEForceUnitConversionAdapter:
     def initialize_buffers(self, partition_info, device: torch.device) -> None:
         self._adapter.initialize_buffers(partition_info, device=device)
 
-    def enable_force_diagnostics(self, max_calls: int = 3) -> None:
-        """Capture preflight plus the first two Verlet force evaluations."""
-        if max_calls <= 0:
-            raise ValueError("max_calls must be positive when force diagnostics are enabled.")
-        self._force_diagnostic_limit = max_calls
-        self.force_diagnostics = []
-
-    def _graph_diagnostics(self, state) -> Dict[str, np.ndarray | int]:
-        """Build test-only edge metadata for the same unchanged local state."""
-        view = self._adapter._build_structural_view(state)
-        graph = self._adapter._build_owned_graph(view, state)
-        destinations = graph.edge_index[1]
-        sources = graph.edge_index[0]
-        neighbor_count = torch.bincount(destinations, minlength=view.num_local)
-        halo_neighbor_count = torch.bincount(
-            destinations[sources >= view.num_local], minlength=view.num_local
-        )
-        return {
-            "neighbor_count": neighbor_count.detach().cpu().numpy(),
-            "halo_neighbor_count": halo_neighbor_count.detach().cpu().numpy(),
-            "halo_atom_count": view.num_total - view.num_local,
-        }
-
     def __call__(self, state, *args: Any, **kwargs: Any):
         energy_ev, forces_ev_per_angstrom = self._adapter(state, *args, **kwargs)
         forces_amu_angstrom_per_fs2 = (
             forces_ev_per_angstrom * EV_PER_ANGSTROM_TO_AMU_ANGSTROM_PER_FS2
         )
-
-        if len(self.force_diagnostics) < self._force_diagnostic_limit:
-            graph_diagnostics = self._graph_diagnostics(state)
-            partition_info = state.local_partition_info
-            num_local = state.local_molecular_info.num_atoms
-            self.force_diagnostics.append(
-                {
-                    "call_index": len(self.force_diagnostics),
-                    "energy_ev": float(energy_ev.detach().cpu()),
-                    "vid": partition_info.partition_indices[:num_local].detach().cpu().numpy(),
-                    "raw_force_ev_per_angstrom": forces_ev_per_angstrom.detach().cpu().numpy(),
-                    "force_amu_angstrom_per_fs2": forces_amu_angstrom_per_fs2.detach().cpu().numpy(),
-                    **graph_diagnostics,
-                }
-            )
-
         return energy_ev, forces_amu_angstrom_per_fs2
 
 
@@ -625,113 +461,16 @@ def run_md_loop(
     sim,
     config: SimulatorConfig,
     steps: int = N_STEPS,
-    skip_initial_rebalance: bool = False,
 ):
     if steps <= 0:
         raise ValueError("Trajectory step count must be positive.")
     frames = []
     for step in range(steps):
-        if sim.should_rebalance(step) and not (skip_initial_rebalance and step == 0):
+        if sim.should_rebalance(step):
             sim.sync_and_repartition()
         energy, _ = sim.step(config.timestep_fs)
         frames.append(extract_frame(sim, energy))
     return frames
-
-
-def merge_force_diagnostics(rank_records: list[list[Dict[str, Any]]]) -> list[Dict[str, Any]]:
-    """Merge rank-owned diagnostic records into global vertex-ID order."""
-    if not rank_records:
-        return []
-    record_count = len(rank_records[0])
-    if any(len(records) != record_count for records in rank_records):
-        raise ValueError("Ranks captured a different number of force diagnostic records.")
-
-    merged = []
-    array_keys = (
-        "vid",
-        "raw_force_ev_per_angstrom",
-        "force_amu_angstrom_per_fs2",
-        "neighbor_count",
-        "halo_neighbor_count",
-    )
-    for call_index in range(record_count):
-        records = [rank[call_index] for rank in rank_records]
-        combined = {key: np.concatenate([record[key] for record in records]) for key in array_keys}
-        order = np.argsort(combined["vid"])
-        vids = combined["vid"][order]
-        if np.unique(vids).size != vids.size:
-            raise ValueError(f"Diagnostic call {call_index} contains duplicate owned vertex IDs.")
-        merged.append(
-            {
-                "call_index": call_index,
-                "energy_ev": float(sum(float(record["energy_ev"]) for record in records)),
-                "vid": vids,
-                "raw_force_ev_per_angstrom": combined["raw_force_ev_per_angstrom"][order],
-                "force_amu_angstrom_per_fs2": combined["force_amu_angstrom_per_fs2"][order],
-                "neighbor_count": combined["neighbor_count"][order],
-                "halo_neighbor_count": combined["halo_neighbor_count"][order],
-                "halo_atom_count_by_rank": [int(record["halo_atom_count"]) for record in records],
-            }
-        )
-    return merged
-
-
-def write_force_diagnostic_report(
-    reference_records: list[Dict[str, Any]],
-    distributed_records: list[Dict[str, Any]],
-    path: str | Path,
-) -> None:
-    """Write preflight and first-Verlet-call force comparisons without asserting."""
-    import csv
-
-    if len(reference_records) != len(distributed_records):
-        raise ValueError("Reference and distributed force diagnostic record counts differ.")
-
-    rows = []
-    for reference, distributed in zip(reference_records, distributed_records):
-        if not np.array_equal(reference["vid"], distributed["vid"]):
-            raise ValueError(f"Force diagnostic call {reference['call_index']} has mismatched vertex IDs.")
-        raw_diff = distributed["raw_force_ev_per_angstrom"] - reference["raw_force_ev_per_angstrom"]
-        converted_diff = (
-            distributed["force_amu_angstrom_per_fs2"]
-            - reference["force_amu_angstrom_per_fs2"]
-        )
-        target = np.flatnonzero(reference["vid"] == DIAGNOSTIC_TARGET_VERTEX_ID)
-        target_index = int(target[0]) if target.size else None
-        rows.append(
-            {
-                "call_index": int(reference["call_index"]),
-                "energy_diff_ev": float(distributed["energy_ev"] - reference["energy_ev"]),
-                "raw_force_max_abs_diff_ev_per_angstrom": float(np.max(np.abs(raw_diff))),
-                "converted_force_max_abs_diff_amu_angstrom_per_fs2": float(
-                    np.max(np.abs(converted_diff))
-                ),
-                "target_vid": DIAGNOSTIC_TARGET_VERTEX_ID if target_index is not None else "missing",
-                "target_raw_force_max_abs_diff_ev_per_angstrom": (
-                    float(np.max(np.abs(raw_diff[target_index]))) if target_index is not None else ""
-                ),
-                "target_neighbor_count_reference": (
-                    int(reference["neighbor_count"][target_index]) if target_index is not None else ""
-                ),
-                "target_neighbor_count_distributed": (
-                    int(distributed["neighbor_count"][target_index]) if target_index is not None else ""
-                ),
-                "target_halo_neighbor_count_distributed": (
-                    int(distributed["halo_neighbor_count"][target_index]) if target_index is not None else ""
-                ),
-                "distributed_halo_atom_count_by_rank": ";".join(
-                    str(value) for value in distributed["halo_atom_count_by_rank"]
-                ),
-            }
-        )
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
-    print(f"Wrote {len(rows)} force diagnostic rows to {path}")
 
 
 def rmsd(a: np.ndarray, b: np.ndarray) -> float:

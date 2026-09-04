@@ -269,7 +269,7 @@ def build_state(
     global_mol.atom_positions = positions
     global_mol.atom_types = numbers
     global_mol.atom_velocities = torch.zeros_like(positions)
-    global_mol.atom_forces = torch.zeros_like(positions)
+    _assign_if_present(global_mol, "atom_forces", torch.zeros_like(positions))
     _assign_if_present(global_mol, "atom_vertex_numbers", torch.arange(positions.shape[0], device=device))
     _assign_if_present(global_mol, "atom_masses", TORCH_ATOMIC_MASSES.to(device)[numbers].float())
 
@@ -288,7 +288,7 @@ def build_state(
     local_mol.atom_positions = positions.index_select(0, local_indices)
     local_mol.atom_types = numbers.index_select(0, local_indices)
     local_mol.atom_velocities = torch.zeros_like(local_mol.atom_positions)
-    local_mol.atom_forces = torch.zeros_like(local_mol.atom_positions)
+    _assign_if_present(local_mol, "atom_forces", torch.zeros_like(local_mol.atom_positions))
     _assign_if_present(local_mol, "atom_vertex_numbers", local_indices)
     _assign_if_present(local_mol, "atom_masses", TORCH_ATOMIC_MASSES.to(device)[local_mol.atom_types].float())
 

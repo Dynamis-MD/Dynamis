@@ -1,108 +1,63 @@
 # MACE Tests
 
-This directory contains the MACE-specific distributed validation and trajectory workflows.
+The primary MACE validation surface is the thin adapter, run through SLURM or
+the equivalent `torchrun` commands. These drivers are not pytest entrypoints.
+For pre-upstream Simulator builds, the trajectory helper supplies only the
+missing `os` and `is_pathlike` module imports. It does not patch native
+bindings, state tensors, or repartitioning behavior.
 
-## Main Files
+## Primary workflows
 
-- `test_distmace_thin_adapter.py`: thin-adapter parity driver, detached-reference comparison, and benchmark flow
-- `mace_standalone_reference.py`: standalone MACE artifact generator used by the thin-adapter test
-- `test_distmace_top_down_adapter.py`: top-down adapter parity and benchmark driver
-- `run_distributed_trajectory.py`: distributed MD trajectory writer for the thin adapter
-- `test_md.py`: singleton MD reference runner and trajectory comparison entrypoint
-- `md_test_common.py`: shared MACE trajectory helpers, structure generation, comparison utilities, and simulator-compatibility shims
-- `data/`: bundled MACE XYZ fixtures
+`slurm_distmace_thin_static.sh` generates an immutable standalone MACE
+calculator/core-model artifact and runs strict distributed thin-adapter parity.
+Set `ENABLE_BENCHMARK=1` to collect timings; benchmark values are observations,
+not correctness assertions.
 
-## Typical Workflows
+`slurm_distmace_thin_trajectory.sh` runs the standard two-rank trajectory and
+then validates it against a singleton public MACE calculator trajectory. Both
+runs use the deterministic 216-atom periodic diamond-Si fixture, 100 steps,
+0.5 fs timestep, and scheduled rebalance every seven steps.
 
-Thin parity:
+Run either script from a SLURM allocation after setting `PROJECT_ROOT` if it is
+not the default cluster checkout. Results are written under `results/` with the
+SLURM job ID.
+
+## Direct commands
+
+Static parity:
 
 ```bash
-python distnnp_model/tests/mace/mace_standalone_reference.py \
-  --output tmp/reference.pt
-
-torchrun --nproc_per_node=2 \
-  distnnp_model/tests/mace/test_distmace_thin_adapter.py \
-  run-distributed \
-  --reference-artifact tmp/reference.pt \
-  --strict-parity
+python distnnp_model/tests/mace/mace_standalone_reference.py --output tmp/reference.pt
+torchrun --nproc_per_node=2 distnnp_model/tests/mace/test_distmace_thin_adapter.py \
+  run-distributed --reference-artifact tmp/reference.pt --strict-parity
 ```
 
-Thin benchmark:
+Trajectory acceptance:
 
 ```bash
-python distnnp_model/tests/mace/mace_standalone_reference.py \
-  --xyz-path distnnp_model/tests/mace/data/benchmark_scaling_molecular_3750.xyz \
-  --model-family mp \
-  --model medium-mpa-0 \
-  --output tmp/reference_3750.pt \
-  --benchmark \
-  --benchmark-warmup 5 \
-  --benchmark-iterations 20 \
-  --benchmark-samples 7
-
-torchrun --nproc_per_node=2 \
-  distnnp_model/tests/mace/test_distmace_thin_adapter.py \
-  run-distributed \
-  --xyz-path distnnp_model/tests/mace/data/benchmark_scaling_molecular_3750.xyz \
-  --model-family mp \
-  --model medium-mpa-0 \
-  --reference-artifact tmp/reference_3750.pt \
-  --strict-parity \
-  --benchmark \
-  --benchmark-warmup 5 \
-  --benchmark-iterations 20 \
-  --benchmark-samples 7
-```
-
-Top-down parity:
-
-```bash
-torchrun --nproc_per_node=2 \
-  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
-  --builtin-system natural_chain12 \
-  --model-family mp \
-  --model medium-mpa-0 \
-  --validation-mode full \
-  --strict-parity
-```
-
-Top-down benchmark:
-
-```bash
-torchrun --nproc_per_node=2 \
-  distnnp_model/tests/mace/test_distmace_top_down_adapter.py \
-  --xyz-path distnnp_model/tests/mace/data/benchmark_scaling_molecular_3750.xyz \
-  --model-family mp \
-  --model medium-mpa-0 \
-  --validation-mode full \
-  --strict-parity \
-  --benchmark \
-  --benchmark-warmup 5 \
-  --benchmark-iterations 20 \
-  --benchmark-samples 7
-```
-
-Trajectory validation:
-
-The trajectory workflow generates a deterministic, slightly perturbed 216-atom
-periodic diamond-Si supercell for the MPA-0 materials baseline.
-
-```bash
-torchrun --nproc_per_node=2 \
-  -m distnnp_model.tests.mace.run_distributed_trajectory \
+torchrun --nproc_per_node=2 distnnp_model/tests/mace/run_distributed_trajectory.py \
   --path ./tmp/mace_md_si
-
-python -m distnnp_model.tests.mace.test_md \
-  --path ./tmp/mace_md_si
+python distnnp_model/tests/mace/test_md.py --path ./tmp/mace_md_si
 ```
 
-Trajectory validation with explicit script paths:
+`test_md.py` defaults to `--reference-mode monolithic`. Its explicit
+`--reference-mode thin` option is for developer comparison only and is not the
+acceptance oracle.
 
-```bash
-torchrun --nproc_per_node=2 \
-  distnnp_model/tests/mace/run_distributed_trajectory.py \
-  --path ./tmp/mace_md_si
+The producer saves `dist_traj.pt` as metadata plus frames. The reference runner
+rejects mismatches in checkpoint identity, structure hash, step settings, rank
+count, adapter identity, or force-unit convention before numerical comparison.
 
-python distnnp_model/tests/mace/test_md.py \
-  --path ./tmp/mace_md_si
-```
+## Coverage boundaries
+
+Static parity anchors the thin adapter to independent MACE calculator and raw
+core-model values. Trajectory validation checks distributed partitioning, halo
+and feature exchange, rank-local energy aggregation, repartitioning, and Verlet
+integration against monolithic MACE. Adapter energy is rank-local; the producer
+sums rank contributions into each saved total energy.
+
+## Diagnostic fallback
+
+`test_distmace_top_down_adapter.py` and its existing SLURM script remain
+available for diagnostic investigation. They are not primary validation or
+benchmark commands for the supported thin-adapter path.

@@ -23,28 +23,24 @@ if __package__:
         SEED,
         N_STEPS,
         REBALANCE_INTERVAL,
-        TEST_SYSTEMS,
         build_thin_mace_model,
         ensure_test_structure,
-        get_test_system_spec,
+        install_trajectory_simulator_import_compatibility,
         make_config,
-        merge_force_diagnostics,
-        patch_simulator_trajectory_writer_compat,
         run_md_loop,
+        structure_sha256,
     )
 else:
     from md_test_common import (
         SEED,
         N_STEPS,
         REBALANCE_INTERVAL,
-        TEST_SYSTEMS,
         build_thin_mace_model,
         ensure_test_structure,
-        get_test_system_spec,
+        install_trajectory_simulator_import_compatibility,
         make_config,
-        merge_force_diagnostics,
-        patch_simulator_trajectory_writer_compat,
         run_md_loop,
+        structure_sha256,
     )
 
 
@@ -54,22 +50,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="medium-mpa-0")
     parser.add_argument("--head-name", default="")
     parser.add_argument("--model-family", default="mp", choices=["mp", "off", "omol", "polar"])
-    parser.add_argument("--system", default="silicon", choices=TEST_SYSTEMS)
-    parser.add_argument("--steps", type=int, default=N_STEPS)
-    parser.add_argument("--timestep-fs", type=float, default=0.5)
-    parser.add_argument("--disable-rebalance-after-setup", action="store_true")
-    parser.add_argument("--diagnostics", action="store_true")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    if args.steps <= 0 or args.timestep_fs <= 0:
-        raise ValueError("--steps and --timestep-fs must be positive.")
-    patch_simulator_trajectory_writer_compat()
-
-    system_spec = get_test_system_spec(args.system)
-    structure = Path(args.path) / system_spec["filename"]
+    install_trajectory_simulator_import_compatibility()
+    structure = Path(args.path) / "silicon_supercell.xyz"
     output_dir = Path(args.path) / "dist_out"
     dist_dump = Path(args.path) / "dist_traj.pt"
 
@@ -78,7 +65,7 @@ def main() -> None:
         dist_env = torch_dist_env.dist_env
 
         if dist_env.global_rank == 0:
-            ensure_test_structure(structure, system=args.system)
+            ensure_test_structure(structure)
         dist.barrier()
 
         torch.manual_seed(SEED)
@@ -87,35 +74,19 @@ def main() -> None:
             model=args.model,
             head_name=args.head_name or None,
             model_family=args.model_family,
-            system=args.system,
+            system="silicon",
         )
-        integrator = Verlet(dt=args.timestep_fs)
+        integrator = Verlet(dt=0.5)
         config = make_config(
             str(output_dir),
             model.cutoff,
-            timestep_fs=args.timestep_fs,
-            rebalance_interval=0 if args.disable_rebalance_after_setup else REBALANCE_INTERVAL,
-            side_length_angstrom=system_spec["side_length_angstrom"],
+            rebalance_interval=REBALANCE_INTERVAL,
         )
 
         sim = Simulator(model, integrator, dist_env, config, torch_dist_env.device)
         sim.setup(str(structure))
 
-        skip_initial_rebalance = False
-        if args.diagnostics:
-            # Make this force evaluation observe the exact partition used by MD step 0.
-            if not args.disable_rebalance_after_setup:
-                sim.sync_and_repartition()
-                skip_initial_rebalance = True
-            model.enable_force_diagnostics()
-            model(sim.state._state)
-
-        local_frames = run_md_loop(
-            sim,
-            config,
-            steps=args.steps,
-            skip_initial_rebalance=skip_initial_rebalance,
-        )
+        local_frames = run_md_loop(sim, config)
         local_payload = [
             (
                 frame["energy"],
@@ -129,11 +100,6 @@ def main() -> None:
         dist.barrier()
         gathered = [None] * dist_env.world_size
         dist.all_gather_object(gathered, local_payload)
-
-        gathered_diagnostics = None
-        if args.diagnostics:
-            gathered_diagnostics = [None] * dist_env.world_size
-            dist.all_gather_object(gathered_diagnostics, model.force_diagnostics)
 
         if dist_env.global_rank == 0:
             merged = []
@@ -150,12 +116,24 @@ def main() -> None:
                     "vid": vids[order],
                 }
                 merged.append(frame)
-            torch.save(merged, dist_dump)
+            artifact = {
+                "metadata": {
+                    "artifact_version": 1,
+                    "model": args.model,
+                    "model_family": args.model_family,
+                    "head_name": args.head_name,
+                    "structure_sha256": structure_sha256(structure),
+                    "timestep_fs": config.timestep_fs,
+                    "step_count": N_STEPS,
+                    "rebalance_interval": REBALANCE_INTERVAL,
+                    "world_size": dist_env.world_size,
+                    "adapter_identity": "DistMACEThinAdapter",
+                    "force_unit": "amu*angstrom/fs^2",
+                },
+                "frames": merged,
+            }
+            torch.save(artifact, dist_dump)
             print(f"Wrote merged {len(merged)}-step distributed trajectory to {dist_dump}")
-            if gathered_diagnostics is not None:
-                diagnostic_dump = Path(args.path) / "distributed_force_diagnostics.pt"
-                torch.save(merge_force_diagnostics(gathered_diagnostics), diagnostic_dump)
-                print(f"Wrote distributed force diagnostics to {diagnostic_dump}")
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
