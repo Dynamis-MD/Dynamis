@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import torch
-import torch.distributed as dist
 
 from distnnp_model.comm.exchanger import GPUDirectExchanger
 from distnnp_model.comm.feature_push import FeaturePushToExchange
@@ -384,7 +383,6 @@ class DistMACEThinAdapter(DistNNPModel):
         self._static_cache_ready = False
         self._static_cache: Dict[str, torch.Tensor] = {}
         self._atomic_number_lookup_by_device: Dict[str, torch.Tensor] = {}
-        self.last_owned_local_energy: Optional[torch.Tensor] = None
 
     @staticmethod
     def _validate_model_contract(model: Any) -> None:
@@ -611,11 +609,7 @@ class DistMACEThinAdapter(DistNNPModel):
             owned_forces = self._recover_forces(owned_energy, view)
         finally:
             self.runtime.end_forward()
-        self.last_owned_local_energy = owned_energy.detach().clone()
-        returned_energy = self.last_owned_local_energy.clone()
-        if dist.is_initialized() and dist.get_world_size() > 1:
-            dist.all_reduce(returned_energy, op=dist.ReduceOp.SUM)
-        return returned_energy, owned_forces.detach()
+        return owned_energy.detach(), owned_forces.detach()
 
 
 __all__ = [

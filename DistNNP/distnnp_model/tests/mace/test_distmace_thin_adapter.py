@@ -514,14 +514,10 @@ def assemble_forces(records: List[Dict[str, Any]], num_atoms: int) -> torch.Tens
 def run_distributed_adapter_step(prepared: PreparedExperiment) -> Tuple[float, torch.Tensor, List[Dict[str, Any]]]:
     try:
         energy, forces = prepared.adapter(prepared.state)
-        owned_local_energy = prepared.adapter.last_owned_local_energy
-        if owned_local_energy is None:
-            raise RuntimeError("Thin adapter did not record owned local energy diagnostics.")
         record = {
             "rank": dist.get_rank(),
             "local_global_indices": prepared.state.local_partition_info.partition_indices.long().cpu().tolist(),
-            "returned_global_energy": float(energy.cpu()),
-            "owned_local_energy": float(owned_local_energy.cpu()),
+            "owned_local_energy": float(energy.cpu()),
             "owned_local_forces": forces.detach().cpu().tolist(),
         }
         records = gather_records(record)
@@ -644,18 +640,7 @@ def build_summary(
 ) -> Dict[str, Any]:
     num_atoms = len(prepared.raw["atomic_numbers"])
     records = sorted(records, key=lambda item: item["rank"])
-    returned_global_energies = [float(item["returned_global_energy"]) for item in records]
-    distributed_energy = returned_global_energies[0]
-    returned_global_energy_consistent = all(
-        torch.isclose(
-            torch.tensor(energy, dtype=COMPUTE_DTYPE),
-            torch.tensor(distributed_energy, dtype=COMPUTE_DTYPE),
-            atol=args.atol,
-            rtol=args.rtol,
-        ).item()
-        for energy in returned_global_energies[1:]
-    )
-    summed_owned_local_energy = sum(item["owned_local_energy"] for item in records)
+    distributed_energy = sum(item["owned_local_energy"] for item in records)
     distributed_forces = assemble_forces(records, num_atoms)
     explicit_energy = float(explicit_reference["energy"])
     explicit_forces = explicit_reference["forces"].to(dtype=COMPUTE_DTYPE)
@@ -677,7 +662,7 @@ def build_summary(
     )
     classification = (
         "parity_ok"
-        if returned_global_energy_consistent and energy_close and force_close
+        if energy_close and force_close
         else "post_graph_model_mismatch"
     )
     explicit_energy_abs = abs(distributed_energy - explicit_energy)
@@ -695,8 +680,7 @@ def build_summary(
         "mismatch_classification": classification,
         "parity": {
             "distributed_energy": distributed_energy,
-            "returned_global_energy_consistent": returned_global_energy_consistent,
-            "summed_owned_local_energy": summed_owned_local_energy,
+            "summed_owned_local_energy": distributed_energy,
             "explicit_distnnp_graph_energy": explicit_energy,
             "calculator_mace_energy": calculator_energy,
             "core_model_mace_energy": core_model_energy,
@@ -768,8 +752,7 @@ def print_summary(summary: Dict[str, Any]) -> None:
     for record in summary["ranks"]:
         print(
             f"rank {record['rank']}: local_atoms={len(record['local_global_indices'])}, "
-            f"owned_local_energy={record['owned_local_energy']}, "
-            f"returned_global_energy={record['returned_global_energy']}"
+            f"owned_local_energy={record['owned_local_energy']}"
         )
     if "benchmark" in summary:
         benchmark = summary["benchmark"]

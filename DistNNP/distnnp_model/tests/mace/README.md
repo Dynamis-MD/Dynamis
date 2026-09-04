@@ -84,13 +84,16 @@ torchrun --nproc_per_node=2 \
 
 Trajectory validation:
 
+The trajectory workflow generates a deterministic, slightly perturbed 216-atom
+periodic diamond-Si supercell for the MPA-0 materials baseline.
+
 ```bash
 torchrun --nproc_per_node=2 \
   -m distnnp_model.tests.mace.run_distributed_trajectory \
-  --path ./tmp/mace_md_he
+  --path ./tmp/mace_md_si
 
 python -m distnnp_model.tests.mace.test_md \
-  --path ./tmp/mace_md_he
+  --path ./tmp/mace_md_si
 ```
 
 Trajectory validation with explicit script paths:
@@ -98,8 +101,8 @@ Trajectory validation with explicit script paths:
 ```bash
 torchrun --nproc_per_node=2 \
   distnnp_model/tests/mace/run_distributed_trajectory.py \
-  --path ./tmp/mace_md_he
+  --path ./tmp/mace_md_si
 
 python distnnp_model/tests/mace/test_md.py \
-  --path ./tmp/mace_md_he
+  --path ./tmp/mace_md_si
 ```
