@@ -29,6 +29,7 @@ except ImportError:
 from distnnp import Simulator
 from distnnp_integrator import Verlet
 from distnnp_model.nnp import UMAModel
+from distnnp_model.nnp.uma import _EV_PER_A_TO_AMU_A_PER_FS2
 from distnnp_model.potential import DistNNPModel
 from distnnp_state import TorchDistEnv
 
@@ -57,7 +58,7 @@ class LocalUMAModel(DistNNPModel):
         cell = sim_config.cell.detach().clone().cpu().numpy()
         pbc = sim_config.pbc.detach().clone().cpu().numpy()
         atoms = Atoms(atom_types, positions=atom_positions, cell=cell, pbc=pbc, info={"charge": 0, "spin": 1})
-        return torch.tensor(self.calc.get_potential_energy(atoms), device=self.device), torch.tensor(self.calc.get_forces(atoms), device=self.device)
+        return torch.tensor(self.calc.get_potential_energy(atoms) * _EV_PER_A_TO_AMU_A_PER_FS2, device=self.device), torch.tensor(self.calc.get_forces(atoms) * _EV_PER_A_TO_AMU_A_PER_FS2, device=self.device)
 
     def initialize_buffers(self, partition_info, device):
         pass
