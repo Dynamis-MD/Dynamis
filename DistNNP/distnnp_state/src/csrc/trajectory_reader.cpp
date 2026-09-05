@@ -29,7 +29,9 @@ int64_t resolve_frame_index(int64_t frame_index, uint64_t frame_count, const std
     return resolved;
 }
 
-bool xyz_opts_has_velocities(const std::vector<std::string>& opts) {
+// Validates the caller-supplied opts list, throwing on anything unusable, and
+// reports whether velocities were requested.
+bool validate_xyz_opts(const std::vector<std::string>& opts) {
     if (opts.empty()) return true; // default: everything present
     bool has_velocities = false;
     bool has_positions = false;
@@ -71,7 +73,10 @@ void write_xyz_frame(std::ostream& out, const MolecularInfo& state, torch::Tenso
         }
     }
     out << "\" ";
-    out << (has_velocities ? "Properties=species:S:1:pos:R:3:momenta:R:3 " : "Properties=species:S:1:pos:R:3 ");
+    // vel, not momenta: MolecularInfo stores velocities (A/fs), which is also
+    // what the integrators consume, so the column is labelled for what it is
+    // rather than as p = m*v.
+    out << "Properties=species:S:1:pos:R:3" << (has_velocities ? ":vel:R:3" : "") << " ";
     out << "pbc=\"" << (pbc_acc[0] ? "T" : "F") << ' ' << (pbc_acc[1] ? "T" : "F") << ' ' << (pbc_acc[2] ? "T" : "F") << "\"\n";
 
     if (has_velocities) {
@@ -352,6 +357,7 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> parse_xyz_block(std::ifs
     std::vector<std::string> tokens = tokenize_xyz_comment(line);
 
     int velocity_index = -1;
+    bool velocity_is_momenta = false; // momenta columns hold p = m*v, not v
     uint32_t current_index = 0;
     std::vector<float> cell_values;
     std::vector<uint8_t> pbc_values;
@@ -370,8 +376,12 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> parse_xyz_block(std::ifs
                 std::getline(opt, ty, ':');
                 std::getline(opt, count, ':');
 
-                if (name == "vel" || name == "momenta") {
+                if (name == "vel" || name == "velo" || name == "velocities") {
                     velocity_index = current_index;
+                    velocity_is_momenta = false;
+                } else if (name == "momenta") {
+                    velocity_index = current_index;
+                    velocity_is_momenta = true;
                 }
 
                 current_index += std::stoi(count);
@@ -419,7 +429,7 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> parse_xyz_block(std::ifs
             throw std::runtime_error("'" + path + "': unknown element symbol '" + element + "' in frame " +
                                       std::to_string(block_index));
         }
-        types.emplace_back(it->second);
+        types.emplace_back(it->second.number);
         try {
             positions.emplace_back(std::stof(xstr));
             positions.emplace_back(std::stof(ystr));
@@ -440,9 +450,12 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> parse_xyz_block(std::ifs
                 throw std::runtime_error("'" + path + "': malformed velocity in frame " + std::to_string(block_index) +
                                           ": '" + line + "'");
             }
-            velocities.emplace_back(std::stof(xstr));
-            velocities.emplace_back(std::stof(ystr));
-            velocities.emplace_back(std::stof(zstr));
+            // MolecularInfo stores velocities, so a momenta column has to be
+            // divided back through by this atom's mass (v = p / m).
+            float scale = velocity_is_momenta ? 1.0f / it->second.mass : 1.0f;
+            velocities.emplace_back(std::stof(xstr) * scale);
+            velocities.emplace_back(std::stof(ystr) * scale);
+            velocities.emplace_back(std::stof(zstr) * scale);
         }
     }
 
@@ -488,7 +501,7 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_molecular_info(cons
 
 void translate_distnnp_to_xyz(const std::string& distnnp_path, const std::string& xyz_path,
                                std::vector<std::string> opts) {
-    bool has_velocities = xyz_opts_has_velocities(opts);
+    bool has_velocities = validate_xyz_opts(opts);
 
     int fd = open(distnnp_path.c_str(), O_RDONLY);
     if (fd < 0) throw std::runtime_error("failed to open '" + distnnp_path + "': " + strerror(errno));

@@ -9,6 +9,7 @@ import torch.multiprocessing as mp
 import pytest
 
 from distnnp_state import MolecularInfo, TrajectoryReader, TrajectoryWriter, translate_distnnp_to_xyz
+from distnnp_state.masses import TORCH_ATOMIC_MASSES
 
 
 # ─── TrajectoryReader.read() ───────────────────────────────────────────────
@@ -32,6 +33,44 @@ def test_xyz_extended_io():
 
     assert torch.equal(torch.diag(torch.tensor([15.0, 30.0, 30.0])), cell)
     assert torch.equal(torch.ones(3, dtype=torch.uint8), pbc)
+
+
+def _two_atom_xyz(path, column):
+    path.write_text(
+        "2\n"
+        f'Lattice="5.0 0.0 0.0 0.0 5.0 0.0 0.0 0.0 5.0" Properties=species:S:1:pos:R:3:{column}:R:3 pbc="T T T"\n'
+        "C 0.0 1.0 2.0 0.5 1.5 2.5\n"
+        "H 3.0 4.0 5.0 3.5 4.5 5.5\n"
+    )
+    return path
+
+
+@pytest.mark.parametrize("column", ["vel", "velo", "velocities"])
+def test_xyz_velocity_column_aliases(tmp_path, column):
+    """Every velocity spelling is read straight into atom_velocities."""
+    xyz = _two_atom_xyz(tmp_path / f"{column}.xyz", column)
+
+    env, _, _ = TrajectoryReader.read(str(xyz))
+
+    assert torch.equal(torch.tensor([[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]]), env.atom_positions)
+    assert torch.equal(torch.tensor([[0.5, 1.5, 2.5], [3.5, 4.5, 5.5]]), env.atom_velocities)
+
+
+def test_xyz_momenta_column_divided_by_mass(tmp_path):
+    """A momenta column holds p = m*v, so it has to be divided back through by
+    each atom's mass to land in atom_velocities."""
+    xyz = _two_atom_xyz(tmp_path / "momenta.xyz", "momenta")
+
+    env, _, _ = TrajectoryReader.read(str(xyz))
+
+    carbon, hydrogen = TORCH_ATOMIC_MASSES[6], TORCH_ATOMIC_MASSES[1]
+    expected = torch.tensor([
+        [0.5 / carbon, 1.5 / carbon, 2.5 / carbon],
+        [3.5 / hydrogen, 4.5 / hydrogen, 5.5 / hydrogen],
+    ])
+
+    assert torch.equal(torch.tensor([[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]]), env.atom_positions)
+    assert torch.allclose(expected, env.atom_velocities)
 
 
 def test_xyz_io():
@@ -705,6 +744,8 @@ def test_translate_distnnp_to_xyz_multi_frame():
     for step in range(num_frames):
         block = lines[step * lines_per_frame:(step + 1) * lines_per_frame]
         assert int(block[0].strip()) == num_atoms
+        # vel, not momenta: MolecularInfo carries velocities (A/fs)
+        assert "Properties=species:S:1:pos:R:3:vel:R:3 " in block[1]
         for line in block[2:]:
             assert len(line.split()) == 7  # species + 3 pos + 3 vel
 
