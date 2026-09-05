@@ -55,11 +55,9 @@ namespace distnnp_integrator
     auto device_index = positions.device().index();
     auto stream = at::cuda::getCurrentCUDAStream(device_index);
 
-#ifdef DISTNNP_TIMING
     distnnp_state::Timer t;
     t.start("integrator_step", distnnp_state::TimerClass::Compute,
             distnnp_state::Where::Device, stream.stream());
-#endif
 
     euler_step_kernel<<<blocks, threads_per_block, 0, stream>>>(
         positions.data_ptr<float>(),
@@ -69,9 +67,7 @@ namespace distnnp_integrator
         dt,
         num_atoms);
 
-#ifdef DISTNNP_TIMING
     t.stop();
-#endif
 
     // Check for CUDA errors
     CUDACHECK(cudaGetLastError());

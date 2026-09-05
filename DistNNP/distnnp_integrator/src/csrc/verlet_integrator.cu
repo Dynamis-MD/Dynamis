@@ -61,11 +61,9 @@ namespace distnnp_integrator
     auto device_index = positions.device().index();
     auto stream = at::cuda::getCurrentCUDAStream(device_index);
 
-#ifdef DISTNNP_TIMING
     distnnp_state::Timer t;
     t.start("integrator_halfstep1", distnnp_state::TimerClass::Compute,
             distnnp_state::Where::Device, stream.stream());
-#endif
 
     verlet_halfstep1_kernel<<<blocks, threads_per_block, 0, stream>>>(
         positions.data_ptr<float>(),
@@ -75,9 +73,7 @@ namespace distnnp_integrator
         dt,
         num_floats);
 
-#ifdef DISTNNP_TIMING
     t.stop();
-#endif
 
     CUDACHECK(cudaGetLastError());
   }
@@ -103,11 +99,9 @@ namespace distnnp_integrator
     auto device_index = velocities.device().index();
     auto stream = at::cuda::getCurrentCUDAStream(device_index);
 
-#ifdef DISTNNP_TIMING
     distnnp_state::Timer t;
     t.start("integrator_halfstep2", distnnp_state::TimerClass::Compute,
             distnnp_state::Where::Device, stream.stream());
-#endif
 
     verlet_halfstep2_kernel<<<blocks, threads_per_block, 0, stream>>>(
         velocities.data_ptr<float>(),
@@ -116,9 +110,7 @@ namespace distnnp_integrator
         dt,
         num_floats);
 
-#ifdef DISTNNP_TIMING
     t.stop();
-#endif
 
     CUDACHECK(cudaGetLastError());
   }
