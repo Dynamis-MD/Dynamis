@@ -6,6 +6,8 @@
 #include <vector>
 #include <unistd.h>
 #include <cuda_runtime_api.h>
+#include <string_view>
+#include <type_traits>
 
 namespace distnnp_state {
 
@@ -19,13 +21,14 @@ class TimingRegistry {
 public:
     static TimingRegistry& instance();
 
-    void init(uint32_t rank, uint32_t local_rank, uint32_t world_size,
-              const std::string& run_id, int32_t device_id,
-              const std::string& output_dir);
-
     void set_level(Level level);
     bool enabled() const;
     void set_step(uint64_t step);
+
+#ifdef DISTNNP_TIMING
+    void init(uint32_t rank, uint32_t local_rank, uint32_t world_size,
+              const std::string& run_id, int32_t device_id,
+              const std::string& output_dir);
 
     // Called by Timer::stop() for host measurements. Writes the record to disk immediately.
     void append(const std::string& key, TimerClass cls, Where where, double time_us);
@@ -38,6 +41,13 @@ public:
     // Reads all pending device records (blocking on each stop event), writes them
     // to disk, writes the call_order footer, and closes the file.
     void flush();
+#else
+    void init(uint32_t, uint32_t, uint32_t, const std::string&, int32_t, const std::string&) {}
+    void append(const std::string&, TimerClass, Where, double) {}
+    void append_device(const std::string&, TimerClass, cudaEvent_t, cudaEvent_t) {}
+    void flush() {}
+#endif
+
 
 private:
     struct PendingDeviceRecord {
@@ -78,23 +88,33 @@ private:
 class Timer {
 public:
     Timer() = default;
-    ~Timer();
     Timer(const Timer&) = delete;
     Timer& operator=(const Timer&) = delete;
+
+#ifdef DISTNNP_TIMING
+    ~Timer();
 
     // `where` selects the measurement mechanism:
     //   Host   — std::chrono; right for CPU-bound or ATen work that syncs internally.
     //   Device — cudaEvent_t pair on `stream`; right for GPU kernels.
     //            Elapsed time is read at flush(), not at stop(), to avoid blocking.
-    void start(const std::string& key, TimerClass cls,
+    void start(std::string_view key, TimerClass cls,
                Where where = Where::Host, cudaStream_t stream = nullptr);
     void stop();
+#else
+    ~Timer() = default;
+
+    void start(std::string_view, TimerClass,
+               Where = Where::Host, cudaStream_t = nullptr) {}
+    void stop() {}
+#endif
 
     static void set_level(Level lvl) { TimingRegistry::instance().set_level(lvl); }
     static bool enabled()            { return TimingRegistry::instance().enabled(); }
     static void set_step(uint64_t s) { TimingRegistry::instance().set_step(s); }
 
 private:
+#ifdef DISTNNP_TIMING
     std::string key;
     TimerClass cls { TimerClass::Other };
     Where where { Where::Host };
@@ -108,6 +128,14 @@ private:
     cudaEvent_t ev_start { nullptr };
     cudaEvent_t ev_stop { nullptr };
     cudaStream_t stream { nullptr };
+#endif
 };
+
+#ifndef DISTNNP_TIMING
+static_assert(std::is_empty_v<Timer>,
+              "Timer must have no members when DISTNNP_TIMING is off");
+static_assert(std::is_trivially_destructible_v<Timer>,
+              "Timer must be trivially destructible when DISTNNP_TIMING is off");
+#endif
 
 } // namespace distnnp_state
