@@ -1,6 +1,6 @@
 """
 Consolidate timing_rank{N}.jsonl files from the 1/2/4 GPU UMA/CH450 timing
-sweep (run_timing_sweep.sh) into a single markdown scaling table.
+sweep (see main.py) into a single markdown scaling table.
 
 Self-time model
 ----------------

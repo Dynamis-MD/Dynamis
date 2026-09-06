@@ -8,8 +8,14 @@ so halo_exchange_wait is recorded separately from halo_exchange). This is the
 first step of testing_plan.md — once this is working, a larger system
 (experiments/exp_datasets/) replaces ch450.xyz for the real scaling study.
 
-Launch with torchrun (see run_timing_sweep.sh for the 1/2/4 GPU sweep):
+Launch with torchrun:
     torchrun --standalone --nproc_per_node=<N> main.py --output-dir results/timing/<N>gpu
+
+For the full sweep, run that once per GPU count and consolidate:
+    for N in 1 2 4; do
+        torchrun --standalone --nproc_per_node=$N main.py --output-dir results/timing/${N}gpu
+    done
+    python build_report.py --results-dir results/timing --gpu-counts 1 2 4
 """
 import argparse
 import os
