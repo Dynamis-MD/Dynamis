@@ -35,6 +35,8 @@ from distnnp_state import (
     radius_graph_pbc_cuda,
 )
 
+_EV_PER_A_TO_AMU_A_PER_FS2 = 0.0096485332
+
 def balance_channels_batched(
     emb: torch.Tensor,
     target: torch.Tensor,
@@ -599,6 +601,10 @@ class MaskedHeadWrapper(nn.Module):
     def forward(
         self, data: AtomicData, emb: dict[str, torch.Tensor]
     ) -> dict[str, torch.Tensor]:
+        prefix = getattr(self.original_head, "prefix", None)
+        energy_key = f"{prefix}_energy" if prefix else "energy"
+        forces_key = f"{prefix}_forces" if prefix else "forces"
+
         # 2. Fix ONLY the output scalar energy for distributed parity
         if "num_local" in data:
             outputs = {}
@@ -618,16 +624,12 @@ class MaskedHeadWrapper(nn.Module):
                 local_energy = local_energy / num_local
 
             # Safely overwrite the returned energy scalar in the outputs dictionary
-            prefix = getattr(self.original_head, "prefix", None)
-            energy_key = f"{prefix}_energy" if prefix else "energy"
-            forces_key = f"{prefix}_forces" if prefix else "forces"
-
             outputs[energy_key] = local_energy
 
             if data.pos.requires_grad:
                 # Calculate gradient of masked energy w.r.t all positions (local + ghost)
                 correct_forces = -1 * torch.autograd.grad(
-                    local_energy, 
+                    local_energy,
                     data.pos, 
                     # create_graph=self.training, # Retain graph if training
                     # retain_graph=True
@@ -635,6 +637,9 @@ class MaskedHeadWrapper(nn.Module):
                 outputs[forces_key] = correct_forces
         else:
             outputs = self.original_head(data, emb)
+            outputs[energy_key] = outputs[energy_key]
+            if forces_key in outputs:
+                outputs[forces_key] = outputs[forces_key]
         return outputs
 
 class UMAModel(DistNNPModel):
@@ -854,8 +859,8 @@ class UMAModel(DistNNPModel):
         self.predictor.move_to_device()
         pred = self.predict(data)
 
-        energy = pred[f"{datasets}_energy"]
-        forces = pred[f"{datasets}_forces"]
+        energy = pred[f"{datasets}_energy"] * _EV_PER_A_TO_AMU_A_PER_FS2
+        forces = pred[f"{datasets}_forces"] * _EV_PER_A_TO_AMU_A_PER_FS2
 
         dummy_local = torch.zeros((num_local, 3), device=device, requires_grad=True)
         dummy_full = FeaturePushToExchange.apply(
@@ -864,8 +869,4 @@ class UMAModel(DistNNPModel):
         dummy_full.backward(forces)
         local_forces = dummy_local.grad
         return energy.detach(), local_forces.detach()
-
-        # stress = pred[calc_key].detach().cpu().numpy().reshape(3, 3)
-        # hessian = pred[calc_key].detach().cpu().numpy().squeeze()
-
         return energy.detach(), forces.detach()
