@@ -24,6 +24,17 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+plt.rcParams["font.family"] = "serif"
+
+
+def _finish_ax(ax):
+    """Shared paper-quality axis styling: no top/right spine, dashed grid
+    behind the data, ticks below the default weight."""
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(alpha=0.35, linestyle="--")
+    ax.set_axisbelow(True)
+
 ENGINES = ["distnnp-uma", "distnnp-uma-opt", "fairchem-uma", "lammps-mace"]
 ENGINE_LABEL = {
     "distnnp-uma": "DistNNP-UMA",
@@ -133,11 +144,11 @@ def strong_scaling(rows, out_dir):
                      color=COLOR[eng], alpha=0.35)
     for ax, ylab in ((ax1, "steps / s"), (ax2, "ns / day")):
         ax.set_xlabel("GPUs"); ax.set_ylabel(ylab); ax.set_xticks([1, 2, 4])
-        ax.grid(alpha=0.3); ax.legend()
-    fig.suptitle("Strong scaling — fixed system size")
+        _finish_ax(ax); ax.legend(frameon=False)
+    fig.suptitle("Strong Scaling — Fixed System Size")
     fig.tight_layout()
     p = os.path.join(out_dir, "strong_scaling.png")
-    fig.savefig(p, dpi=130); plt.close(fig); print(f"wrote {p}")
+    fig.savefig(p, dpi=300, bbox_inches="tight"); plt.close(fig); print(f"wrote {p}")
 
 
 def fill_scaling(rows, out_dir, atoms_per_rank=32000, tol=0.15):
@@ -174,15 +185,15 @@ def fill_scaling(rows, out_dir, atoms_per_rank=32000, tol=0.15):
             ax2.plot([m[0] for m in mem], [m[1] / 1024 for m in mem], "o-",
                      color=COLOR[eng], label=ENGINE_LABEL[eng])
     ax1.set_xlabel("total atoms"); ax1.set_ylabel("steps / s")
-    ax1.set_title(f"Fill scaling — ~{atoms_per_rank // 1000}k atoms/GPU "
+    ax1.set_title(f"Fill Scaling — ~{atoms_per_rank // 1000}k Atoms/GPU\n"
                   "(dashed = ideal)")
     ax2.set_xlabel("total atoms"); ax2.set_ylabel("peak mem / rank (GB)")
-    ax2.set_title("Peak memory at high fill")
+    ax2.set_title("Peak Memory at High Fill")
     for ax in (ax1, ax2):
-        ax.grid(alpha=0.3); ax.legend()
+        _finish_ax(ax); ax.legend(frameon=False)
     fig.tight_layout()
     p = os.path.join(out_dir, "fill_scaling.png")
-    fig.savefig(p, dpi=130); plt.close(fig); print(f"wrote {p}")
+    fig.savefig(p, dpi=300, bbox_inches="tight"); plt.close(fig); print(f"wrote {p}")
 
 
 def oom_ceiling(rows, out_dir):
@@ -195,7 +206,8 @@ def oom_ceiling(rows, out_dir):
                            if r["engine"] == eng and r.get("status") == "ok"
                            and (r.get("steps_per_sec") or 0) > 0)
         max_atoms = max(completed) if completed else 0
-        ax1.bar(ENGINE_LABEL[eng], max_atoms, color=COLOR[eng])
+        ax1.bar(ENGINE_LABEL[eng], max_atoms, color=COLOR[eng],
+                edgecolor="black", linewidth=0.8)
         # peak mem: connect the cells that COMPLETED; mark OOM cells with an x
         # (their sample is the pre-kill high-water mark, i.e. the ceiling).
         ok_mem = sorted((r["num_atoms"], r["peak_mem_mb_max"])
@@ -212,12 +224,14 @@ def oom_ceiling(rows, out_dir):
                      color=COLOR[eng], alpha=0.6,
                      label=None if ok_mem else f"{ENGINE_LABEL[eng]} (OOM)")
     ax1.set_ylabel("max atoms completed (4 GPU)")
-    ax1.set_title("OOM ceiling")
+    ax1.set_title("OOM Ceiling")
+    ax1.tick_params(axis="x", rotation=20)
     ax2.set_xlabel("total atoms"); ax2.set_ylabel("peak mem / rank (MB)")
-    ax2.set_title("Peak memory vs system size"); ax2.grid(alpha=0.3); ax2.legend()
+    ax2.set_title("Peak Memory vs System Size")
+    _finish_ax(ax1); _finish_ax(ax2); ax2.legend(frameon=False)
     fig.tight_layout()
     p = os.path.join(out_dir, "oom_ceiling.png")
-    fig.savefig(p, dpi=130); plt.close(fig); print(f"wrote {p}")
+    fig.savefig(p, dpi=300, bbox_inches="tight"); plt.close(fig); print(f"wrote {p}")
 
 
 def _sps(r):
