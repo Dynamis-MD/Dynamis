@@ -76,7 +76,6 @@ def test_uma_distributed_parity():
     global_mol.atom_types = global_atomic_numbers
     global_mol.atom_positions = global_positions
     global_mol.atom_velocities = torch.zeros((total_atoms, 3), device=device)
-    global_mol.atom_forces = torch.zeros((total_atoms, 3), device=device)
 
     sim_config = SimulationConfig()
     sim_config.cell = global_cell
@@ -106,9 +105,6 @@ def test_uma_distributed_parity():
         partition_info.partition_indices
     ]
     n_local = local_mol.atom_positions.shape[0]
-    local_mol.atom_forces = global_mol.atom_forces[
-        partition_info.partition_indices
-    ]
     local_mol.num_atoms = n_local
     
     state = DistNNPState()
@@ -158,7 +154,8 @@ def test_uma_distributed_parity():
         # Fairchem Backbone Output
         predictor.move_to_device()
         pred = predictor.predict(data)
-        global_energy, global_forces = pred["energy"], pred["forces"]
+        from distnnp_model.nnp.uma import _EV_PER_A_TO_AMU_A_PER_FS2
+        global_energy, global_forces = pred["energy"] * _EV_PER_A_TO_AMU_A_PER_FS2, pred["forces"] * _EV_PER_A_TO_AMU_A_PER_FS2
 
     # ==========================================
     # 5. Forward & Backward Pass: DISTRIBUTED MODEL
@@ -176,7 +173,7 @@ def test_uma_distributed_parity():
         print(f"Energy from distributed model: {local_energy.item()}, global energy: {global_energy}")
         torch.testing.assert_close(
             local_energy.item(), global_energy.item(),
-            rtol=1e-4, atol=1e-4, # Use generous tolerance for reduction ordering differences
+            rtol=1e-6, atol=1e-6, # Use generous tolerance for reduction ordering differences
             msg="Distributed total energy does not match Standard model energy!"
         )
         print("Energy Parity Passed!")
@@ -203,7 +200,7 @@ def test_uma_distributed_parity():
 
         torch.testing.assert_close(
             reconstructed_global_forces, global_forces,
-            rtol=1e-4, atol=1e-4,
+            rtol=1e-6, atol=5e-6,
             msg="Distributed forces do not match Standard model forces!"
         )
         print("Forces Parity Passed!")
