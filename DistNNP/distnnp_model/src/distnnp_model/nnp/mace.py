@@ -1,4 +1,4 @@
-"""Thin distributed MACE adapter focused on steady-state execution.
+"""Distributed MACE model focused on steady-state execution.
 
 This adapter keeps the current DistNNP + MACE algorithm intact:
 
@@ -9,8 +9,8 @@ This adapter keeps the current DistNNP + MACE algorithm intact:
 * Learned node features are exchanged after every non-final product block.
 * Forces are recovered from the owned local energy via autograd.
 
-Unlike the full adapter, this file intentionally excludes diagnostics, debug
-tracing, observations, and execution modes from the hot path.
+This implementation intentionally excludes diagnostics, debug tracing,
+observations, and execution modes from the hot path.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
 
 def _require_mace() -> None:
     if _MACE_IMPORT_ERROR is not None:
-        raise ImportError("The thin DistMACE adapter requires the MACE package.") from _MACE_IMPORT_ERROR
+        raise ImportError("MACEModel requires the MACE package.") from _MACE_IMPORT_ERROR
 
 
 def load_raw_mace_model(
@@ -70,7 +70,31 @@ def canonicalize_nonperiodic_geometry(
     pbc: torch.Tensor,
     padding: float,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Place nonperiodic coordinates inside an orthorhombic padded cell."""
+    """Prepare nonperiodic coordinates for DistNNP's CUDA radius-graph path.
+
+    ``radius_graph_pbc_cuda`` is the single graph-construction authority for
+    DistNNP models, including :class:`MACEModel`.  Even when an axis is
+    nonperiodic, its CUDA cell-list implementation still needs a valid cell
+    containing every coordinate.  Raw molecular inputs commonly omit that cell
+    or contain coordinates outside it, which can produce an invalid cell-list
+    view before MACE receives the graph.
+
+    This input-preparation helper translates each nonperiodic axis so its
+    minimum coordinate is ``padding`` and enlarges the corresponding diagonal
+    cell length to enclose the structure with that margin on both sides.  It
+    does not construct a second neighbor graph, change DistNNP ownership, or
+    introduce periodic images: the original ``pbc`` flags are returned
+    unchanged and must still be passed to DistNNP.  Periodic axes must already
+    have valid cell vectors; this helper does not repair or wrap them.
+
+    Use it once while preparing a static nonperiodic structure, before
+    partitioning and halo-map construction.  Fully periodic inputs are returned
+    unchanged.  Mixed or nonperiodic triclinic cells are rejected because this
+    coordinate-space adjustment is only defined for orthorhombic cells.
+
+    Returns:
+        The translated positions, adjusted cell, and applied translation.
+    """
     positions = positions.to(dtype=COMPUTE_DTYPE)
     cell = cell.reshape(3, 3).to(device=positions.device, dtype=COMPUTE_DTYPE)
     pbc = pbc.reshape(3).to(device=positions.device, dtype=torch.bool)
@@ -179,7 +203,7 @@ def resolve_model_head_index(model: Any, requested_head_name: Optional[str] = No
 
 
 @dataclass
-class ThinStructuralView:
+class MACEStructuralView:
     local_positions: torch.Tensor
     exchanged_positions: torch.Tensor
     num_local: int
@@ -187,7 +211,7 @@ class ThinStructuralView:
 
 
 @dataclass
-class ThinOwnedGraph:
+class MACEOwnedGraph:
     edge_index: torch.Tensor
     unit_shifts: torch.Tensor
     shifts: torch.Tensor
@@ -206,8 +230,8 @@ class _RadiusGraphInput:
 #End of utility functions
 ##===================================================
 
-class ThinDistScaleShiftMACERuntime(torch.nn.Module):
-    """Explicit runtime wrapper for the lean distributed MACE forward path."""
+class MACEScaleShiftRuntime(torch.nn.Module):
+    """Explicit runtime wrapper for the distributed MACE forward path."""
 
     def __init__(self, model: torch.nn.Module) -> None:
         super().__init__()
@@ -243,7 +267,7 @@ class ThinDistScaleShiftMACERuntime(torch.nn.Module):
         state: DistNNPState,
     ) -> None:
         if node_feats.dim() != 2:
-            raise ValueError("The thin DistMACE runtime expects 2-D node features.")
+            raise ValueError("The MACE runtime expects 2-D node features.")
         feature_width = int(node_feats.shape[-1])
         if self._feature_width is None:
             self._feature_width = feature_width
@@ -314,7 +338,7 @@ class ThinDistScaleShiftMACERuntime(torch.nn.Module):
         num_layers = len(self.model.interactions)
         if num_readouts not in (1, num_layers):
             raise TypeError(
-                "Thin DistMACE runtime expects either one final readout or one readout per "
+                "The MACE runtime expects either one final readout or one readout per "
                 f"interaction layer; got num_readouts={num_readouts}, num_layers={num_layers}."
             )
         for layer_index, (interaction, product) in enumerate(
@@ -346,7 +370,7 @@ class ThinDistScaleShiftMACERuntime(torch.nn.Module):
         node_energy = node_e0 + node_inter_es
         state = self._state
         if state is None:
-            raise RuntimeError("Thin DistMACE runtime requires an active DistNNPState.")
+            raise RuntimeError("The MACE runtime requires an active DistNNPState.")
         num_local = int(state.local_molecular_info.num_atoms)
         owned_node_energy = node_energy.reshape(-1)[:num_local]
         return {
@@ -357,8 +381,8 @@ class ThinDistScaleShiftMACERuntime(torch.nn.Module):
         #can experiment with this enabled to verify if speedup caused by this removal?
 
 
-class DistMACEThinAdapter(DistNNPModel):
-    """Thin MP/MPA-oriented explicit-graph MACE adapter."""
+class MACEModel(DistNNPModel):
+    """MP/MPA-oriented explicit-graph MACE model."""
 
     def __init__(
         self,
@@ -373,7 +397,7 @@ class DistMACEThinAdapter(DistNNPModel):
         self.head_name = resolve_model_head_name(self.model, head_name)
         self.atomic_number_map = dict(atomic_number_map or {})
         self.cutoff = float(self.model.r_max.detach().cpu().item())
-        self.runtime = ThinDistScaleShiftMACERuntime(self.model)
+        self.runtime = MACEScaleShiftRuntime(self.model)
         self.position_exchanger = GPUDirectExchanger()
         self.atom_type_exchanger = GPUDirectExchanger()
         self.exchange_enabled = False
@@ -401,12 +425,12 @@ class DistMACEThinAdapter(DistNNPModel):
         missing = [name for name in required_attrs if not hasattr(model, name)]
         if missing:
             raise TypeError(
-                "DistMACEThinAdapter targets MP/MPA-style ScaleShiftMACE-compatible "
+                "MACEModel targets MP/MPA-style ScaleShiftMACE-compatible "
                 f"models. Missing required attributes: {', '.join(missing)}."
             )
         if ScaleShiftMACE is not None and not isinstance(model, ScaleShiftMACE):
             raise TypeError(
-                "DistMACEThinAdapter currently supports ScaleShiftMACE-compatible checkpoints."
+                "MACEModel currently supports ScaleShiftMACE-compatible checkpoints."
             )
         num_layers = len(getattr(model, "interactions"))
         if num_layers != len(getattr(model, "products")):
@@ -489,7 +513,7 @@ class DistMACEThinAdapter(DistNNPModel):
         if not self._current_partition_is_initialized(state):
             raise RuntimeError(
                 "Partition buffers are stale for the current DistNNPState. Call initialize_buffers() "
-                "after repartition before using DistMACEThinAdapter."
+                "after repartition before using MACEModel."
             )
         local_types = state.local_molecular_info.atom_types.to(torch.long)
         local_global = state.local_partition_info.partition_indices.long()
@@ -526,7 +550,7 @@ class DistMACEThinAdapter(DistNNPModel):
         }
         self._static_cache_ready = True
 
-    def _build_structural_view(self, state: DistNNPState) -> ThinStructuralView:
+    def _build_structural_view(self, state: DistNNPState) -> MACEStructuralView:
         self._build_static_partition_cache(state)
         local_positions = (
             state.local_molecular_info.atom_positions.detach()
@@ -545,7 +569,7 @@ class DistMACEThinAdapter(DistNNPModel):
         expected_total = int(self._static_cache["expected_total"].item())
         if exchanged_positions.shape[0] != expected_total:
             raise ValueError("Structural rows disagree with DistNNP recv metadata.")
-        return ThinStructuralView(
+        return MACEStructuralView(
             local_positions=local_positions,
             exchanged_positions=exchanged_positions,
             num_local=int(self._static_cache["num_local"].item()),
@@ -567,7 +591,7 @@ class DistMACEThinAdapter(DistNNPModel):
             )
         return edge_index.long(), -cell_offsets
 
-    def _build_owned_graph(self, view: ThinStructuralView, state: DistNNPState) -> ThinOwnedGraph:
+    def _build_owned_graph(self, view: MACEStructuralView, state: DistNNPState) -> MACEOwnedGraph:
         edge_index, unit_shifts = self._radius_graph(view.exchanged_positions, state)
         owned_destination = edge_index[1] < view.num_local
         edge_index = edge_index[:, owned_destination].contiguous()
@@ -589,12 +613,12 @@ class DistMACEThinAdapter(DistNNPModel):
             key: value.to(COMPUTE_DTYPE) if torch.is_floating_point(value) else value
             for key, value in batch_dict.items()
         }
-        return ThinOwnedGraph(edge_index=edge_index, unit_shifts=unit_shifts, shifts=shifts, batch_dict=batch_dict)
+        return MACEOwnedGraph(edge_index=edge_index, unit_shifts=unit_shifts, shifts=shifts, batch_dict=batch_dict)
 
     @staticmethod
     def _recover_forces(
         owned_energy: torch.Tensor,
-        view: ThinStructuralView,
+        view: MACEStructuralView,
     ) -> torch.Tensor:
         (local_grad,) = torch.autograd.grad(owned_energy, [view.local_positions], allow_unused=False)
         return -local_grad
@@ -614,8 +638,8 @@ class DistMACEThinAdapter(DistNNPModel):
 
 __all__ = [
     "COMPUTE_DTYPE",
-    "DistMACEThinAdapter",
-    "ThinDistScaleShiftMACERuntime",
+    "MACEModel",
+    "MACEScaleShiftRuntime",
     "canonicalize_nonperiodic_geometry",
     "load_raw_mace_model",
     "resolve_model_head_index",

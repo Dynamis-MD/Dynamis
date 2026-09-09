@@ -1,8 +1,5 @@
-"""Core exports for distnnp_model.
-
-Keep this file limited to symbols needed by lower-level modules so the MACE
-top-down adapter can import the communication layer without recursing back
-through optional adapter packages.
+"""
+Core exports for distnnp_model.
 """
 
 from distnnp_model.potential import DistNNPModel

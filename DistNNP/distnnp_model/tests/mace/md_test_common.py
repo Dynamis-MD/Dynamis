@@ -1,9 +1,9 @@
 """
-Shared helpers for thin-adapter MACE trajectory validation.
+Shared helpers for MACEModel trajectory validation.
 
 This module carries over the model-agnostic orchestration and comparison logic
-from the UMA trajectory checks. It supports both the distributed thin-adapter
-producer and singleton thin or public-calculator reference models.
+from the UMA trajectory checks. It supports both the distributed MACEModel
+producer and singleton MACEModel or public-calculator reference models.
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ import torch
 import torch.distributed as dist
 
 from distnnp import SimulatorConfig
-from distnnp_model.nnp.MACE_Adaptation.distmace_thin_adapter import (
-    DistMACEThinAdapter,
+from distnnp_model.nnp.mace import (
+    MACEModel,
     load_raw_mace_model,
 )
 
@@ -247,14 +247,14 @@ def teardown_singleton_dist_env() -> None:
 
 
 class MACEForceUnitConversionAdapter:
-    """Expose a thin MACE adapter with forces in DistNNP integration units.
+    """Expose MACEModel with forces in DistNNP integration units.
 
     This is deliberately trajectory-test-only: static MACE parity tests compare
     raw MACE eV/Angstrom forces. The potential energy remains in eV; only the
     force handed to the amu/Angstrom/fs Verlet integrator is converted.
     """
 
-    def __init__(self, adapter: DistMACEThinAdapter) -> None:
+    def __init__(self, adapter: MACEModel) -> None:
         self._adapter = adapter
 
     @property
@@ -272,7 +272,7 @@ class MACEForceUnitConversionAdapter:
         return energy_ev, forces_amu_angstrom_per_fs2
 
 
-def build_thin_mace_model(
+def build_mace_model(
     device: torch.device,
     model: str = "medium-mpa-0",
     head_name: Optional[str] = None,
@@ -288,7 +288,7 @@ def build_thin_mace_model(
             f"{spec['symbol']} (atomic number {spec['atomic_number']}). Supported atomic numbers: "
             f"{sorted(supported_atomic_numbers)}"
         )
-    adapter = DistMACEThinAdapter(raw_model.to(device=device).eval(), head_name=head_name or None)
+    adapter = MACEModel(raw_model.to(device=device).eval(), head_name=head_name or None)
     return MACEForceUnitConversionAdapter(adapter)
 
 
@@ -297,7 +297,7 @@ class MonolithicMACECalculatorAdapter:
 
     This reference path is intentionally restricted to a singleton simulation:
     ASE receives the complete system and performs MACE-native graph construction,
-    independently of the thin adapter's distributed graph and feature exchange.
+    independently of MACEModel's distributed graph and feature exchange.
     """
 
     def __init__(self, calculator, cutoff: float, device: torch.device) -> None:
@@ -736,7 +736,7 @@ def reference_vs_reference_check(
         env = real_singleton_torch_dist_env()
         try:
             dist_env = env.dist_env
-            adapter = build_thin_mace_model(
+            adapter = build_mace_model(
                 device=env.device,
                 model=model,
                 head_name=head_name,

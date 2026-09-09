@@ -1,5 +1,5 @@
 """
-Run the distributed thin-adapter MACE simulation and write a merged trajectory.
+Run the distributed MACEModel simulation and write a merged trajectory.
 
 Usage:
     torchrun --nproc_per_node=2 distnnp_model/tests/mace/run_distributed_trajectory.py --path <temp dir path>
@@ -23,7 +23,7 @@ if __package__:
         SEED,
         N_STEPS,
         REBALANCE_INTERVAL,
-        build_thin_mace_model,
+        build_mace_model,
         ensure_test_structure,
         install_trajectory_simulator_import_compatibility,
         make_config,
@@ -35,7 +35,7 @@ else:
         SEED,
         N_STEPS,
         REBALANCE_INTERVAL,
-        build_thin_mace_model,
+        build_mace_model,
         ensure_test_structure,
         install_trajectory_simulator_import_compatibility,
         make_config,
@@ -69,7 +69,7 @@ def main() -> None:
         dist.barrier()
 
         torch.manual_seed(SEED)
-        model = build_thin_mace_model(
+        model = build_mace_model(
             device=torch_dist_env.device,
             model=args.model,
             head_name=args.head_name or None,
@@ -127,7 +127,7 @@ def main() -> None:
                     "step_count": N_STEPS,
                     "rebalance_interval": REBALANCE_INTERVAL,
                     "world_size": dist_env.world_size,
-                    "adapter_identity": "DistMACEThinAdapter",
+                    "adapter_identity": "MACEModel",
                     "force_unit": "amu*angstrom/fs^2",
                 },
                 "frames": merged,

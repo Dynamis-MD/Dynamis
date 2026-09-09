@@ -11,11 +11,14 @@ requires-python = ">=3.8"
 dependencies = []
 
 [project.optional-dependencies]
+mace = [
+    "mace-torch==0.3.16"
+]
 uma = [
     "fairchem-core"
 ]
 all = [
-    "distnnp_model[uma]"
+    "distnnp_model[uma,mace]"
 ]
 
 [tool.scikit-build]

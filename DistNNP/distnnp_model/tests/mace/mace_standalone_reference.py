@@ -1,4 +1,4 @@
-"""Detached standalone MACE reference writer for thin DistMACE benchmarks.
+"""Detached standalone MACE reference writer for MACEModel benchmarks.
 
 This driver avoids DistNNP partitioning and DistNNP graph construction. It
 records two monolithic baselines:
@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-from distnnp_model.nnp.MACE_Adaptation.distmace_thin_adapter import (
+from distnnp_model.nnp.mace import (
     COMPUTE_DTYPE,
     canonicalize_nonperiodic_geometry,
     load_raw_mace_model,
@@ -289,7 +289,7 @@ def build_core_model_batch(
         cell=np.asarray(raw["cell"], dtype=np.float32),
         pbc=tuple(raw["pbc"]),
         weight=1.0,
-        config_type="DistMACEThin_core_model_reference",
+        config_type="DistNNP_MACEModel_core_model_reference",
         head=resolved_head,
     )
     model_heads = list(getattr(model, "heads", []))

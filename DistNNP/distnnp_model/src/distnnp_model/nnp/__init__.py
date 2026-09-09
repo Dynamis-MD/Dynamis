@@ -1,17 +1,19 @@
-"""NNP exports for the current MACE top-down adapter workflow.
+"""
+Optional neural-network potential models for DistNNP.
 
-This subpackage intentionally avoids UMA and other optional model imports so
-MACE-only runs do not require fairchem-core or legacy adapter files.
+Adapter imports are resolved lazily so MACE and UMA can be installed and used
+independently.
 """
 
-from distnnp_model.nnp.MACE_Adaptation.distmace_thin_adapter import (
-    DistMACEThinAdapter,
-)
+from importlib import import_module
+from typing import Any
 
-__all__ = [
-    "COMPUTE_DTYPE",
-    "DistMACEThinAdapter",
-    "canonicalize_nonperiodic_geometry",
-    "load_raw_mace_model",
-    "validate_partition_info",
-]
+__all__ = ["MACEModel", "UMAModel"]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "MACEModel":
+        return import_module("distnnp_model.nnp.mace").MACEModel
+    if name == "UMAModel":
+        return import_module("distnnp_model.nnp.uma").UMAModel
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

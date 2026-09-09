@@ -1,7 +1,7 @@
 """
-Run a world-size=1 MACE reference simulation and compare it against a thin-
-adapter trajectory written by run_distributed_trajectory.py. The reference can
-use either the thin adapter or MACE's independent public ASE calculator.
+Run a world-size=1 MACE reference simulation and compare it against a MACEModel
+trajectory written by run_distributed_trajectory.py. The reference can use
+either MACEModel or MACE's independent public ASE calculator.
 
 Usage:
     python distnnp_model/tests/mace/test_md.py --path <temp dir path>
@@ -24,7 +24,7 @@ if __package__:
         N_STEPS,
         REBALANCE_INTERVAL,
         build_monolithic_mace_model,
-        build_thin_mace_model,
+        build_mace_model,
         compare_trajectories,
         ensure_test_structure,
         install_trajectory_simulator_import_compatibility,
@@ -40,7 +40,7 @@ else:
         N_STEPS,
         REBALANCE_INTERVAL,
         build_monolithic_mace_model,
-        build_thin_mace_model,
+        build_mace_model,
         compare_trajectories,
         ensure_test_structure,
         install_trajectory_simulator_import_compatibility,
@@ -60,11 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-family", default="mp", choices=["mp", "off", "omol", "polar"])
     parser.add_argument(
         "--reference-mode",
-        choices=["thin", "monolithic"],
+        choices=["mace", "monolithic"],
         default="monolithic",
         help=(
             "Singleton reference implementation. 'monolithic' is the acceptance oracle; "
-            "'thin' is retained only for explicit developer comparisons."
+            "'mace' is retained only for explicit developer comparisons."
         ),
     )
     return parser
@@ -88,7 +88,7 @@ def main() -> None:
         model_factory = (
             build_monolithic_mace_model
             if args.reference_mode == "monolithic"
-            else build_thin_mace_model
+            else build_mace_model
         )
         model = model_factory(
             device=torch_dist_env.device,
@@ -123,7 +123,7 @@ def main() -> None:
             "step_count": N_STEPS,
             "rebalance_interval": REBALANCE_INTERVAL,
             "world_size": 2,
-            "adapter_identity": "DistMACEThinAdapter",
+            "adapter_identity": "MACEModel",
             "force_unit": "amu*angstrom/fs^2",
         }
         if artifact["metadata"] != expected_metadata:

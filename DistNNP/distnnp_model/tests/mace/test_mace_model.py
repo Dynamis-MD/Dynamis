@@ -1,6 +1,6 @@
-"""Distributed torchrun driver and pytest entrypoints for the thin DistMACE adapter.
+"""Distributed torchrun driver and pytest entrypoints for MACEModel.
 
-This file owns only the distributed adapter path. Standalone monolithic MACE
+This file owns only the distributed MACEModel path. Standalone monolithic MACE
 reference generation lives in ``mace_standalone_reference.py`` so that the
 standalone baseline can be exercised without DistNNP graph construction in the
 same driver.
@@ -25,9 +25,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.distributed as dist
 
-from distnnp_model.nnp.MACE_Adaptation.distmace_thin_adapter import (
+from distnnp_model.nnp.mace import (
     COMPUTE_DTYPE,
-    DistMACEThinAdapter,
+    MACEModel,
     canonicalize_nonperiodic_geometry,
     load_raw_mace_model,
     resolve_model_head_index,
@@ -62,7 +62,7 @@ class PreparedExperiment:
     raw: Dict[str, Any]
     sim: SimulationConfig
     state: DistNNPState
-    adapter: DistMACEThinAdapter
+    adapter: MACEModel
     device: torch.device
     model_id: Dict[str, Any]
 
@@ -104,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     distributed_parser = subparsers.add_parser(
         "run-distributed",
-        help="Run the thin distributed adapter and compare against a detached standalone reference artifact.",
+        help="Run distributed MACEModel and compare against a detached standalone reference artifact.",
     )
     distributed_parser.add_argument("--builtin-system", choices=BUILTIN_SYSTEMS, default="natural_chain12")
     distributed_parser.add_argument("--xyz-path", type=Path, help="XYZ/extxyz input; overrides --builtin-system.")
@@ -455,15 +455,15 @@ def resolve_reference_artifact_path(args: argparse.Namespace) -> Path:
     if args.reference_artifact is not None:
         return args.reference_artifact
     env_candidates = [
-        os.environ.get("DISTMACE_THIN_REFERENCE_ARTIFACT"),
-        os.environ.get("DISTMACE_THIN_REFERENCE_DEFAULT_ARTIFACT"),
+        os.environ.get("DISTMACE_REFERENCE_ARTIFACT"),
+        os.environ.get("DISTMACE_REFERENCE_DEFAULT_ARTIFACT"),
     ]
     for candidate in env_candidates:
         if candidate:
             return Path(candidate)
     raise ValueError(
         "run-distributed requires --reference-artifact. "
-        "For pytest parity runs, set DISTMACE_THIN_REFERENCE_ARTIFACT or a test-specific artifact env var."
+        "For pytest parity runs, set DISTMACE_REFERENCE_ARTIFACT or a test-specific artifact env var."
     )
 
 
@@ -474,13 +474,13 @@ def prepare_distributed(args: argparse.Namespace) -> PreparedExperiment:
         raise ImportError("ASE is required to decode element symbols from XYZ inputs.")
     torch_env = TorchDistEnv(is_distributed=True)
     if dist.get_world_size() < 2:
-        raise RuntimeError("The distributed thin-adapter test requires at least two ranks.")
+        raise RuntimeError("The distributed MACEModel test requires at least two ranks.")
     device = torch_env.device
     raw = load_raw_structure(args)
     model = load_raw_mace_model(args.model_family, args.model, str(device)).to(device=device).eval()
     cutoff = float(model.r_max.detach().cpu())
     state, sim = build_state(raw, cutoff, args.ghost_cutoff_buffer, torch_env)
-    adapter = DistMACEThinAdapter(model, head_name=args.head_name or None)
+    adapter = MACEModel(model, head_name=args.head_name or None)
     adapter.initialize_buffers(state.local_partition_info, device, dist.get_world_size())
     return PreparedExperiment(
         raw=raw,
@@ -600,7 +600,7 @@ def benchmark_distributed(
             dist.barrier()
             _synchronize(device)
             start = time.perf_counter()
-            init_adapter = DistMACEThinAdapter(base_model, head_name=args.head_name or None)
+            init_adapter = MACEModel(base_model, head_name=args.head_name or None)
             init_adapter.initialize_buffers(state.local_partition_info, device, dist.get_world_size())
             _synchronize(device)
             local_seconds = time.perf_counter() - start
@@ -613,7 +613,7 @@ def benchmark_distributed(
     distributed_stats = _timing_statistics(distributed_samples, len(raw["atomic_numbers"]))
     benchmark = {
         "scope": (
-            "steady-state distributed thin-adapter energy+forces; includes position exchange, "
+            "steady-state distributed MACEModel energy+forces; includes position exchange, "
             "owned-graph build, runtime feature exchange, and force recovery; excludes standalone "
             "reference generation, explicit parity reconstruction, and parity comparison"
         ),
@@ -738,7 +738,7 @@ def build_summary(
 
 def print_summary(summary: Dict[str, Any]) -> None:
     print("=" * 60)
-    print("Thin DistMACE Explicit-Graph Experiment")
+    print("DistNNP MACE Explicit-Graph Experiment")
     print("=" * 60)
     print(f"system: {summary['system']}")
     print(f"source_path: {summary['source_path']}")
@@ -829,15 +829,15 @@ def _require_reference_env(*names: str) -> str:
     )
 
 
-def test_distmace_thin_adapter_parity_builtin() -> None:
+def test_mace_model_parity_builtin() -> None:
     if int(os.environ.get("WORLD_SIZE", "1")) < 2:
         import pytest
 
         pytest.skip("Run with torchrun --nproc-per-node=2")
     artifact = _require_reference_env(
-        "DISTMACE_THIN_REFERENCE_BUILTIN_ARTIFACT",
-        "DISTMACE_THIN_REFERENCE_ARTIFACT",
-        "DISTMACE_THIN_REFERENCE_DEFAULT_ARTIFACT",
+        "DISTMACE_REFERENCE_BUILTIN_ARTIFACT",
+        "DISTMACE_REFERENCE_ARTIFACT",
+        "DISTMACE_REFERENCE_DEFAULT_ARTIFACT",
     )
     args = build_parser().parse_args(
         ["run-distributed", "--reference-artifact", artifact, "--strict-parity"]
@@ -845,15 +845,15 @@ def test_distmace_thin_adapter_parity_builtin() -> None:
     run_distributed(args)
 
 
-def test_distmace_thin_adapter_parity_halo_fixture() -> None:
+def test_mace_model_parity_halo_fixture() -> None:
     if int(os.environ.get("WORLD_SIZE", "1")) < 2:
         import pytest
 
         pytest.skip("Run with torchrun --nproc-per-node=2")
     artifact = _require_reference_env(
-        "DISTMACE_THIN_REFERENCE_HALO_ARTIFACT",
-        "DISTMACE_THIN_REFERENCE_ARTIFACT",
-        "DISTMACE_THIN_REFERENCE_DEFAULT_ARTIFACT",
+        "DISTMACE_REFERENCE_HALO_ARTIFACT",
+        "DISTMACE_REFERENCE_ARTIFACT",
+        "DISTMACE_REFERENCE_DEFAULT_ARTIFACT",
     )
     args = build_parser().parse_args(
         [
@@ -868,7 +868,7 @@ def test_distmace_thin_adapter_parity_halo_fixture() -> None:
     run_distributed(args)
 
 
-def test_distmace_thin_adapter_reinitialize_buffers() -> None:
+def test_mace_model_reinitialize_buffers() -> None:
     if int(os.environ.get("WORLD_SIZE", "1")) < 2:
         import pytest
 
