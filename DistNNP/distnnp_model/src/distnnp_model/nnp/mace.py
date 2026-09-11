@@ -64,68 +64,6 @@ def load_raw_mace_model(
     return loaded_model.to(dtype=COMPUTE_DTYPE)
 
 
-def canonicalize_nonperiodic_geometry(
-    positions: torch.Tensor,
-    cell: torch.Tensor,
-    pbc: torch.Tensor,
-    padding: float,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Prepare nonperiodic coordinates for DistNNP's CUDA radius-graph path.
-
-    ``radius_graph_pbc_cuda`` is the single graph-construction authority for
-    DistNNP models, including :class:`MACEModel`.  Even when an axis is
-    nonperiodic, its CUDA cell-list implementation still needs a valid cell
-    containing every coordinate.  Raw molecular inputs commonly omit that cell
-    or contain coordinates outside it, which can produce an invalid cell-list
-    view before MACE receives the graph.
-
-    This input-preparation helper translates each nonperiodic axis so its
-    minimum coordinate is ``padding`` and enlarges the corresponding diagonal
-    cell length to enclose the structure with that margin on both sides.  It
-    does not construct a second neighbor graph, change DistNNP ownership, or
-    introduce periodic images: the original ``pbc`` flags are returned
-    unchanged and must still be passed to DistNNP.  Periodic axes must already
-    have valid cell vectors; this helper does not repair or wrap them.
-
-    Use it once while preparing a static nonperiodic structure, before
-    partitioning and halo-map construction.  Fully periodic inputs are returned
-    unchanged.  Mixed or nonperiodic triclinic cells are rejected because this
-    coordinate-space adjustment is only defined for orthorhombic cells.
-
-    Returns:
-        The translated positions, adjusted cell, and applied translation.
-    """
-    positions = positions.to(dtype=COMPUTE_DTYPE)
-    cell = cell.reshape(3, 3).to(device=positions.device, dtype=COMPUTE_DTYPE)
-    pbc = pbc.reshape(3).to(device=positions.device, dtype=torch.bool)
-    if positions.ndim != 2 or positions.shape[1] != 3:
-        raise ValueError("positions must have shape [num_atoms, 3].")
-    if padding <= 0:
-        raise ValueError("nonperiodic padding must be positive.")
-    if bool(torch.all(pbc)):
-        return positions, cell, torch.zeros(3, dtype=COMPUTE_DTYPE, device=positions.device)
-
-    off_diagonal = cell - torch.diag(torch.diagonal(cell))
-    if not bool(torch.allclose(off_diagonal, torch.zeros_like(off_diagonal))):
-        raise ValueError(
-            "Nonperiodic coordinate canonicalization currently requires an orthorhombic cell."
-        )
-
-    adjusted_positions = positions.clone()
-    adjusted_cell = cell.clone()
-    translation = torch.zeros(3, dtype=COMPUTE_DTYPE, device=positions.device)
-    for axis in range(3):
-        if bool(pbc[axis]):
-            continue
-        axis_min = positions[:, axis].min()
-        axis_max = positions[:, axis].max()
-        translation[axis] = float(padding) - axis_min
-        adjusted_positions[:, axis] += translation[axis]
-        required_length = (axis_max - axis_min) + 2.0 * float(padding)
-        adjusted_cell[axis, axis] = torch.maximum(adjusted_cell[axis, axis], required_length)
-    return adjusted_positions, adjusted_cell, translation
-
-
 def validate_partition_info(
     partition_info: PartitionMessagePassingInfo,
     world_size: int,
@@ -640,7 +578,6 @@ __all__ = [
     "COMPUTE_DTYPE",
     "MACEModel",
     "MACEScaleShiftRuntime",
-    "canonicalize_nonperiodic_geometry",
     "load_raw_mace_model",
     "resolve_model_head_index",
     "resolve_model_head_name",

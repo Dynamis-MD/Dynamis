@@ -27,9 +27,22 @@ torchrun --standalone --nproc_per_node=2 \
 ```
 
 Use `--xyz-path` to supply an XYZ/extxyz structure. The static driver also
-supports `--builtin-system`, `--head-name`, `--ghost-cutoff-buffer`, and
-`--nonperiodic-padding`. Do not use
-`--disable-nonperiodic-canonicalization` for acceptance validation.
+supports `--builtin-system`, `--head-name`, and `--ghost-cutoff-buffer`.
+
+## Static-driver controls
+
+Use `--builtin-system` or `--xyz-path` to select a structure, and keep
+`--model-family`, `--model`, and optional `--head-name` identical in both
+commands. `--ghost-cutoff-buffer` controls the distributed halo margin.
+`--benchmark` with its warmup, iteration, and sample flags records timing
+statistics; it does not relax `--strict-parity`. `--time-initialize-buffers`
+additionally profiles buffer setup. `--output-json PATH` writes the
+corresponding summary.
+
+The reference artifact signature includes positions, cell, PBC flags, and
+model identity. Both commands in a reference/distributed pair must therefore
+use the same structure and model arguments. Nonperiodic XYZ/extxyz inputs must
+provide a valid cell containing their coordinates.
 
 ## Distributed trajectory
 

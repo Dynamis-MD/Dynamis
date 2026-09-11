@@ -28,7 +28,6 @@ import torch.distributed as dist
 from distnnp_model.nnp.mace import (
     COMPUTE_DTYPE,
     MACEModel,
-    canonicalize_nonperiodic_geometry,
     load_raw_mace_model,
     resolve_model_head_index,
     resolve_model_head_name,
@@ -68,22 +67,22 @@ class PreparedExperiment:
 
 
 def natural_chain12() -> Dict[str, Any]:
-    """A bent C4H8 fragment with ordinary covalent-scale spacing."""
+    """A contained nonperiodic C4H8 fragment with covalent-scale spacing."""
     carbon = [
-        [0.00, 0.00, 0.00],
-        [1.52, 0.12, 0.00],
-        [3.01, -0.10, 0.18],
-        [4.50, 0.08, -0.05],
+        [2.00, 2.00, 2.00],
+        [3.52, 2.12, 2.00],
+        [5.01, 1.90, 2.18],
+        [6.50, 2.08, 1.95],
     ]
     hydrogen = [
-        [-0.55, 0.92, 0.20],
-        [-0.48, -0.92, -0.20],
-        [1.52, 1.08, -0.45],
-        [1.55, -0.78, 0.62],
-        [3.00, 0.82, 0.72],
-        [3.02, -1.05, -0.42],
-        [5.03, 0.96, 0.20],
-        [5.02, -0.82, -0.28],
+        [1.45, 2.92, 2.20],
+        [1.52, 1.08, 1.80],
+        [3.52, 3.08, 1.55],
+        [3.55, 1.22, 2.62],
+        [5.00, 2.82, 2.72],
+        [5.02, 0.95, 1.58],
+        [7.03, 2.96, 2.20],
+        [7.02, 1.18, 1.72],
     ]
     return {
         "name": "natural_chain12",
@@ -112,16 +111,6 @@ def build_parser() -> argparse.ArgumentParser:
     distributed_parser.add_argument("--model", default="medium-mpa-0")
     distributed_parser.add_argument("--head-name", default="", help="Optional explicit MACE head name.")
     distributed_parser.add_argument("--ghost-cutoff-buffer", type=float, default=0.5)
-    distributed_parser.add_argument(
-        "--nonperiodic-padding",
-        type=float,
-        help="Vacuum padding used before DistNNP halo construction (default: cutoff + buffer).",
-    )
-    distributed_parser.add_argument(
-        "--disable-nonperiodic-canonicalization",
-        action="store_true",
-        help="Keep raw nonperiodic coordinates for diagnosing raw DistNNP wrapping behavior.",
-    )
     distributed_parser.add_argument("--reference-artifact", type=Path, help="Detached standalone reference artifact.")
     distributed_parser.add_argument("--benchmark", action="store_true", help="Time only the distributed adapter loop.")
     distributed_parser.add_argument("--benchmark-warmup", type=int, default=3)
@@ -225,29 +214,8 @@ def load_xyz(path: Path) -> Dict[str, Any]:
     }
 
 
-def canonicalize_raw_structure(raw: Dict[str, Any], padding: float) -> Dict[str, Any]:
-    positions, cell, translation = canonicalize_nonperiodic_geometry(
-        torch.tensor(raw["positions"], dtype=COMPUTE_DTYPE),
-        torch.tensor(raw["cell"], dtype=COMPUTE_DTYPE),
-        torch.tensor(raw["pbc"], dtype=torch.bool),
-        padding,
-    )
-    adjusted = dict(raw)
-    adjusted["positions"] = positions.tolist()
-    adjusted["cell"] = cell.tolist()
-    adjusted["coordinate_translation"] = translation.tolist()
-    adjusted["nonperiodic_padding"] = float(padding)
-    return adjusted
-
-
 def load_raw_structure(args: argparse.Namespace) -> Dict[str, Any]:
-    raw = load_xyz(args.xyz_path) if args.xyz_path else BUILTIN_SYSTEMS[args.builtin_system]()
-    if args.disable_nonperiodic_canonicalization:
-        return raw
-    probe_model = load_raw_mace_model(args.model_family, args.model, "cpu").to(dtype=COMPUTE_DTYPE).eval()
-    cutoff = float(probe_model.r_max.detach().cpu())
-    padding = args.nonperiodic_padding if args.nonperiodic_padding is not None else cutoff + args.ghost_cutoff_buffer
-    return canonicalize_raw_structure(raw, padding)
+    return load_xyz(args.xyz_path) if args.xyz_path else BUILTIN_SYSTEMS[args.builtin_system]()
 
 
 def _assign_if_present(obj: object, name: str, value: torch.Tensor) -> None:
