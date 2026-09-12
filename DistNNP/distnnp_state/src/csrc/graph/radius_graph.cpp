@@ -2,7 +2,6 @@
 
 #include "distnnp_state/radius_graph.hpp"
 #include "distnnp_state/timing.hpp"
-#include <ATen/cuda/CUDAContext.h>
 #include <stdexcept>
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor>
@@ -42,12 +41,10 @@ radius_graph_pbc(
     TORCH_CHECK(max_num_neighbors >= 0,
                 "max_num_neighbors must be non-negative, got ", max_num_neighbors);
 
-    // pos.is_cuda() is guaranteed by the TORCH_CHECK above, so it is safe to
-    // grab the current CUDA stream here and use device-side event timing.
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream(pos.device().index()).stream();
-
+    // pos.is_cuda() is guaranteed by the TORCH_CHECK above, so device-side event
+    // timing on that device's current stream is safe here.
     t.start("build_graph", distnnp_state::TimerClass::Compute,
-            distnnp_state::Where::Device, stream);
+            distnnp_state::Where::Device);
 
     auto result = radius_graph_pbc_cuda_impl(pos, cell, pbc, radius, max_num_neighbors, enforce_max_strictly);
 

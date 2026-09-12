@@ -11,6 +11,7 @@ from distnnp_state import (
     Timer,
     TimingRegistry,
     TimerClass,
+    Where,
     Level,
 )
 from distnnp_state.io import is_pathlike
@@ -256,20 +257,22 @@ class Simulator:
 
     def run(self) -> None:
         total_done = 0
-        while total_done < self.config.total_steps:
-            Timer.set_step(total_done)
-            if self.should_rebalance(total_done):
-                self.timer.start("repartition", TimerClass.Other)
-                self.sync_and_repartition()
+        try:
+            while total_done < self.config.total_steps:
+                Timer.set_step(total_done)
+                if self.should_rebalance(total_done):
+                    self.timer.start("repartition", TimerClass.Other)
+                    self.sync_and_repartition()
+                    self.timer.stop()
+                # Where.Both: step() launches async CUDA work, so a host-only timer misses it.
+                self.timer.start("iteration", TimerClass.Total, Where.Both)
+                energy = self.step(self.config.timestep_fs)
                 self.timer.stop()
-            self.timer.start("iteration", TimerClass.Other)
-            energy = self.step(self.config.timestep_fs)
-            self.timer.stop()
-            # if should_log(total_done):
-                # _log_energy(total_done, energy)
-            if self.should_write_traj(total_done):
-                self.state.local_state.atom_vertex_numbers = self.state.local_partition_info.partition_indices
-                self.writer.submit(total_done, self.state.local_state)
-            total_done += 1
-        self.writer.flush()
-        TimingRegistry.instance().flush()
+                if self.should_write_traj(total_done):
+                    self.state.local_state.atom_vertex_numbers = self.state.local_partition_info.partition_indices
+                    self.writer.submit(total_done, self.state.local_state)
+                total_done += 1
+            self.writer.flush()
+        finally:
+            # Runs even on exception/interrupt so timing data isn't lost.
+            TimingRegistry.instance().close()

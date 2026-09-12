@@ -12,7 +12,6 @@
 #include "distnnp_state/partitioner.hpp"
 #include "distnnp_state/radius_graph.hpp"
 #include "distnnp_state/timing.hpp"
-#include <ATen/cuda/CUDAContext.h>
 
 namespace distnnp_state
 {
@@ -27,10 +26,8 @@ void AbstractPartitioner::build_halo_maps(
 {
     auto pos = global_state.atom_positions;
     auto device = pos.device();
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream(device.index()).stream();
-
     Timer t;
-    t.start("build_halo_maps", TimerClass::Compute, Where::Device, stream);
+    t.start("build_halo_maps", TimerClass::Compute, Where::Device);
 
     auto long_opts = torch::TensorOptions().dtype(torch::kLong).device(device);
     auto bool_opts = torch::TensorOptions().dtype(torch::kBool).device(device);

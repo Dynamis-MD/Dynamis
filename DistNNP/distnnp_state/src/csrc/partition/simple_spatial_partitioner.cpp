@@ -1,6 +1,5 @@
 #include "distnnp_state/partitioner.hpp"
 #include "distnnp_state/timing.hpp"
-#include <ATen/cuda/CUDAContext.h>
 
 namespace distnnp_state
 {
@@ -8,14 +7,9 @@ namespace distnnp_state
 PartitionMessagePassingInfo SimpleSpatialPartitioner::partition(
     const MolecularInfo &state, const DistEnvironment &env)
 {
-    bool on_cuda = state.atom_positions.is_cuda();
-    cudaStream_t stream = on_cuda
-        ? at::cuda::getCurrentCUDAStream(state.atom_positions.device().index()).stream()
-        : nullptr;
-
     Timer t;
     t.start("partition", TimerClass::Compute,
-            on_cuda ? Where::Device : Where::Host, stream);
+            state.atom_positions.is_cuda() ? Where::Device : Where::Host);
 
     PartitionMessagePassingInfo info;
     auto device = state.atom_positions.device();

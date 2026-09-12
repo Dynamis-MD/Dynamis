@@ -104,7 +104,7 @@ class Langevin(DistNNPIntegrator):
         else:
             atom_forces = self.prev_forces
 
-        # integrator_halfstep1 is timed in C++ (langevin_integrator.cu)
+        # Timed in C++ (langevin_integrator.cu), nested inside integrator_step
         self.halfstep1_(
             state.atom_positions,
             state.atom_velocities,
@@ -120,7 +120,7 @@ class Langevin(DistNNPIntegrator):
 
         # Second random noise draw for the second half-step
         noise2 = torch.randn_like(state.atom_velocities)
-        # integrator_halfstep2 is timed in C++ (langevin_integrator.cu)
+        # Timed in C++ (langevin_integrator.cu), nested inside integrator_step
         self.halfstep2_(
             state.atom_velocities,
             atom_forces,

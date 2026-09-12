@@ -10,7 +10,6 @@
 #include "distnnp_state/kdtree.hpp"
 #include "distnnp_state/radius_graph.hpp"
 #include "distnnp_state/timing.hpp"
-#include <ATen/cuda/CUDAContext.h>
 
 namespace distnnp_state
 {
@@ -111,14 +110,10 @@ static PartitionMessagePassingInfo do_partition(
 PartitionMessagePassingInfo KDTreePartitioner::partition(
     const MolecularInfo &state, const DistEnvironment &env)
 {
-    bool on_cuda = state.atom_positions.is_cuda();
-    cudaStream_t stream = on_cuda
-        ? at::cuda::getCurrentCUDAStream(state.atom_positions.device().index()).stream()
-        : nullptr;
 
     Timer t;
     t.start("partition", TimerClass::Compute,
-            on_cuda ? Where::Device : Where::Host, stream);
+            state.atom_positions.is_cuda() ? Where::Device : Where::Host);
 
     auto result = do_partition(state, env, state.edge_counts);
 
@@ -139,11 +134,8 @@ PartitionMessagePassingInfo KDTreePartitioner::partition(
     const SimulationConfig &config)
 {
     // Mode 3 always operates on CUDA tensors (radius_graph_pbc requires it).
-    cudaStream_t stream =
-        at::cuda::getCurrentCUDAStream(state.atom_positions.device().index()).stream();
-
     Timer t;
-    t.start("partition", TimerClass::Compute, Where::Device, stream);
+    t.start("partition", TimerClass::Compute, Where::Device);
 
     auto pos = state.atom_positions;
     auto device = pos.device();

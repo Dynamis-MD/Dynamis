@@ -65,7 +65,6 @@ class Euler(DistNNPIntegrator):
 
         atom_masses = TORCH_MASSES.to(molecular_info.atom_positions.device)[molecular_info.atom_types.reshape(-1).to(torch.long)]
 
-        # integrator_step is timed in C++ (euler_integrator.cu)
         self.step_(
             molecular_info.atom_positions,
             molecular_info.atom_velocities,

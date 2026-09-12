@@ -56,7 +56,8 @@ namespace distnnp_integrator
     auto stream = at::cuda::getCurrentCUDAStream(device_index);
 
     distnnp_state::Timer t;
-    t.start("integrator_step", distnnp_state::TimerClass::Compute,
+    // Nests inside "integrator_step", emitted by the Python wrapper.
+    t.start("integrator_kernel", distnnp_state::TimerClass::Compute,
             distnnp_state::Where::Device, stream.stream());
 
     euler_step_kernel<<<blocks, threads_per_block, 0, stream>>>(

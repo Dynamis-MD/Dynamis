@@ -28,12 +28,45 @@ from distnnp_state.dist_graph_builder import (
 TrajectoryWriter = distnnp_state_impl.TrajectoryWriter
 
 # Timing
-Timer = distnnp_state_impl.Timer
 TimingRegistry = distnnp_state_impl.TimingRegistry
 TimerClass = distnnp_state_impl.TimerClass
 Where = distnnp_state_impl.Where
 Level = distnnp_state_impl.Level
 TIMING_ENABLED = distnnp_state_impl.TIMING_ENABLED
+
+if TIMING_ENABLED:
+    Timer = distnnp_state_impl.Timer
+else:
+    class Timer:  # type: ignore[no-redef]
+        """No-op stand-in for when distnnp_state was built with timing off.
+
+        Python has no preprocessor, so this swaps the exported name instead —
+        call sites stay unconditional without checking TIMING_ENABLED.
+        """
+
+        __slots__ = ()
+
+        def start(self, key, cls, where=None, parent_id=0) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        @staticmethod
+        def current_span_id() -> int:
+            return 0
+
+        @staticmethod
+        def set_level(level) -> None:
+            pass
+
+        @staticmethod
+        def enabled() -> bool:
+            return False
+
+        @staticmethod
+        def set_step(step) -> None:
+            pass
 
 __all__ = [
     "MolecularInfo",

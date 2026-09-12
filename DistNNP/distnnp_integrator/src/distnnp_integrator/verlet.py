@@ -95,7 +95,7 @@ class Verlet(DistNNPIntegrator):
             atom_forces = self.prev_forces
 
         # 1. Update v to half-step, and pos to full-step
-        # integrator_halfstep1 is timed in C++ (verlet_integrator.cu)
+        # Timed in C++ (verlet_integrator.cu), nested inside integrator_step
         self.halfstep1_(
             state.atom_positions,
             state.atom_velocities,
@@ -110,7 +110,7 @@ class Verlet(DistNNPIntegrator):
         self.prev_forces = new_forces
 
         # 3. Complete the velocity full-step update
-        # integrator_halfstep2 is timed in C++ (verlet_integrator.cu)
+        # Timed in C++ (verlet_integrator.cu), nested inside integrator_step
         self.halfstep2_(
             state.atom_velocities, new_forces, atom_masses, step_size
         )

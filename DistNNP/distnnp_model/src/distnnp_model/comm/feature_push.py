@@ -42,9 +42,12 @@ class FeaturePushToExchange(Function):
             f"{tuple(features_to_push.shape)}"
         )
 
+        # Captured now, before this region opens, so backward() — which runs on a
+        # different thread with no region open — can still nest under model_forward.
+        ctx._timing_parent_span = Timer.current_span_id()
+
         t = Timer()
-        t.start("halo_exchange", TimerClass.Comm,
-                Where.Device, features_to_push.device.index)
+        t.start("halo_exchange", TimerClass.Comm, Where.Device)
         received_features = exchanger.feature_push_forward(
             features_to_push, partition_info
         )
@@ -69,9 +72,11 @@ class FeaturePushToExchange(Function):
         input_feature_shape = ctx._features_to_push_shape
         exchanger = ctx._exchanger
 
+        # Runs on the autograd worker thread, which has no open region of its own —
+        # parent_id (captured in forward()) supplies the link to model_forward.
         t = Timer()
-        t.start("halo_exchange", TimerClass.Comm,
-                Where.Device, grad_output.device.index)
+        t.start("halo_exchange", TimerClass.Comm, Where.Device,
+                parent_id=getattr(ctx, "_timing_parent_span", 0))
         recevied_features_grad = exchanger.feature_push_backward(
             grad_output, input_feature_shape, state.local_partition_info
         )
