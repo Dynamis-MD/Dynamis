@@ -34,6 +34,10 @@ KEY FACTS (verified against orb-models source):
     across a partition on its own. See the note in ORBModel about why we sum
     the INTERACTION energy across ranks but handle the reference separately.
   * predict() returns fp64 energy by default -> cast before comparing.
+  * UNITS: predict() is eV and eV/A; ORBModel multiplies by
+    _EV_PER_A_TO_AMU_A_PER_FS2 and returns MD units (amu*A^2/fs^2,
+    amu*A/fs^2) to match the integrator. The reference must be scaled by
+    the same constant or every comparison is off by ~99%.
 
 The cleanest ground truth is orbff.predict(graph, split=False) on the full
 system, built with the SAME adapter the model ships with.
@@ -46,7 +50,12 @@ import pytest
 
 # NOTE: ORBModel lives at distnnp_model/src/distnnp_model/nnp/orb.py
 # so the import is distnnp_model.nnp.orb (matches uma at distnnp_model.nnp.uma)
-from distnnp_model.nnp.orb import ORBModel
+from distnnp_model.nnp.orb import (
+    ORBModel,
+    # ORBModel returns MD units (amu*A^2/fs^2); predict() returns eV. Import the
+    # constant rather than re-spelling it so the two can never drift apart.
+    _EV_PER_A_TO_AMU_A_PER_FS2 as EV_TO_MD,
+)
 from distnnp_state import (
     DistNNPState,
     DistEnvironment,
@@ -55,6 +64,11 @@ from distnnp_state import (
     KDTreePartitioner,
     radius_graph_pbc_cuda,
 )
+
+# Parity tolerances. The CPU/GPU single-rank composition lands at ~1e-7 relative;
+# these leave room for the fp32 reduction order differing across ranks.
+ENERGY_RTOL = 1e-5
+FORCE_RTOL = 1e-4
 
 try:
     from orb_models.forcefield import pretrained
@@ -104,7 +118,8 @@ def test_orb_distributed_parity():
         ref_orbff.eval()
 
     # Distributed model on every rank
-    dist_model = ORBModel(model_name=MODEL_NAME, device=device)
+    # precision must match the reference model above — ORBModel has no default.
+    dist_model = ORBModel(model_name=MODEL_NAME, precision="float32-highest", device=device)
 
     # -----------------------------------------------------------------
     # 2. Global system — identical on all ranks (seeded)
@@ -181,8 +196,10 @@ def test_orb_distributed_parity():
         ename = ref_orbff.energy_name          # "energy"
         fname = ref_orbff.grad_forces_name     # "grad_forces"
         print("[ref] predict keys:", list(ref_out.keys()))   # see them once
-        ref_energy = ref_out[ename].to(torch.float32).squeeze()
-        ref_forces = ref_out[fname].to(torch.float32)
+        # predict() is eV / eV per A; ORBModel returns amu*A^2/fs^2 and
+        # amu*A/fs^2. Convert the reference so both sides are in MD units.
+        ref_energy = ref_out[ename].to(torch.float32).squeeze() * EV_TO_MD
+        ref_forces = ref_out[fname].to(torch.float32) * EV_TO_MD
         print(f"[ref] energy = {ref_energy.item()}")
         print(f"[ref] net force = {ref_forces.sum(dim=0)}")
 
@@ -219,7 +236,12 @@ def test_orb_distributed_parity():
         e_dist = energy_reduce.squeeze()
         e_diff = (e_dist - ref_energy).abs()
         print(f"[parity energy] ref={ref_energy.item()} dist={e_dist.item()}")
-        print(f"[parity energy] abs diff={e_diff.item()} rel diff={(e_diff / ref_energy.abs()).item()}")
+        e_rel = (e_diff / ref_energy.abs()).item()
+        print(f"[parity energy] abs diff={e_diff.item()} rel diff={e_rel}")
+        assert e_rel < ENERGY_RTOL, (
+            f"energy parity: rel diff {e_rel:.3e} exceeds {ENERGY_RTOL:.1e} "
+            f"(ref={ref_energy.item()} dist={e_dist.item()})"
+        )
 
     # -----------------------------------------------------------------
     # 6b. Forces parity
@@ -246,7 +268,12 @@ def test_orb_distributed_parity():
         f_max = f_diff.max()
         f_scale = ref_forces.abs().max()
         print(f"[parity forces] ref max|F|={f_scale.item()} dist max|F|={reconstructed.abs().max().item()}")
-        print(f"[parity forces] abs diff={f_max.item()} rel diff={(f_max / f_scale).item()}")
+        f_rel = (f_max / f_scale).item()
+        print(f"[parity forces] abs diff={f_max.item()} rel diff={f_rel}")
+        assert f_rel < FORCE_RTOL, (
+            f"force parity: rel diff {f_rel:.3e} exceeds {FORCE_RTOL:.1e} "
+            f"(max abs diff {f_max.item()})"
+        )
 
     # -----------------------------------------------------------------
     # 7. Reference-free sanity checks
