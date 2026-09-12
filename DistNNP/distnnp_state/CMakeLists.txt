@@ -9,9 +9,16 @@ project(
 )
 
 option(DISTNNP_TIMING "Compile in timing instrumentation" ON)
-if(DISTNNP_TIMING)
-    add_compile_definitions(DISTNNP_TIMING)
-endif()
+
+# Single source of truth for the on/off decision, installed for downstream
+# packages to inherit. Do NOT add_compile_definitions(DISTNNP_TIMING) here —
+# that would only reach this project.
+set(DISTNNP_STATE_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/distnnp_state/timing_config.hpp.in"
+    "${DISTNNP_STATE_GENERATED_INCLUDE_DIR}/distnnp_state/timing_config.hpp"
+    @ONLY
+)
 
 # Use the modern CUDAToolkit finder first to resolve the correct include path.
 # In conda environments, nvcc lives in $PREFIX/bin but headers are under
@@ -55,6 +62,52 @@ find_library(TORCH_PYTHON_LIBRARY
 
 find_library(TORCH_PYTHON_LIBRARY torch_python REQUIRED)
 
+# ---------------------------------------------------------------------------
+# Timing library
+# ---------------------------------------------------------------------------
+# TimingRegistry is a singleton, so every module needs to share ONE copy of it —
+# hence a real shared library with a SONAME, not the CPython extension (which
+# carries none). Built only when timing is on; off, there's nothing to link.
+if(DISTNNP_TIMING)
+    add_library(distnnp_state_timing SHARED src/csrc/timing.cpp)
+
+    target_include_directories(distnnp_state_timing
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<BUILD_INTERFACE:${DISTNNP_STATE_GENERATED_INCLUDE_DIR}>
+        PRIVATE
+            ${TORCH_INCLUDE_DIRS}
+            ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    # c10_cuda (via ${TORCH_LIBRARIES}) provides getCurrentCUDAStream; cudart provides
+    # the event API. No torch_python, no pybind11 — this is not a Python module.
+    target_link_libraries(distnnp_state_timing
+        PRIVATE
+        ${TORCH_LIBRARIES}
+        torch
+        CUDA::cudart
+    )
+
+    target_compile_options(distnnp_state_timing PRIVATE -Wall -Wextra)
+
+    # No VERSION/SOVERSION: the SONAME alone is enough, and a symlink chain
+    # wouldn't survive a wheel anyway.
+    set_target_properties(distnnp_state_timing
+        PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+
+        INSTALL_RPATH "$ORIGIN/../torch/lib"
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH_USE_LINK_PATH ON
+    )
+
+    install(TARGETS distnnp_state_timing LIBRARY DESTINATION .)
+endif()
+
 python_add_library(distnnp_state_impl
     MODULE
     WITH_SOABI
@@ -71,7 +124,6 @@ python_add_library(distnnp_state_impl
     src/csrc/graph/radius_graph_kernels.cu
     src/csrc/graph/dist_graph_ops.cpp
     src/csrc/graph/dist_graph_ops_kernels.cu
-    src/csrc/timing.cpp
     src/csrc/trajectory_writer.cpp
 )
 
@@ -97,9 +149,12 @@ endif()
 target_include_directories(distnnp_state_impl
     PRIVATE
     include
+    ${DISTNNP_STATE_GENERATED_INCLUDE_DIR}
     ${TORCH_INCLUDE_DIRS}
     ${CUDAToolkit_INCLUDE_DIRS}
 )
+
+target_compile_options(distnnp_state_impl PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)
 
 # torch_python provides pybind11 type_casters for at::Tensor and must be
 # linked explicitly — it is not included in ${TORCH_LIBRARIES}.
@@ -114,6 +169,11 @@ target_link_libraries(distnnp_state_impl
     TorchNCCL::nccl
 )
 
+# Resolved by SONAME so this extension and distnnp_integrator share one TimingRegistry.
+if(DISTNNP_TIMING)
+    target_link_libraries(distnnp_state_impl PRIVATE distnnp_state_timing)
+endif()
+
 set_target_properties(distnnp_state_impl
     PROPERTIES
     FILE_SET HEADERS
@@ -126,7 +186,7 @@ set_target_properties(distnnp_state_impl
     CUDA_EXTENSIONS OFF
     CUDA_ARCHITECTURES "80;90;100"
 
-    INSTALL_RPATH "$ORIGIN/../nvidia/nccl/lib:$ORIGIN/../torch/lib"
+    INSTALL_RPATH "$ORIGIN:$ORIGIN/../nvidia/nccl/lib:$ORIGIN/../torch/lib"
     BUILD_WITH_INSTALL_RPATH TRUE
     INSTALL_RPATH_USE_LINK_PATH ON
 )
@@ -137,7 +197,10 @@ LIBRARY DESTINATION .)
 # Install public headers so downstream packages (e.g. distnnp_model) can find
 # them after `pip install distnnp_state`.  They land at:
 #   site-packages/distnnp_state/include/distnnp_state/*.hpp
-install(DIRECTORY include/ DESTINATION distnnp_state/include)
+install(DIRECTORY include/ DESTINATION include
+    PATTERN "*.hpp.in" EXCLUDE)
+install(FILES "${DISTNNP_STATE_GENERATED_INCLUDE_DIR}/distnnp_state/timing_config.hpp"
+    DESTINATION include/distnnp_state)
 
 # Manually install the type marker and stubs if they exist
 install(FILES
