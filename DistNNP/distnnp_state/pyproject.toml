@@ -8,10 +8,19 @@ version = "0.1.0"
 description = "C++ extension for distnnp state management"
 readme = "README.md"
 requires-python = ">=3.8"
-dependencies = ["torch","nvidia-nccl-cu12"]
+dependencies = ["torch"]
+
+[project.optional-dependencies]
+cu12 = [
+    "nvidia-nccl-cu12>=2.21.5", # or minimum version introducing your required RMA APIs
+]
+cu13 = [
+    "nvidia-nccl-cu13",
+]
 
 [tool.scikit-build]
 build-dir = "skbuild"
+
 
 
 [tool.scikit-build.wheel]
