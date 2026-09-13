@@ -32,6 +32,10 @@ from distnnp_model.nnp.mace import (
     resolve_model_head_index,
     resolve_model_head_name,
 )
+
+# MACEModel returns MD units; the references in this file are raw MACE eV.
+# Import the shared constant rather than re-spelling it so the two can't drift.
+from distnnp_model.units import EV_PER_A_TO_AMU_A_PER_FS2 as EV_TO_MD
 from distnnp_state import (
     DistNNPState,
     MolecularInfo,
@@ -610,12 +614,21 @@ def build_summary(
     records = sorted(records, key=lambda item: item["rank"])
     distributed_energy = sum(item["owned_local_energy"] for item in records)
     distributed_forces = assemble_forces(records, num_atoms)
-    explicit_energy = float(explicit_reference["energy"])
-    explicit_forces = explicit_reference["forces"].to(dtype=COMPUTE_DTYPE)
-    calculator_energy = float(artifact["reference"]["calculator_energy"])
-    calculator_forces = artifact["reference"]["calculator_forces"].to(dtype=COMPUTE_DTYPE)
-    core_model_energy = float(artifact["reference"]["core_model_energy"])
-    core_model_forces = artifact["reference"]["core_model_forces"].to(dtype=COMPUTE_DTYPE)
+    # MACEModel reports MD units; every reference here comes from a raw MACE
+    # forward or a public calculator and is therefore eV / (eV per Angstrom).
+    # Scale the references up front so nothing below mixes the two systems --
+    # comparing MD-unit output against an unscaled eV reference is a ~99%
+    # relative error that no tolerance would forgive.
+    explicit_energy = float(explicit_reference["energy"]) * EV_TO_MD
+    explicit_forces = explicit_reference["forces"].to(dtype=COMPUTE_DTYPE) * EV_TO_MD
+    calculator_energy = float(artifact["reference"]["calculator_energy"]) * EV_TO_MD
+    calculator_forces = (
+        artifact["reference"]["calculator_forces"].to(dtype=COMPUTE_DTYPE) * EV_TO_MD
+    )
+    core_model_energy = float(artifact["reference"]["core_model_energy"]) * EV_TO_MD
+    core_model_forces = (
+        artifact["reference"]["core_model_forces"].to(dtype=COMPUTE_DTYPE) * EV_TO_MD
+    )
     energy_close = torch.isclose(
         torch.tensor(distributed_energy, dtype=COMPUTE_DTYPE),
         torch.tensor(explicit_energy, dtype=COMPUTE_DTYPE),
@@ -671,13 +684,17 @@ def build_summary(
             "explicit_forces_close": bool(force_close),
             "explicit_edge_count": int(explicit_reference["edge_count"]),
             "core_model_edge_count": int(artifact["reference"]["core_model_edge_count"]),
-            "calculator_minus_core_model_energy": float(artifact["reference"]["calculator_minus_core_model_energy"]),
+            # Reference-vs-reference diagnostics, scaled so the whole parity
+            # block is reported in one unit system.
+            "calculator_minus_core_model_energy": float(
+                artifact["reference"]["calculator_minus_core_model_energy"]
+            ) * EV_TO_MD,
             "calculator_minus_core_model_force_mae": float(
                 artifact["reference"]["calculator_minus_core_model_force_mae"]
-            ),
+            ) * EV_TO_MD,
             "calculator_minus_core_model_force_max_abs": float(
                 artifact["reference"]["calculator_minus_core_model_force_max_abs"]
-            ),
+            ) * EV_TO_MD,
         },
         "ranks": records,
     }

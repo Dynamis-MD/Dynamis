@@ -17,5 +17,5 @@ def __getattr__(name: str) -> Any:
     if name == "UMAModel":
         return import_module("distnnp_model.nnp.uma").UMAModel
     if name == "ORBModel":
-        return import_module("distnnp_model.nnp.orb").UMAModel
+        return import_module("distnnp_model.nnp.orb").ORBModel
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

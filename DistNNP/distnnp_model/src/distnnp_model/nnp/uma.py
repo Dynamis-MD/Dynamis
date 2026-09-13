@@ -35,7 +35,13 @@ from distnnp_state import (
     radius_graph_pbc_cuda,
 )
 
-_EV_PER_A_TO_AMU_A_PER_FS2 = 0.0096485332
+# Shared across every backend; re-exported under the historical private name so
+# existing `from distnnp_model.nnp.uma import _EV_PER_A_TO_AMU_A_PER_FS2` keeps
+# resolving to the one definition in distnnp_model.units.
+from distnnp_model.units import EV_PER_A_TO_AMU_A_PER_FS2
+
+_EV_PER_A_TO_AMU_A_PER_FS2 = EV_PER_A_TO_AMU_A_PER_FS2
+
 
 def balance_channels_batched(
     emb: torch.Tensor,

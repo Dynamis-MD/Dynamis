@@ -22,7 +22,7 @@ orb = [
     "orb-models==0.7.0"
 ]
 all = [
-    "distnnp_model[uma,mace,orb]"
+    "distnnp_model[uma,orb]"
 ]
 
 [tool.scikit-build]

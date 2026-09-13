@@ -18,7 +18,12 @@ from distnnp_state import DistNNPState, radius_graph_pbc_cuda
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 from distnnp_model.comm.exchanger import GPUDirectExchanger
 
-_EV_PER_A_TO_AMU_A_PER_FS2 = 0.0096485332
+from distnnp_model.units import EV_PER_A_TO_AMU_A_PER_FS2
+
+# Re-exported under the historical private name so existing
+# `from distnnp_model.nnp.orb import _EV_PER_A_TO_AMU_A_PER_FS2` keeps resolving
+# to the one definition in distnnp_model.units.
+_EV_PER_A_TO_AMU_A_PER_FS2 = EV_PER_A_TO_AMU_A_PER_FS2
 # missing conservative architechure params
 
 # when has_electrostatic is true the energy head is replace with a ChargeConditionedEnergyHead + LatentChargeHEad + CoulombModule(conservative regressor) (long range electrostatics)
