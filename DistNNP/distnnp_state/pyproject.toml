@@ -7,7 +7,7 @@ name = "distnnp_state"
 version = "0.1.0"
 description = "C++ extension for distnnp state management"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 dependencies = ["torch"]
 
 [project.optional-dependencies]
