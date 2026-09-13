@@ -8,7 +8,7 @@ independently.
 from importlib import import_module
 from typing import Any
 
-__all__ = ["MACEModel", "UMAModel"]
+__all__ = ["MACEModel", "UMAModel", "ORBModel"]
 
 
 def __getattr__(name: str) -> Any:
@@ -16,4 +16,6 @@ def __getattr__(name: str) -> Any:
         return import_module("distnnp_model.nnp.mace").MACEModel
     if name == "UMAModel":
         return import_module("distnnp_model.nnp.uma").UMAModel
+    if name == "ORBModel":
+        return import_module("distnnp_model.nnp.orb").UMAModel
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

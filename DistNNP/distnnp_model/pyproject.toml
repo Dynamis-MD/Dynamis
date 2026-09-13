@@ -7,7 +7,7 @@ name = "distnnp_model"
 version = "0.0.1"
 description = "NNP models wrapped with DistNNP distributed primitives"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
@@ -17,8 +17,12 @@ mace = [
 uma = [
     "fairchem-core"
 ]
+
+orb = [
+    "orb-models==0.7.0"
+]
 all = [
-    "distnnp_model[uma,mace]"
+    "distnnp_model[uma,mace,orb]"
 ]
 
 [tool.scikit-build]
