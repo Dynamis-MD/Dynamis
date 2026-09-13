@@ -9,6 +9,7 @@ from distnnp_state import (
     TrajectoryWriter,
     TorchDistEnv,
 )
+from distnnp_state.io import is_pathlike
 from distnnp_model import DistNNPModel
 from distnnp.simulatorState import SimState
 from distnnp_integrator import (
@@ -20,6 +21,7 @@ from distnnp_integrator import (
 )
 from typing import Union, Literal, Optional
 from dataclasses import dataclass
+import os
 import torch
 import uuid
 
