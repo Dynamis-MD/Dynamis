@@ -11,6 +11,9 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
+mace = [
+    "mace-torch==0.3.16"
+]
 uma = [
     "fairchem-core"
 ]
