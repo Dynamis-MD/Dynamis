@@ -8,6 +8,8 @@ This adapter keeps the current DistNNP + MACE algorithm intact:
 * Only edges whose destination is locally owned are passed into MACE.
 * Learned node features are exchanged after every non-final product block.
 * Forces are recovered from the owned local energy via autograd.
+* Energy and forces are returned in DistNNP MD units (amu * A^2 / fs^2 and
+  amu * A / fs^2), not MACE's native eV / eV per Angstrom.
 
 This implementation intentionally excludes diagnostics, debug tracing,
 observations, and execution modes from the hot path.
@@ -23,6 +25,7 @@ import torch
 from distnnp_model.comm.exchanger import GPUDirectExchanger
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 from distnnp_model.potential import DistNNPModel
+from distnnp_model.units import EV_PER_A_TO_AMU_A_PER_FS2
 from distnnp_state import DistNNPState, PartitionMessagePassingInfo, radius_graph_pbc_cuda
 
 COMPUTE_DTYPE = torch.float32
@@ -567,7 +570,11 @@ class MACEModel(DistNNPModel):
         self.runtime.begin_forward(state, self.exchange_enabled)
         try:
             outputs = self.runtime(graph.batch_dict)
-            owned_energy = outputs["owned_local_energy"]
+            # MACE predicts eV; DistNNP's integrators want amu * A^2 / fs^2.
+            # Convert before differentiating so the forces inherit the same
+            # scaling and the two can never fall out of step. Matches UMAModel
+            # and ORBModel, which return MD units too.
+            owned_energy = outputs["owned_local_energy"] * EV_PER_A_TO_AMU_A_PER_FS2
             owned_forces = self._recover_forces(owned_energy, view)
         finally:
             self.runtime.end_forward()

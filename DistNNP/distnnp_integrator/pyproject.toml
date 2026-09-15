@@ -7,7 +7,7 @@ name = "distnnp_integrator"
 version = "0.0.1"
 description = "C++ molecular dynamics integrator for DistNNP"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 dependencies = []
 
 [tool.scikit-build]

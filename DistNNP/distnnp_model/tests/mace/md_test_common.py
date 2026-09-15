@@ -24,6 +24,12 @@ from distnnp_model.nnp.mace import (
     load_raw_mace_model,
 )
 
+# MACEModel returns MD units (amu * A^2 / fs^2, amu * A / fs^2) like UMAModel
+# and ORBModel. Public MACE calculators predict eV / (eV per Angstrom), so any
+# reference built from one must be scaled by this before it can be compared.
+# Imported rather than re-spelled so it cannot drift from the backends.
+from distnnp_model.units import EV_PER_A_TO_AMU_A_PER_FS2 as EV_TO_MD
+
 
 def install_trajectory_simulator_import_compatibility() -> None:
     """Supply only the imports missing from pre-upstream Simulator builds.
@@ -89,12 +95,6 @@ _TEST_SYSTEM_SPECS = {
 }
 DEFAULT_GHOST_CUTOFF_BUFFER = 0.5
 
-# DistNNP's Verlet kernel uses mass in amu, positions in Angstrom, and time in
-# fs, so its force input must be amu * Angstrom / fs^2. MACE returns the
-# derivative of its eV energy with respect to Angstrom coordinates (eV / A).
-# Keep energy in eV and scale only the force passed to MD.
-EV_PER_ANGSTROM_TO_AMU_ANGSTROM_PER_FS2 = 0.0096485332
-
 EARLY_PHASE_STEPS = 4
 POS_VEL_TOL = 2e-5
 ENERGY_RTOL = 1e-3
@@ -107,8 +107,11 @@ _VEL_NOISE_RMSD_SLOPE_PER_STEP = 3.7e-8
 RMSD_MARGIN = 30.0
 
 ENERGY_DRIFT_MARGIN = 3.0
-ENERGY_SLOPE_FLOOR_EV_PER_STEP = 1e-3
-ENERGY_STD_FLOOR_EV = 1e-2
+# These floors were tuned against eV-scale energies. Trajectory energies are now
+# MD units, so carry the same physical bound across rather than leaving the
+# literals behind, which would silently loosen both checks by ~103.6x.
+ENERGY_SLOPE_FLOOR_PER_STEP = 1e-3 * EV_TO_MD
+ENERGY_STD_FLOOR = 1e-2 * EV_TO_MD
 
 RDF_LAST_K_FRAMES = 20
 RDF_N_BINS = 50
@@ -246,39 +249,13 @@ def teardown_singleton_dist_env() -> None:
         dist.destroy_process_group()
 
 
-class MACEForceUnitConversionAdapter:
-    """Expose MACEModel with forces in DistNNP integration units.
-
-    This is deliberately trajectory-test-only: static MACE parity tests compare
-    raw MACE eV/Angstrom forces. The potential energy remains in eV; only the
-    force handed to the amu/Angstrom/fs Verlet integrator is converted.
-    """
-
-    def __init__(self, adapter: MACEModel) -> None:
-        self._adapter = adapter
-
-    @property
-    def cutoff(self) -> float:
-        return self._adapter.cutoff
-
-    def initialize_buffers(self, partition_info, device: torch.device) -> None:
-        self._adapter.initialize_buffers(partition_info, device=device)
-
-    def __call__(self, state, *args: Any, **kwargs: Any):
-        energy_ev, forces_ev_per_angstrom = self._adapter(state, *args, **kwargs)
-        forces_amu_angstrom_per_fs2 = (
-            forces_ev_per_angstrom * EV_PER_ANGSTROM_TO_AMU_ANGSTROM_PER_FS2
-        )
-        return energy_ev, forces_amu_angstrom_per_fs2
-
-
 def build_mace_model(
     device: torch.device,
     model: str = "medium-mpa-0",
     head_name: Optional[str] = None,
     model_family: str = "mp",
     system: str = "silicon",
-) -> MACEForceUnitConversionAdapter:
+) -> MACEModel:
     spec = get_test_system_spec(system)
     raw_model = load_raw_mace_model(model_family=model_family, model=model, device=device.type)
     supported_atomic_numbers = {int(value) for value in raw_model.atomic_numbers.detach().cpu().tolist()}
@@ -288,8 +265,9 @@ def build_mace_model(
             f"{spec['symbol']} (atomic number {spec['atomic_number']}). Supported atomic numbers: "
             f"{sorted(supported_atomic_numbers)}"
         )
-    adapter = MACEModel(raw_model.to(device=device).eval(), head_name=head_name or None)
-    return MACEForceUnitConversionAdapter(adapter)
+    # MACEModel already returns DistNNP MD units, so it drives the Simulator
+    # directly, exactly as UMAModel and ORBModel do.
+    return MACEModel(raw_model.to(device=device).eval(), head_name=head_name or None)
 
 
 class MonolithicMACECalculatorAdapter:
@@ -361,11 +339,10 @@ class MonolithicMACECalculatorAdapter:
                 f"{tuple(forces_ev_per_angstrom.shape)}; expected {tuple(positions.shape)}."
             )
 
-        # Public MACE forces are eV/Angstrom; Verlet expects amu*Angstrom/fs^2.
-        converted_forces = (
-            forces_ev_per_angstrom * EV_PER_ANGSTROM_TO_AMU_ANGSTROM_PER_FS2
-        )
-        return energy_ev, converted_forces
+        # The public calculator predicts eV and eV/Angstrom. Convert BOTH so this
+        # reference reports the same units as MACEModel; scaling only the force
+        # would leave the trajectory energies on a different scale.
+        return energy_ev * EV_TO_MD, forces_ev_per_angstrom * EV_TO_MD
 
 
 def build_monolithic_mace_model(
@@ -596,17 +573,17 @@ def print_comparison_report_summary(rows: list[Dict[str, Any]]) -> None:
     print("[report] trajectory comparison summary:")
     print(
         f"[report] vertex IDs match every frame={vertex_ids_match}; "
-        f"step 0: dE={float(first['energy_diff']):+.3e} eV, "
+        f"step 0: dE={float(first['energy_diff']):+.3e} amu*A^2/fs^2, "
         f"pos_rmsd={float(first['pos_rmsd']):.3e} A, "
         f"vel_rmsd={float(first['vel_rmsd']):.3e} A/fs"
     )
     print(
-        f"[report] final step {last['step']}: dE={float(last['energy_diff']):+.3e} eV, "
+        f"[report] final step {last['step']}: dE={float(last['energy_diff']):+.3e} amu*A^2/fs^2, "
         f"pos_rmsd={float(last['pos_rmsd']):.3e} A, "
         f"vel_rmsd={float(last['vel_rmsd']):.3e} A/fs"
     )
     print(
-        f"[report] peak |dE|={abs(float(peak_energy['energy_diff'])):.3e} eV at step "
+        f"[report] peak |dE|={abs(float(peak_energy['energy_diff'])):.3e} amu*A^2/fs^2 at step "
         f"{peak_energy['step']}; peak position RMSD={float(peak_position['pos_rmsd']):.3e} A "
         f"at step {peak_position['step']} (max component atom vid={peak_position['pos_max_atom_vid']}); "
         f"peak velocity RMSD={float(peak_velocity['vel_rmsd']):.3e} A/fs at step "
@@ -681,33 +658,33 @@ def compare_trajectories(
     dist_endpoint_drift = compute_energy_drift(dist_traj)
     print(
         f"[phase 2] energy |E(t)-E(0)| (diagnostic only): "
-        f"reference max={float(np.max(ref_endpoint_drift)):.6f} eV, "
-        f"distributed max={float(np.max(dist_endpoint_drift)):.6f} eV"
+        f"reference max={float(np.max(ref_endpoint_drift)):.6f} amu*A^2/fs^2, "
+        f"distributed max={float(np.max(dist_endpoint_drift)):.6f} amu*A^2/fs^2"
     )
 
     ref_slope = energy_drift_slope(ref_traj)
     dist_slope = energy_drift_slope(dist_traj)
     ref_std = energy_oscillation_std(ref_traj)
     dist_std = energy_oscillation_std(dist_traj)
-    slope_bound = max(ENERGY_DRIFT_MARGIN * abs(ref_slope), ENERGY_SLOPE_FLOOR_EV_PER_STEP)
-    std_bound = max(ENERGY_DRIFT_MARGIN * ref_std, ENERGY_STD_FLOOR_EV)
+    slope_bound = max(ENERGY_DRIFT_MARGIN * abs(ref_slope), ENERGY_SLOPE_FLOOR_PER_STEP)
+    std_bound = max(ENERGY_DRIFT_MARGIN * ref_std, ENERGY_STD_FLOOR)
     print(
-        f"[phase 2] energy drift slope: reference={ref_slope:.3e} eV/step, "
-        f"distributed={dist_slope:.3e} eV/step, bound={slope_bound:.3e} eV/step"
+        f"[phase 2] energy drift slope: reference={ref_slope:.3e} amu*A^2/fs^2 per step, "
+        f"distributed={dist_slope:.3e} amu*A^2/fs^2 per step, bound={slope_bound:.3e} amu*A^2/fs^2 per step"
     )
     print(
-        f"[phase 2] energy oscillation std (about trend): reference={ref_std:.3e} eV, "
-        f"distributed={dist_std:.3e} eV, bound={std_bound:.3e} eV"
+        f"[phase 2] energy oscillation std (about trend): reference={ref_std:.3e} amu*A^2/fs^2, "
+        f"distributed={dist_std:.3e} amu*A^2/fs^2, bound={std_bound:.3e} amu*A^2/fs^2"
     )
     assert abs(dist_slope) <= slope_bound, (
-        f"[phase 2] distributed run's energy drift slope ({dist_slope:.3e} eV/step) exceeds "
-        f"{ENERGY_DRIFT_MARGIN}x the reference run's own slope ({ref_slope:.3e} eV/step, "
-        f"bound={slope_bound:.3e} eV/step)"
+        f"[phase 2] distributed run's energy drift slope ({dist_slope:.3e} amu*A^2/fs^2 per step) exceeds "
+        f"{ENERGY_DRIFT_MARGIN}x the reference run's own slope ({ref_slope:.3e} amu*A^2/fs^2 per step, "
+        f"bound={slope_bound:.3e} amu*A^2/fs^2 per step)"
     )
     assert dist_std <= std_bound, (
-        f"[phase 2] distributed run's energy oscillation std ({dist_std:.3e} eV) exceeds "
-        f"{ENERGY_DRIFT_MARGIN}x the reference run's own std ({ref_std:.3e} eV, "
-        f"bound={std_bound:.3e} eV)"
+        f"[phase 2] distributed run's energy oscillation std ({dist_std:.3e} amu*A^2/fs^2) exceeds "
+        f"{ENERGY_DRIFT_MARGIN}x the reference run's own std ({ref_std:.3e} amu*A^2/fs^2, "
+        f"bound={std_bound:.3e} amu*A^2/fs^2)"
     )
 
     _, g_ref = averaged_rdf(ref_traj, RDF_LAST_K_FRAMES, side_length_angstrom)

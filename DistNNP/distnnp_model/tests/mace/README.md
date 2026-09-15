@@ -79,6 +79,12 @@ structure on both sides of the comparison.
 Static parity anchors `MACEModel` to public MACE calculator and raw-core model
 values. Trajectory validation covers distributed partitioning, halo and feature
 exchange, rank-local energy aggregation, repartitioning, and Verlet
-integration against monolithic MACE. `MACEModel` returns raw MACE energy and
-force units; the trajectory harness applies its explicit Verlet force-unit
-conversion only for integration.
+integration against monolithic MACE.
+
+`MACEModel` returns DistNNP MD units — energy in `amu*A^2/fs^2` and forces in
+`amu*A/fs^2` — matching `UMAModel` and `ORBModel`, so it drives `Simulator`
+directly with no wrapper. Public MACE predicts eV and eV/Angstrom, so every
+reference in this directory is scaled by
+`distnnp_model.units.EV_PER_A_TO_AMU_A_PER_FS2` before it is compared. That
+constant is defined once and imported by all three backends; do not re-spell
+the literal.
