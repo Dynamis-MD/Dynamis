@@ -42,6 +42,14 @@ except Exception as exc:  # pragma: no cover - optional dependency
     prepare_graph = None
     _MACE_IMPORT_ERROR = exc
 
+try:
+    from mace.cli.convert_e3nn_cueq import run as run_e3nn_to_cueq
+
+    _CUEQ_IMPORT_ERROR: Optional[Exception] = None
+except Exception as exc:  # pragma: no cover - optional dependency
+    run_e3nn_to_cueq = None
+    _CUEQ_IMPORT_ERROR = exc
+
 
 def _require_mace() -> None:
     if _MACE_IMPORT_ERROR is not None:
@@ -52,6 +60,7 @@ def load_raw_mace_model(
     model_family: str = "mp",
     model: str = "medium-mpa-0",
     device: str = "cuda",
+    enable_cueq: bool = False,
 ):
     """Load a public MACE foundation model without its ASE calculator wrapper."""
     _require_mace()
@@ -63,8 +72,12 @@ def load_raw_mace_model(
         device=device,
         default_dtype="float32",
         return_raw_model=True,
-    )
-    return loaded_model.to(dtype=COMPUTE_DTYPE)
+    ).to(dtype=COMPUTE_DTYPE)
+    if enable_cueq:
+        if _CUEQ_IMPORT_ERROR is not None:
+            raise ImportError("CuEquivariance conversion was requested but is unavailable.") from _CUEQ_IMPORT_ERROR
+        loaded_model = run_e3nn_to_cueq(loaded_model, device=device).to(device)
+    return loaded_model
 
 
 def validate_partition_info(
@@ -157,6 +170,7 @@ class MACEOwnedGraph:
     unit_shifts: torch.Tensor
     shifts: torch.Tensor
     batch_dict: Dict[str, torch.Tensor]
+    pre_filter_edge_count: int
 
 
 class _RadiusGraphInput:
@@ -534,6 +548,7 @@ class MACEModel(DistNNPModel):
 
     def _build_owned_graph(self, view: MACEStructuralView, state: DistNNPState) -> MACEOwnedGraph:
         edge_index, unit_shifts = self._radius_graph(view.exchanged_positions, state)
+        pre_filter_edge_count = int(edge_index.shape[1])
         owned_destination = edge_index[1] < view.num_local
         edge_index = edge_index[:, owned_destination].contiguous()
         unit_shifts = unit_shifts[owned_destination].to(dtype=COMPUTE_DTYPE)
@@ -554,7 +569,13 @@ class MACEModel(DistNNPModel):
             key: value.to(COMPUTE_DTYPE) if torch.is_floating_point(value) else value
             for key, value in batch_dict.items()
         }
-        return MACEOwnedGraph(edge_index=edge_index, unit_shifts=unit_shifts, shifts=shifts, batch_dict=batch_dict)
+        return MACEOwnedGraph(
+            edge_index=edge_index,
+            unit_shifts=unit_shifts,
+            shifts=shifts,
+            batch_dict=batch_dict,
+            pre_filter_edge_count=pre_filter_edge_count,
+        )
 
     @staticmethod
     def _recover_forces(

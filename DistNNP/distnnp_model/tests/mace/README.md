@@ -44,6 +44,51 @@ model identity. Both commands in a reference/distributed pair must therefore
 use the same structure and model arguments. Nonperiodic XYZ/extxyz inputs must
 provide a valid cell containing their coordinates.
 
+## cuEquivariance
+
+The static reference and distributed drivers both accept `--enable-cueq`.
+When selected, the raw MACE model is converted with MACE's
+`convert_e3nn_cueq` conversion before either path is timed or evaluated. The
+flag is part of the reference-artifact signature, so a CuEq reference can only
+be compared with a CuEq distributed run. Omitting the flag retains the e3nn
+implementation.
+
+Install mutually compatible versions of all four CuEq packages. The validated
+cluster environment currently uses version `0.9.1` for
+`cuequivariance`, `cuequivariance-torch`, `cuequivariance-ops-cu12`, and
+`cuequivariance-ops-torch-cu12` with Python 3.12, PyTorch 2.8.0+cu129, and
+MACE 0.3.16.
+
+Generate a CuEq-enabled standalone reference and run the two-GPU benchmark:
+
+```bash
+RESULT_DIR=./tmp/mace_cueq_2gpu
+XYZ_PATH=distnnp_model/tests/mace/data/benchmark_scaling_molecular_7500.xyz
+mkdir -p "${RESULT_DIR}"
+
+python distnnp_model/tests/mace/mace_standalone_reference.py \
+  --xyz-path "${XYZ_PATH}" --model-family mp --model medium-mpa-0 \
+  --enable-cueq --output "${RESULT_DIR}/reference.pt" \
+  --benchmark --benchmark-warmup 10 --benchmark-iterations 50 \
+  --benchmark-samples 7 --output-json "${RESULT_DIR}/reference.json"
+
+torchrun --standalone --nproc_per_node=2 \
+  distnnp_model/tests/mace/test_mace_model.py run-distributed \
+  --xyz-path "${XYZ_PATH}" --model-family mp --model medium-mpa-0 \
+  --enable-cueq --reference-artifact "${RESULT_DIR}/reference.pt" \
+  --strict-parity --benchmark --benchmark-warmup 10 \
+  --benchmark-iterations 50 --benchmark-samples 7 \
+  --output-json "${RESULT_DIR}/distributed.json"
+```
+
+For a four-GPU strong-scaling run, generate the same standalone reference and
+change only the distributed launch to `--nproc_per_node=4`. Keep the XYZ,
+model, head, dtype, CuEq setting, warmup, iterations, and sample count fixed
+when comparing rank counts. The 7,500-atom fixture is preferred over the
+3,750-atom fixture for two-versus-four-GPU scaling because the smaller system
+does not provide enough per-rank compute to amortize halo and synchronization
+costs.
+
 ## Distributed trajectory
 
 Run the two-rank MACEModel trajectory, then compare it with a one-rank public
@@ -73,6 +118,16 @@ Benchmarking is opt-in and does not change parity acceptance. Add
 `--benchmark --benchmark-warmup 5 --benchmark-iterations 20
 --benchmark-samples 7` to both static-parity commands. Use the same model and
 structure on both sides of the comparison.
+
+The uninterrupted `distributed_median_ms_per_step` is the primary end-to-end
+measurement and uses the slowest rank. The static driver also records a
+diagnostic per-rank decomposition into structural/position exchange, graph
+construction, MACE forward/feature exchange, and force recovery/backward
+exchange. These diagnostic stages synchronize the device after every boundary
+and therefore should be used to attribute costs, not substituted for the
+uninterrupted result. Workload fields include owned and halo atoms, graph-edge
+counts, rows exchanged per peer, feature width, and logical feature payload
+bytes.
 
 ## Coverage boundary
 
