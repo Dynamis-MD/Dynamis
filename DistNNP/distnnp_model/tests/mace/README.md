@@ -59,6 +59,10 @@ cluster environment currently uses version `0.9.1` for
 `cuequivariance-ops-torch-cu12` with Python 3.12, PyTorch 2.8.0+cu129, and
 MACE 0.3.16.
 
+Install the validated CUDA 12 combination from the `distnnp_model` package
+directory with `python -m pip install -e '.[mace-cueq]'`. The plain
+`python -m pip install -e '.[mace]'` extra installs MACE without CuEq.
+
 Generate a CuEq-enabled standalone reference and run the two-GPU benchmark:
 
 ```bash
@@ -110,7 +114,26 @@ python distnnp_model/tests/mace/test_md.py \
 The acceptance trajectory is a deterministic 216-atom periodic diamond-Si
 system with 100 steps, a 0.5 fs timestep, and rebalancing every seven steps.
 The generated artifact records model identity, structure hash, rank count, and
-force-unit convention before numerical comparison begins.
+force-unit convention before numerical comparison begins. These commands use
+the default e3nn implementation. To test the CuEq path, append
+`--enable-cueq` to both commands:
+
+```bash
+RESULT_DIR=./tmp/mace_trajectory_cueq
+mkdir -p "${RESULT_DIR}"
+
+torchrun --standalone --nproc_per_node=2 \
+  distnnp_model/tests/mace/run_distributed_trajectory.py \
+  --path "${RESULT_DIR}" --model-family mp --model medium-mpa-0 \
+  --enable-cueq
+
+python distnnp_model/tests/mace/test_md.py \
+  --path "${RESULT_DIR}" --model-family mp --model medium-mpa-0 \
+  --reference-mode monolithic --enable-cueq
+```
+
+The CuEq setting is stored in the trajectory artifact metadata. A reference
+command using a different setting is rejected before trajectory comparison.
 
 ## Benchmark collection
 

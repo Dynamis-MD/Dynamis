@@ -59,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--head-name", default="")
     parser.add_argument("--model-family", default="mp", choices=["mp", "off", "omol", "polar"])
     parser.add_argument(
+        "--enable-cueq",
+        action="store_true",
+        help="Use cuEquivariance in both the singleton reference and distributed artifact.",
+    )
+    parser.add_argument(
         "--reference-mode",
         choices=["mace", "monolithic"],
         default="monolithic",
@@ -96,6 +101,7 @@ def main() -> None:
             head_name=args.head_name or None,
             model_family=args.model_family,
             system="silicon",
+            enable_cueq=args.enable_cueq,
         )
         print(f"Running {args.reference_mode} singleton MACE reference trajectory for silicon.")
         integrator = Verlet(dt=0.5)
@@ -114,10 +120,11 @@ def main() -> None:
         if not isinstance(artifact, dict) or set(artifact) != {"metadata", "frames"}:
             raise ValueError("Distributed trajectory artifact must contain exactly 'metadata' and 'frames'.")
         expected_metadata = {
-            "artifact_version": 1,
+            "artifact_version": 2,
             "model": args.model,
             "model_family": args.model_family,
             "head_name": args.head_name,
+            "enable_cueq": args.enable_cueq,
             "structure_sha256": structure_sha256(structure),
             "timestep_fs": config.timestep_fs,
             "step_count": N_STEPS,

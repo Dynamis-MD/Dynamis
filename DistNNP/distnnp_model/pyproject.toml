@@ -14,6 +14,13 @@ dependencies = []
 mace = [
     "mace-torch==0.3.16"
 ]
+mace-cueq = [
+    "mace-torch==0.3.16",
+    "cuequivariance==0.9.1",
+    "cuequivariance-torch==0.9.1",
+    "cuequivariance-ops-cu12==0.9.1",
+    "cuequivariance-ops-torch-cu12==0.9.1"
+]
 uma = [
     "fairchem-core"
 ]
