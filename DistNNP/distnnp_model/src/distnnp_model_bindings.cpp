@@ -46,6 +46,9 @@ PYBIND11_MODULE(distnnp_model_impl, m)
          [](distnnp_model::IPCExchanger &self) { self.record_push_complete(); })
     .def("wait_for_pushes",
          [](distnnp_model::IPCExchanger &self) { self.wait_for_pushes(); })
+    .def("set_watchdog_flags", &distnnp_model::IPCExchanger::set_watchdog_flags,
+         py::arg("local_flag"), py::arg("global_flag"))
+    .def("clear_watchdog_flags", &distnnp_model::IPCExchanger::clear_watchdog_flags)
     .def("teardown", &distnnp_model::IPCExchanger::teardown)
     .def("is_setup", &distnnp_model::IPCExchanger::is_setup)
     .def("use_fabric", &distnnp_model::IPCExchanger::use_fabric);
@@ -93,6 +96,13 @@ PYBIND11_MODULE(distnnp_model_impl, m)
          "Bump sync counter on default stream after push completes")
     .def("wait_for_pushes", &distnnp_model::FeatureExchanger::wait_for_pushes,
          "Wait on default stream until all peers' sync counters reach current step")
+    .def("set_watchdog_flags", &distnnp_model::FeatureExchanger::set_watchdog_flags,
+         "Carry a drift-watchdog flag word on every push: local_flag (int32 [1]) is "
+         "written into this rank's sync word before each push completes, and the "
+         "bitwise OR over all ranks is written into global_flag (int32 [1]) after each wait",
+         py::arg("local_flag"), py::arg("global_flag"))
+    .def("clear_watchdog_flags", &distnnp_model::FeatureExchanger::clear_watchdog_flags,
+         "Stop carrying the drift-watchdog flag")
     .def("teardown", &distnnp_model::FeatureExchanger::teardown)
     .def("is_ipc_setup", &distnnp_model::FeatureExchanger::is_ipc_setup)
     .def("use_fabric", &distnnp_model::FeatureExchanger::use_fabric)

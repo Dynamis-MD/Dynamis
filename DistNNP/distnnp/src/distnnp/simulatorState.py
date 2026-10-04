@@ -12,6 +12,12 @@ import torch
 import torch.distributed as dist
 from typing import Union, Literal, Optional
 
+# Bits of the per-rank drift word (see SimState.write_local_drift_flag).
+DRIFT_TRIP = 1    # rebuild the halo before the next step
+DRIFT_BREACH = 2  # this step's graph was built past the displacement guarantee.
+                  # Debug only: never expected with the bit-0 rule; kept as a cheap
+                  # check for future debugging (e.g. a new integrator or a larger dt).
+
 ABSTRACT_PARTITIONERS = Union[
     SFCPartitioner, SimpleSpatialPartitioner, KDTreePartitioner
 ]
@@ -55,6 +61,14 @@ class SimState:
             partition_info=partition_info,
             molecular_system=molecular_system,
         )
+
+        # Drift-watchdog reference: this rank's local positions at the last
+        # repartition. The local atom set and its order stay fixed until the next
+        # repartition (the integrator writes in place; nothing reorders), so drift is
+        # an elementwise difference against this snapshot.
+        self._ref_positions: Optional[torch.Tensor] = None
+        self._prev_velocities: Optional[torch.Tensor] = None
+        self.snapshot_reference_positions()
 
     def setup_mass_and_forces(self, partition_info, molecular_system):
         local_molecular_info = MolecularInfo()
@@ -182,3 +196,94 @@ class SimState:
         self._state.local_molecular_info = self.setup_mass_and_forces(
             partition_info=new_partition_info, molecular_system=global_mol_info
         )
+        self.snapshot_reference_positions()
+
+    def sync_positions_and_rebuild_halo(self) -> None:
+        """Halo-only rebuild: refresh the ghost lists without repartitioning.
+
+        Ownership, the local atom set and its order, and velocities are unchanged. Only
+        the positions are all-gathered (one tensor collective, no pickling), and
+        build_halo_maps() is re-run on the existing partition (it depends only on
+        partition_id and the global positions). Load balance is left to the scheduled
+        sync_and_repartition(). Afterwards global_molecular_info holds current positions
+        but the velocities of the last full sync (nothing reads them in between; the
+        next full sync overwrites both)."""
+        info = self._state.local_partition_info
+        global_mol_info = self._state.global_molecular_info
+        local_positions = self._state.local_molecular_info.atom_positions.detach()
+
+        if self.world_size == 1:
+            global_mol_info.atom_positions[info.partition_indices] = local_positions
+        else:
+            owner = info.partition_id
+            # Every rank's atoms in ascending global-ID order: one stable sort, one sync.
+            order = torch.argsort(owner, stable=True)
+            counts = torch.bincount(owner, minlength=self.world_size).tolist()
+            starts = [0]
+            for c in counts:
+                starts.append(starts[-1] + c)
+            ids = [order[starts[r] : starts[r + 1]] for r in range(self.world_size)]
+            # Local arrays follow partition_indices; build_halo_maps indexes local atoms
+            # in ascending-ID order. Both must agree for the send lists to be right.
+            assert torch.equal(ids[self.global_rank], info.partition_indices), (
+                "partition_indices is not in ascending global-ID order"
+            )
+            m = max(counts)
+            buf = local_positions.new_zeros((m, 3))
+            buf[: counts[self.global_rank]] = local_positions
+            gathered = local_positions.new_empty((self.world_size * m, 3))
+            dist.all_gather_into_tensor(gathered, buf)
+            full = local_positions.new_empty((global_mol_info.atom_positions.shape[0], 3))
+            for r in range(self.world_size):
+                full[ids[r]] = gathered[r * m : r * m + counts[r]]
+            global_mol_info.atom_positions = full
+
+        self.partitioner.build_halo_maps(
+            info, global_mol_info, self.dist_env, self.sim_config
+        )
+        self.snapshot_reference_positions()
+
+    def snapshot_reference_positions(self) -> None:
+        """Latch the current local positions as the drift reference (the positions the
+        halo maps were just built from). Must be a clone: the integrator updates
+        atom_positions in place. Also restarts the velocity history of the one-step
+        bound in write_local_drift_flag."""
+        info = self._state.local_molecular_info
+        self._ref_positions = info.atom_positions.detach().clone()
+        self._prev_velocities = info.atom_velocities.detach().clone()
+
+    def write_local_drift_flag(
+        self, flag: torch.Tensor, threshold: float, dt: float
+    ) -> None:
+        """Write this rank's 2-bit drift word into ``flag`` (int32 [1]); device-only.
+
+        Called on the positions the model is about to push, i.e. the positions this
+        step's graph is built on. With d_i = |x_i - x_i^ref| (L2, since the last halo
+        build) and the next step's motion bounded per atom by
+        dt * (|v_i| + |v_i - v_i^prev|) (velocity plus its change over the last call,
+        standing in for the force update):
+
+          bit 0 (DRIFT_TRIP):   max_i d_i + dt * (|v_i| + |v_i - v_i^prev|) >= threshold
+                                -> the next step's graph could exceed it: rebuild first
+          bit 1 (DRIFT_BREACH): max_i d_i > threshold
+                                -> THIS step's graph is built past the guarantee
+
+        With threshold = skin / 2, no edge can be missing while no rank sets bit 1.
+        Positions are never wrapped (not by the integrator, the models or the exchanger),
+        so the raw difference is the true displacement: no minimum-image fold."""
+        info = self._state.local_molecular_info
+        cur = info.atom_positions.detach()
+        ref = self._ref_positions
+        if ref is None or ref.shape != cur.shape:
+            flag.fill_(DRIFT_TRIP)  # the local set changed under us: force a rebuild
+            return
+        if cur.shape[0] == 0:
+            flag.zero_()
+            return
+        vel = info.atom_velocities.detach()
+        disp = (cur - ref).norm(dim=1)
+        reach = disp + dt * (vel.norm(dim=1) + (vel - self._prev_velocities).norm(dim=1))
+        word = (reach.max() >= threshold).to(torch.int32) * DRIFT_TRIP
+        word += (disp.max() > threshold).to(torch.int32) * DRIFT_BREACH
+        flag.copy_(word)
+        self._prev_velocities.copy_(vel)

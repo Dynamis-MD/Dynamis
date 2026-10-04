@@ -1,6 +1,7 @@
 import torch.distributed as dist
 import torch
 from distnnp_model import FeatureExchanger
+from distnnp_model.comm import drift_flags
 from distnnp_state import PartitionMessagePassingInfo
 from abc import ABC, abstractmethod
 
@@ -150,6 +151,7 @@ class GPUDirectExchanger(Exchanger):
         self.is_ipc_setup = False
         self.send_buffer = None
         self.grad_recv_buffer = None
+        self._wired_flags = None   # drift_flags.DriftFlags this exchanger currently carries
 
     def reset_buffers(self):
         """Reset the internal buffers of the exchanger to prepare for the next communication round."""
@@ -174,8 +176,7 @@ class GPUDirectExchanger(Exchanger):
         Returns:
             torch.Tensor: The features received from neighboring partitions after the push to exchange operation.
         """
-        # The actual implementation of the feature push using GPU Direct would go here.
-        # This is a placeholder to illustrate where the communication logic would be implemented.
+        self._wire_drift_flags(features_to_push.device)
         return self.exchanger.feature_push_forward(features_to_push, partition_info)
 
     def feature_push_backward_impl(
@@ -194,11 +195,24 @@ class GPUDirectExchanger(Exchanger):
         Returns:
             torch.Tensor: The gradients for the input features that were pushed in the forward pass.
         """
-        # The actual implementation of the backward pass for the feature push using GPU Direct would go here.
-        # This is a placeholder to illustrate where the communication logic for the backward pass would be implemented.
+        self._wire_drift_flags(grad_output.device)
         return self.exchanger.feature_push_backward(
             grad_output, input_feature_shape, partition_info
         )
+
+    def _wire_drift_flags(self, device: torch.device) -> None:
+        """Carry the process-wide drift-watchdog flags for ``device`` on this exchanger's
+        push handshake, or stop carrying them if they were disabled (see drift_flags).
+        A dict lookup and an identity check, so it is run on every push."""
+        flags = drift_flags.get(device)
+        if flags is self._wired_flags:
+            return
+        if flags is None:
+            self.exchanger.clear_watchdog_flags()
+        else:
+            self.exchanger.set_watchdog_flags(flags.local, flags.global_)
+            flags.n_wired += 1
+        self._wired_flags = flags
 
     def setup_exchanger(
         self,

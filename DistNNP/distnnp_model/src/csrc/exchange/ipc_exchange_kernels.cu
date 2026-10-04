@@ -225,4 +225,48 @@ void launch_gather_to_staging(
         feature_dim);
 }
 
+// Drift-watchdog piggyback: bitwise OR of flag[slot] over every rank's sync word
+// (the flag is a small bit field, e.g. bit 0 = rebuild, bit 1 = breach).
+// Launched right after wait_for_pushes(), so every rank has already written the
+// current generation; the words live in peers' memory, hence the volatile loads.
+// One warp, one remote load per lane (W <= 32; up to 3 per lane on NVL72), so the
+// cost does not grow with W the way a serial loop over peers would.
+__global__ void watchdog_or_kernel(
+    const int64_t *__restrict__ sync_word_ptrs,
+    int64_t world_size,
+    uint32_t slot,
+    uint32_t *__restrict__ global_flag)
+{
+    uint32_t acc = 0;
+    for (int64_t r = threadIdx.x; r < world_size; r += blockDim.x)
+    {
+        const int64_t base = sync_word_ptrs[r];
+        if (base == 0)
+            continue;
+        const volatile uint32_t *word = reinterpret_cast<const volatile uint32_t *>(base);
+        acc |= word[1 + slot];
+    }
+    for (int offset = 16; offset > 0; offset >>= 1)
+        acc |= __shfl_xor_sync(0xffffffffu, acc, offset);
+    if (threadIdx.x == 0)
+        *global_flag = acc;
+}
+
+void launch_watchdog_or(
+    torch::Tensor sync_word_ptrs,
+    int64_t world_size,
+    uint32_t slot,
+    torch::Tensor global_flag,
+    cudaStream_t stream)
+{
+    watchdog_or_kernel<<<1, 32, 0, stream>>>(
+        sync_word_ptrs.data_ptr<int64_t>(),
+        world_size,
+        slot,
+        reinterpret_cast<uint32_t *>(global_flag.data_ptr<int32_t>()));
+    auto err = cudaGetLastError();
+    TORCH_CHECK(err == cudaSuccess, "watchdog_or_kernel launch failed: ",
+                cudaGetErrorString(err));
+}
+
 } // namespace distnnp_model

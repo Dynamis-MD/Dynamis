@@ -41,6 +41,16 @@ void launch_gather_to_staging(
     int64_t feature_dim,
     cudaStream_t stream);
 
+void launch_watchdog_or(
+    torch::Tensor sync_word_ptrs,
+    int64_t world_size,
+    uint32_t slot,
+    torch::Tensor global_flag,
+    cudaStream_t stream);
+
+// Bytes in one rank's sync word: [counter | flag[0] | flag[1] | pad].
+static constexpr size_t kSyncBytes = IPCExchanger::kSyncWords * sizeof(uint32_t);
+
 // ---------------------------------------------------------------------------
 // Error checking helper for CUDA Driver API
 // ---------------------------------------------------------------------------
@@ -680,6 +690,7 @@ std::vector<uint8_t> IPCExchanger::create_and_export_sync_handle()
         local_counter_ = nullptr;
     }
     call_counter_ = 0;
+    sync_word_ptrs_.reset();   // rebuilt by setup_sync() against the new allocation
 
     int device_id = 0;
     auto err_dev = cudaGetDevice(&device_id);
@@ -699,7 +710,7 @@ std::vector<uint8_t> IPCExchanger::create_and_export_sync_handle()
         CUresult res = cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
         check_cu_call(res, "cuMemGetAllocationGranularity (sync) failed");
 
-        size_t padded_size = ((sizeof(uint32_t) + granularity - 1) / granularity) * granularity;
+        size_t padded_size = ((kSyncBytes + granularity - 1) / granularity) * granularity;
         local_counter_padded_size_ = padded_size;
 
         res = cuMemCreate(&local_counter_handle_, padded_size, &prop, 0);
@@ -724,7 +735,7 @@ std::vector<uint8_t> IPCExchanger::create_and_export_sync_handle()
         check_cu_call(res, "cuMemSetAccess (sync) failed");
 
         local_counter_ = reinterpret_cast<uint32_t *>(local_counter_vaddr_);
-        auto err_set = cudaMemset(local_counter_, 0, sizeof(uint32_t));
+        auto err_set = cudaMemset(local_counter_, 0, kSyncBytes);
         TORCH_CHECK(err_set == cudaSuccess, "cudaMemset (sync) failed: ", cudaGetErrorString(err_set));
 
         std::vector<uint8_t> bytes(sizeof(CUDA_MEM_FABRIC_HANDLE));
@@ -734,10 +745,10 @@ std::vector<uint8_t> IPCExchanger::create_and_export_sync_handle()
 #endif
 
     // Legacy sync counter allocation
-    auto err = cudaMalloc(&local_counter_, sizeof(uint32_t));
+    auto err = cudaMalloc(&local_counter_, kSyncBytes);
     TORCH_CHECK(err == cudaSuccess, 
                 "cudaMalloc (counter) failed: ", cudaGetErrorString(err));
-    err = cudaMemset(local_counter_, 0, sizeof(uint32_t));
+    err = cudaMemset(local_counter_, 0, kSyncBytes);
     TORCH_CHECK(err == cudaSuccess, 
                 "cudaMemset (counter) failed: ", cudaGetErrorString(err));
 
@@ -802,7 +813,7 @@ void IPCExchanger::setup_sync(
         CUresult res = cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
         check_cu_call(res, "cuMemGetAllocationGranularity (sync) failed");
 
-        size_t padded_size = ((sizeof(uint32_t) + granularity - 1) / granularity) * granularity;
+        size_t padded_size = ((kSyncBytes + granularity - 1) / granularity) * granularity;
 
         for (int64_t r = 0; r < world_size_; ++r)
         {
@@ -838,6 +849,7 @@ void IPCExchanger::setup_sync(
             remote_sync_mappings_[r] = {remote_vaddr, padded_size, imported_handle};
         }
 
+        build_sync_word_ptrs();
         sync_setup_ = true;
         return;
     }
@@ -862,6 +874,7 @@ void IPCExchanger::setup_sync(
         remote_counters_[r] = reinterpret_cast<CUdeviceptr>(ptr);
     }
 
+    build_sync_word_ptrs();
     sync_setup_ = true;
 }
 
@@ -869,6 +882,16 @@ void IPCExchanger::record_push_complete(cudaStream_t stream)
 {
     TORCH_CHECK(sync_setup_, "record_push_complete: counter not set up");
     ++call_counter_;
+    if (watchdog_local_.defined())
+    {
+        // flag[g % 2] <- *local_flag, ordered BEFORE the counter write below, whose
+        // default memory barrier makes it visible to any peer that sees counter >= g.
+        uint32_t *slot = local_counter_ + 1 + (call_counter_ & 1u);
+        auto err = cudaMemcpyAsync(slot, watchdog_local_.data_ptr(), sizeof(uint32_t),
+                                   cudaMemcpyDeviceToDevice, stream);
+        TORCH_CHECK(err == cudaSuccess, "watchdog flag write failed: ",
+                    cudaGetErrorString(err));
+    }
     // cuStreamWriteValue32 with default flags is ordered after prior stream
     // operations — i.e. the write follows the push memcpy on this stream.
     CUresult err = cuStreamWriteValue32(
@@ -903,6 +926,43 @@ void IPCExchanger::wait_for_pushes(cudaStream_t stream)
                         " failed: ", (msg ? msg : "(unknown)"));
         }
     }
+    // Every rank has now written generation g, so every flag[g % 2] is final and
+    // no rank can overwrite it before this rank writes its own counter for g + 1.
+    if (watchdog_global_.defined() && sync_word_ptrs_.defined())
+        launch_watchdog_or(sync_word_ptrs_, world_size_, call_counter_ & 1u,
+                           watchdog_global_, stream);
+}
+
+void IPCExchanger::set_watchdog_flags(torch::Tensor local_flag, torch::Tensor global_flag)
+{
+    for (const auto *t : {&local_flag, &global_flag})
+    {
+        TORCH_CHECK(t->is_cuda(), "set_watchdog_flags: flags must be CUDA tensors");
+        TORCH_CHECK(t->scalar_type() == torch::kInt32 && t->numel() == 1 && t->is_contiguous(),
+                    "set_watchdog_flags: flags must be contiguous int32 tensors with one element");
+    }
+    watchdog_local_ = local_flag;
+    watchdog_global_ = global_flag;
+}
+
+void IPCExchanger::clear_watchdog_flags()
+{
+    watchdog_local_.reset();
+    watchdog_global_.reset();
+}
+
+void IPCExchanger::build_sync_word_ptrs()
+{
+    // Base address of every rank's sync word as seen from this device: our own for
+    // r == rank_, the IPC / Fabric mapping of the peer's otherwise.
+    std::vector<int64_t> ptrs(world_size_, 0);
+    for (int64_t r = 0; r < world_size_; ++r)
+        ptrs[r] = (r == rank_) ? reinterpret_cast<int64_t>(local_counter_)
+                               : static_cast<int64_t>(remote_counters_[r]);
+    int device_id = 0;
+    cudaGetDevice(&device_id);
+    sync_word_ptrs_ = torch::tensor(ptrs, torch::dtype(torch::kInt64))
+                          .to(torch::Device(torch::kCUDA, device_id));
 }
 
 void IPCExchanger::teardown()
@@ -951,6 +1011,7 @@ void IPCExchanger::teardown()
 
     local_counter_ = nullptr;
     remote_counters_.clear();
+    sync_word_ptrs_.reset();
     call_counter_ = 0;
     sync_setup_ = false;
     sync_use_fabric_ = false;
