@@ -47,6 +47,16 @@ class IPCExchanger:
         ...
     def wait_for_pushes(self) -> None:
         ...
+    def set_watchdog_flags(self, local_flag: torch.Tensor, global_flag: torch.Tensor) -> None:
+        """
+        Carry a drift-watchdog flag word on every push: local_flag (int32 [1]) is written into
+        this rank's sync word before each push completes, and the bitwise OR over all ranks is
+        written into global_flag (int32 [1]) after each wait
+        """
+    def clear_watchdog_flags(self) -> None:
+        """
+        Stop carrying the drift-watchdog flag
+        """
     def teardown(self) -> None:
         ...
     def is_setup(self) -> bool:
@@ -108,4 +118,14 @@ class FeatureExchanger:
     def wait_for_pushes(self) -> None:
         """
         Wait on default stream until all peers' sync counters reach current step
+        """
+    def set_watchdog_flags(self, local_flag: torch.Tensor, global_flag: torch.Tensor) -> None:
+        """
+        Carry a drift-watchdog flag word on every push: local_flag (int32 [1]) is written into
+        this rank's sync word before each push completes, and the bitwise OR over all ranks is
+        written into global_flag (int32 [1]) after each wait
+        """
+    def clear_watchdog_flags(self) -> None:
+        """
+        Stop carrying the drift-watchdog flag
         """

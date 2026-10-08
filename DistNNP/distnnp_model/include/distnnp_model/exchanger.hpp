@@ -82,6 +82,18 @@ public:
     void record_push_complete(cudaStream_t stream = 0);
     void wait_for_pushes(cudaStream_t stream = 0);
 
+    // --- Drift-watchdog flag, piggybacked on the push-sync handshake ---
+    // Every rank's sync word is kSyncWords uint32: [counter | flag[0] | flag[1] | pad].
+    // When flags are set, record_push_complete() copies *local_flag into flag[g % 2]
+    // BEFORE writing the counter (same ordering, and so the same visibility, as the
+    // pushed ghost data), and wait_for_pushes() ORs flag[g % 2] (bitwise) over all ranks into
+    // *global_flag. Two slots because a peer may already be one generation ahead;
+    // it cannot be two ahead, since that needs this rank's counter for g + 1.
+    // Both tensors are int32 [1] on this device. Unset (the default) = feature off.
+    static constexpr int kSyncWords = 4;
+    void set_watchdog_flags(torch::Tensor local_flag, torch::Tensor global_flag);
+    void clear_watchdog_flags();
+
     void teardown();
 
     // Accessors
@@ -151,6 +163,12 @@ private:
     CUdeviceptr local_counter_vaddr_ = 0;
     size_t local_counter_padded_size_ = 0;
     CUmemGenericAllocationHandle local_counter_handle_ = 0;
+
+    // Drift-watchdog piggyback (see set_watchdog_flags). Owned by the caller.
+    torch::Tensor watchdog_local_;   // int32 [1]
+    torch::Tensor watchdog_global_;  // int32 [1]
+    torch::Tensor sync_word_ptrs_;   // int64 [W] on device: base of every rank's sync word
+    void build_sync_word_ptrs();
 };
 
 // High-level feature exchanger interface.
@@ -209,6 +227,11 @@ public:
     void setup_sync(const std::vector<std::vector<uint8_t>> &all_sync_handles) { ipc_.setup_sync(all_sync_handles); }
     void record_push_complete() { ipc_.record_push_complete(0); }
     void wait_for_pushes() { ipc_.wait_for_pushes(0); }
+    void set_watchdog_flags(torch::Tensor local_flag, torch::Tensor global_flag)
+    {
+        ipc_.set_watchdog_flags(local_flag, global_flag);
+    }
+    void clear_watchdog_flags() { ipc_.clear_watchdog_flags(); }
 
     void teardown();
     bool is_ipc_setup() const { return ipc_.is_setup(); }

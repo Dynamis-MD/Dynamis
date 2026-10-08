@@ -16,7 +16,8 @@ from distnnp_state import (
 )
 from distnnp_state.io import is_pathlike
 from distnnp_model import DistNNPModel
-from distnnp.simulatorState import SimState
+from distnnp_model.comm import drift_flags
+from distnnp.simulatorState import SimState, DRIFT_TRIP, DRIFT_BREACH
 from distnnp_integrator import (
     Euler,
     Verlet,
@@ -24,11 +25,13 @@ from distnnp_integrator import (
     DistNNPIntegrator,
     AVALIABLE_INTEGRATORS,
 )
-from typing import Union, Literal, Optional
+from typing import List, Union, Literal, Optional
 from dataclasses import dataclass
 import os
 import torch
+import torch.distributed as dist
 import uuid
+import warnings
 
 POSSIBLE_INTEGRATOR_TYPES = Union[Euler, Verlet, Langevin]
 
@@ -68,6 +71,8 @@ class SimulatorConfig:
 
     # Repartitioning
     rebalance_interval: int = 100  # Repartition every N steps (0 = never)
+    enable_drift_watchdog: bool = True  # Also repartition when any atom has drifted too far
+    drift_threshold_angstrom: Optional[float] = None  # None -> ghost_buffer_angstrom / 2
 
     # Output
     output_dir: str = "./results"
@@ -95,6 +100,21 @@ class SimulatorConfig:
         edge_weighted_partition (bool): Whether to weight partitions by edge count instead of atom count.
             When True, partition by dst-edge count (balanced GNN compute). When False, partition by atom count.
         rebalance_interval (int): Number of steps between repartitioning (0 = never).
+        enable_drift_watchdog (bool): Keep the halo maps valid between rebuilds. Ghost
+            lists are built at cutoff + ghost_buffer; no edge can be missing while every
+            atom has moved at most ghost_buffer / 2 since the build. Each step, on the
+            positions the model is about to push, every rank checks its atoms and the
+            result is OR-ed over ranks on the IPC push handshake (no extra collective;
+            models without IPC pushes fall back to a 1-element all_reduce per step).
+            The ghost lists are rebuilt before the next step if some atom could exceed
+            the threshold during it (per-atom bound: displacement + dt * velocity
+            terms): positions are all-gathered and the halo maps rebuilt, keeping the
+            partition (rebalancing stays on rebalance_interval). A step whose graph was
+            already built past the threshold is recorded in drift_breach_steps with a
+            warning. Not used at W = 1, which has no ghosts.
+        drift_threshold_angstrom (Optional[float]): Displacement guarantee in Ångstroms.
+            None (default) = ghost_buffer_angstrom / 2, the largest value for which the
+            guarantee implies a complete graph.
         output_dir (str): Directory to save output files.
         traj_file (str): Name of the trajectory file relative to output_dir.
             A single shared file is output by default (relative path "trajectory.traj").
@@ -131,6 +151,24 @@ class Simulator:
             config.traj_file,
         )
 
+        # Drift watchdog: flags live in the process-wide registry so the model's
+        # exchangers carry them without the model knowing (see drift_flags.py).
+        # W = 1 has no ghosts, so its graph is always complete: nothing to watch.
+        self._drift_flags: Optional[drift_flags.DriftFlags] = (
+            drift_flags.enable(device)
+            if config.enable_drift_watchdog and dist_environment.world_size > 1
+            else None
+        )
+        self._drift_mode: Optional[str] = None  # "local" | "piggyback" | "all_reduce"
+        self._drift_threshold: float = (
+            config.ghost_buffer_angstrom / 2
+            if config.drift_threshold_angstrom is None
+            else config.drift_threshold_angstrom
+        )
+        self._drift_dt: float = config.timestep_fs
+        self._steps_done = 0
+        self.drift_rebuild_steps: List[int] = []  # steps preceded by a halo-only rebuild
+        self.drift_breach_steps: List[int] = []  # steps whose graph exceeded the guarantee
         device_id = torch.cuda.current_device() if torch.cuda.is_available() else -1
         TimingRegistry.instance().init(
             dist_environment.global_rank,
@@ -187,6 +225,7 @@ class Simulator:
             distributed_environment=self._get_dist_environment(),
             device=device,
         )
+        self._reset_drift_flags()  # SimState latched fresh reference positions
         # Once the state is initialized, we can initialize the model buffers based on the local partition info
 
         self.model.initialize_buffers(
@@ -234,12 +273,43 @@ class Simulator:
         )
         self.writer.update_atom_counts(self.state.local_partition_info.atom_counts.to(torch.uint32))
         self.integrator.reset()
+        self._reset_drift_flags()  # state.sync_and_repartition() re-latched the reference
+
+    def rebuild_halo(self, device: Optional[torch.device] = None) -> None:
+        """Refresh the ghost lists on the current positions, keeping the partition.
+        Called when the drift watchdog trips; load balancing stays on the
+        rebalance_interval schedule (sync_and_repartition). The local atoms, their
+        order and velocities are unchanged, so the integrator's cached forces stay
+        valid and are kept."""
+        self.state.sync_positions_and_rebuild_halo()
+        self.model.initialize_buffers(
+            self.state.local_partition_info, device=device if device else self.device
+        )
+        self._reset_drift_flags()
 
     def _set_state(self, state: SimState):
         self.state = state
 
     def step(self, step_size: Optional[float] = None):
-        return self.integrator.step(self.state._state, self.model, step_size)
+        if self._drift_flags is None:
+            out = self.integrator.step(self.state._state, self.model, step_size)
+        else:
+            # Every integrator calls the model at exactly the positions the graph is
+            # then built on (Verlet/Langevin after halfstep1, Euler before its update),
+            # so the drift word is written there and rides on this step's own pushes.
+            self._drift_dt = (
+                step_size if step_size is not None
+                else getattr(self.integrator, "dt", self.config.timestep_fs)
+            )
+            out = self.integrator.step(
+                self.state._state, self._model_with_drift_flag, step_size
+            )
+        self._steps_done += 1
+        return out
+
+    def _model_with_drift_flag(self, dist_state, *args, **kwargs):
+        self.update_drift_flag()
+        return self.model(dist_state, *args, **kwargs)
 
     def should_write_traj(self, step: int) -> bool:
         if self.config.traj_interval == 0:
@@ -255,6 +325,71 @@ class Simulator:
             return True
         return False
 
+    def _reset_drift_flags(self) -> None:
+        if self._drift_flags is not None:
+            self._drift_flags.local.zero_()
+            self._drift_flags.global_.zero_()
+
+    def update_drift_flag(self) -> None:
+        """Write this rank's drift word from the current positions and velocities
+        (device-only). step() calls it right before the model pushes; it is exposed for
+        callers that drive the model themselves."""
+        if self._drift_flags is not None:
+            self.state.write_local_drift_flag(
+                self._drift_flags.local, self._drift_threshold, self._drift_dt
+            )
+
+    def _global_drift_word(self) -> int:
+        """OR over all ranks of the drift words written during the last step."""
+        flags = self._drift_flags
+        if self._drift_mode is None:
+            self._drift_mode = self._select_drift_mode()
+        if self._drift_mode == "local":
+            return int(flags.local.item())
+        if self._drift_mode == "all_reduce":
+            # NCCL has no bitwise OR: MAX over one element per bit
+            w = flags.local
+            bits = torch.cat([w & DRIFT_TRIP, (w & DRIFT_BREACH) >> 1])
+            dist.all_reduce(bits, op=dist.ReduceOp.MAX)
+            b = bits.tolist()
+            return b[0] * DRIFT_TRIP + b[1] * DRIFT_BREACH
+        return int(flags.global_.item())
+
+    def drift_watchdog_tripped(self) -> bool:
+        """Call between steps, after at least one step. True on every rank, or on none,
+        if the halo must be rebuilt before the next step: on the positions the last step
+        pushed, some atom on some rank could pass the threshold during the next step.
+        Also records the last step in drift_breach_steps if its graph was built with
+        some atom already past the threshold (should never happen)."""
+        if self._drift_flags is None:
+            return False
+        word = self._global_drift_word()
+        if word & DRIFT_BREACH:
+            step = self._steps_done - 1
+            if not self.drift_breach_steps:
+                warnings.warn(
+                    f"drift watchdog: the graph of step {step} was built with an atom more "
+                    f"than {self._drift_threshold:.3f} A from its halo-build position; edges "
+                    "may be missing. Further breaches are recorded in drift_breach_steps.",
+                    RuntimeWarning,
+                )
+            self.drift_breach_steps.append(step)
+        return bool(word & DRIFT_TRIP)
+
+    def _select_drift_mode(self) -> str:
+        if self.dist_environment.world_size == 1:
+            return "local"
+        # Piggyback only if every rank's exchangers carried the flags on the steps so
+        # far (a model without IPC pushes never wires them). Agreed on collectively,
+        # once, so that no rank ends up in a different mode.
+        wired = torch.tensor(
+            [1 if self._drift_flags.n_wired > 0 else 0],
+            dtype=torch.int32,
+            device=self._drift_flags.local.device,
+        )
+        dist.all_reduce(wired, op=dist.ReduceOp.MIN)
+        return "piggyback" if wired.item() else "all_reduce"
+
     def run(self) -> None:
         total_done = 0
         try:
@@ -266,6 +401,12 @@ class Simulator:
                     self.timer.stop()
                 # Where.Both: step() launches async CUDA work, so a host-only timer misses it.
                 self.timer.start("iteration", TimerClass.Total, Where.Both)
+                tripped = total_done > 0 and self.drift_watchdog_tripped()
+                if self.should_rebalance(total_done):
+                    self.sync_and_repartition()
+                elif tripped:
+                    self.drift_rebuild_steps.append(total_done)
+                    self.rebuild_halo()
                 energy = self.step(self.config.timestep_fs)
                 self.timer.stop()
                 if self.should_write_traj(total_done):
