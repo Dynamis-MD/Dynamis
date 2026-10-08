@@ -54,17 +54,17 @@ class Euler(DistNNPIntegrator):
             state (DistNNPState): The current state of the system, containing positions, velocities, forces, and masses.
             model (DistNNPModel): The potential model used to compute forces based on the current state.
         """
-        # Compute forces using the provided model
-        energy, new_forces = model(state)
+        molecular_info = state.local_molecular_info
+
+        energy, new_forces = self._compute_force(state, model)
+
         if dt is not None:
             step_size = dt
         else:
             step_size = self.dt
 
-        molecular_info = state.local_molecular_info
-
         atom_masses = TORCH_MASSES.to(molecular_info.atom_positions.device)[molecular_info.atom_types.reshape(-1).to(torch.long)]
-        # Update positions and velocities using the Euler method
+
         self.step_(
             molecular_info.atom_positions,
             molecular_info.atom_velocities,

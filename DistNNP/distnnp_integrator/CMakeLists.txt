@@ -8,6 +8,9 @@ project(
     LANGUAGES CXX CUDA
 )
 
+# No DISTNNP_TIMING option here: it's inherited from distnnp_state's build via
+# timing_config.hpp, so this project can't silently disagree with it.
+
 # Use the modern CUDAToolkit finder first to resolve the correct include path.
 # In conda environments, nvcc lives in $PREFIX/bin but headers are under
 # $PREFIX/targets/x86_64-linux/include — a non-standard layout that PyTorch's
@@ -32,6 +35,63 @@ find_package(Torch REQUIRED)
 if (TORCH_LIBRARY)
   get_filename_component(TORCH_LIB_DIR "${TORCH_LIBRARY}" DIRECTORY)
 endif ()
+
+# ---------------------------------------------------------------------------
+# distnnp_state discovery
+# ---------------------------------------------------------------------------
+# Ask Python where distnnp_state is installed, so this works for a normal
+# install, an editable install, or an isolated build env alike.
+execute_process(
+    COMMAND "${Python_EXECUTABLE}" -c
+        "import importlib.util, os; s = importlib.util.find_spec('distnnp_state'); print(os.path.dirname(s.origin) if s and s.origin else '')"
+    OUTPUT_VARIABLE DISTNNP_STATE_PACKAGE_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+find_path(DISTNNP_STATE_INCLUDE_DIR
+    NAMES distnnp_state/timing_config.hpp
+    HINTS
+        "${DISTNNP_STATE_PACKAGE_DIR}/include"
+        "${Python_SITEARCH}/distnnp_state/include"
+        "${Python_SITELIB}/distnnp_state/include"
+    NO_DEFAULT_PATH
+)
+if(NOT DISTNNP_STATE_INCLUDE_DIR)
+    message(FATAL_ERROR
+        "Could not find distnnp_state headers (looked for distnnp_state/timing_config.hpp). "
+        "Install it first: pip install -e ./distnnp_state")
+endif()
+message(STATUS "distnnp_state include dir: ${DISTNNP_STATE_INCLUDE_DIR}")
+
+# Read the build's decision rather than re-deciding it; `#cmakedefine` expands
+# to `#define DISTNNP_TIMING` when on, a comment when off.
+file(READ "${DISTNNP_STATE_INCLUDE_DIR}/distnnp_state/timing_config.hpp" _distnnp_timing_config)
+if(_distnnp_timing_config MATCHES "(^|\n)[ \t]*#define[ \t]+DISTNNP_TIMING")
+    set(DISTNNP_STATE_TIMING_ENABLED TRUE)
+else()
+    set(DISTNNP_STATE_TIMING_ENABLED FALSE)
+endif()
+message(STATUS "distnnp_state timing instrumentation: ${DISTNNP_STATE_TIMING_ENABLED}")
+
+# Only link distnnp_state when timing is on; off, timing.hpp is header-only
+# no-ops and there's nothing to link.
+if(DISTNNP_STATE_TIMING_ENABLED)
+    find_library(DISTNNP_STATE_TIMING_LIBRARY
+        NAMES distnnp_state_timing
+        HINTS
+            "${DISTNNP_STATE_PACKAGE_DIR}"
+            "${Python_SITEARCH}/distnnp_state"
+            "${Python_SITELIB}/distnnp_state"
+        NO_DEFAULT_PATH
+    )
+    if(NOT DISTNNP_STATE_TIMING_LIBRARY)
+        message(FATAL_ERROR
+            "distnnp_state was built with timing enabled but libdistnnp_state_timing.so "
+            "was not found next to the installed package. Reinstall distnnp_state: "
+            "pip install -e ./distnnp_state")
+    endif()
+    message(STATUS "distnnp_state timing library: ${DISTNNP_STATE_TIMING_LIBRARY}")
+endif()
 
 find_library(TORCH_PYTHON_LIBRARY
   torch_python
@@ -58,6 +118,8 @@ target_include_directories(distnnp_integrator_impl
     PRIVATE
     include
     ${TORCH_INCLUDE_DIRS}
+    ${CUDAToolkit_INCLUDE_DIRS}
+    ${DISTNNP_STATE_INCLUDE_DIR}
 )
 
 # torch_python provides pybind11 type_casters for at::Tensor and must be
@@ -72,6 +134,14 @@ target_link_libraries(distnnp_integrator_impl
     ${TORCH_PYTHON_LIBRARY}
 )
 
+# Linked by SONAME, not absolute path, so reinstalling distnnp_state doesn't
+# break this import, and both modules resolve to the same TimingRegistry.
+if(DISTNNP_STATE_TIMING_ENABLED)
+    target_link_libraries(distnnp_integrator_impl PRIVATE ${DISTNNP_STATE_TIMING_LIBRARY})
+endif()
+
+target_compile_options(distnnp_integrator_impl PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)
+
 set_target_properties(distnnp_integrator_impl
     PROPERTIES
     FILE_SET HEADERS
@@ -83,6 +153,7 @@ set_target_properties(distnnp_integrator_impl
     CUDA_STANDARD_REQUIRED ON
     CUDA_EXTENSIONS OFF
 
+    INSTALL_RPATH "$ORIGIN/../distnnp_state:$ORIGIN/../torch/lib"
     INSTALL_RPATH_USE_LINK_PATH ON
 )
 

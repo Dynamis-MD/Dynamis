@@ -2,7 +2,10 @@
 #include "distnnp_state/distnnp_state.hpp"
 #include "distnnp_state/partitioner.hpp"
 #include "distnnp_state/radius_graph.hpp"
+#include "distnnp_state/timing.hpp"
 #include "distnnp_state/trajectory_writer.hpp"
+#include <ATen/cuda/CUDAContext.h>
+#include <string_view>
 #include <torch/extension.h>
 #include <pybind11/stl.h>
 
@@ -182,6 +185,82 @@ PYBIND11_MODULE(distnnp_state_impl, m) {
       py::arg("pos"), py::arg("cell"), py::arg("pbc"), py::arg("radius"),
       py::arg("max_num_neighbors"), py::arg("enforce_max_strictly"),
       py::arg("target_indices") = c10::optional<at::Tensor>{});
+
+  // ===== Timing =====
+
+  py::enum_<distnnp_state::TimerClass>(m, "TimerClass")
+      .value("Compute", distnnp_state::TimerClass::Compute)
+      .value("Comm",    distnnp_state::TimerClass::Comm)
+      // Reserved: see Level::Detail.
+      .value("Wait",    distnnp_state::TimerClass::Wait)
+      .value("Other",   distnnp_state::TimerClass::Other)
+      // The denominator the others are a fraction of, not a partition member.
+      .value("Total",   distnnp_state::TimerClass::Total);
+
+#ifdef DISTNNP_TIMING
+    m.attr("TIMING_ENABLED") = true;
+#else
+    m.attr("TIMING_ENABLED") = false;
+#endif
+
+  py::enum_<distnnp_state::Where>(m, "Where")
+      .value("Host",   distnnp_state::Where::Host)
+      .value("Device", distnnp_state::Where::Device)
+      // One host + one device record for the same region — right for a
+      // Python-orchestrated region that also launches async GPU work.
+      .value("Both",   distnnp_state::Where::Both);
+
+  py::enum_<distnnp_state::Level>(m, "Level")
+      .value("Off",    distnnp_state::Level::Off)
+      .value("Basic",  distnnp_state::Level::Basic)
+      // Reserved for WAIT barriers, not yet implemented; behaves like Basic.
+      .value("Detail", distnnp_state::Level::Detail);
+
+  py::class_<distnnp_state::TimingRegistry>(m, "TimingRegistry")
+      .def_static("instance", &distnnp_state::TimingRegistry::instance,
+                  py::return_value_policy::reference)
+      .def("init", [](distnnp_state::TimingRegistry& self,
+                      uint32_t rank, uint32_t local_rank, uint32_t world_size,
+                      py::bytes run_id, int32_t device_id,
+                      const std::string& output_dir) {
+               self.init(rank, local_rank, world_size,
+                         static_cast<std::string>(run_id), device_id, output_dir);
+           },
+           py::arg("rank"), py::arg("local_rank"), py::arg("world_size"),
+           py::arg("run_id"), py::arg("device_id"), py::arg("output_dir"))
+      .def("set_level", &distnnp_state::TimingRegistry::set_level, py::arg("level"))
+      .def("enabled",   &distnnp_state::TimingRegistry::enabled)
+      .def("set_step",  &distnnp_state::TimingRegistry::set_step,  py::arg("step"))
+      // flush() blocks on every pending device event and syncs the stream, so it
+      // belongs at a quiescent point, not in the step loop — close() is the
+      // normal write-once-at-exit path.
+      .def("flush",     &distnnp_state::TimingRegistry::flush)
+      .def("close",     &distnnp_state::TimingRegistry::close);
+
+  py::class_<distnnp_state::Timer>(m, "Timer")
+      .def(py::init<>())
+      // Runs before the level check, so it must not call getCurrentCUDAStream
+      // itself — only branch on parent_id, which is free even on Level::Off.
+      // parent_id = 0 means "nest under whatever is open on this thread".
+      .def("start",
+           [](distnnp_state::Timer& self, std::string_view key,
+              distnnp_state::TimerClass cls, distnnp_state::Where where,
+              uint64_t parent_id) {
+               if (parent_id)
+                   self.start(key, cls, where,
+                              distnnp_state::ParentSpan{parent_id});
+               else
+                   self.start(key, cls, where);
+           },
+           py::arg("key"), py::arg("cls"),
+           py::arg("where") = distnnp_state::Where::Host,
+           py::arg("parent_id") = 0)
+      .def("stop", &distnnp_state::Timer::stop)
+      // Capture on the owning thread to hand back as start()'s parent_id.
+      .def_static("current_span_id", &distnnp_state::Timer::current_span_id)
+      .def_static("set_level", &distnnp_state::Timer::set_level, py::arg("level"))
+      .def_static("enabled",   &distnnp_state::Timer::enabled)
+      .def_static("set_step",  &distnnp_state::Timer::set_step,  py::arg("step"));
 
   m.def("radius_graph_pbc_counts_ex", &radius_graph_pbc_counts_ex,
         "Count-only variant: returns just neighbor_counts[N_target] int32. "

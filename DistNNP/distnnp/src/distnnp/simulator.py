@@ -8,6 +8,11 @@ from distnnp_state import (
     SimulationConfig,
     TrajectoryWriter,
     TorchDistEnv,
+    Timer,
+    TimingRegistry,
+    TimerClass,
+    Where,
+    Level,
 )
 from distnnp_state.io import is_pathlike
 from distnnp_model import DistNNPModel
@@ -135,10 +140,12 @@ class Simulator:
         self.config = config
         self.dist_environment = dist_environment
         self.device = device
+
+        run_uuid = uuid.uuid4()
         # TODO figure out what author should be
         self.writer: TrajectoryWriter = TrajectoryWriter(
             dist_environment.global_rank,
-            uuid.uuid4().bytes,
+            run_uuid.bytes,
             "author",
             config.output_dir,
             config.traj_file,
@@ -162,6 +169,17 @@ class Simulator:
         self._steps_done = 0
         self.drift_rebuild_steps: List[int] = []  # steps preceded by a halo-only rebuild
         self.drift_breach_steps: List[int] = []  # steps whose graph exceeded the guarantee
+        device_id = torch.cuda.current_device() if torch.cuda.is_available() else -1
+        TimingRegistry.instance().init(
+            dist_environment.global_rank,
+            dist_environment.local_rank,
+            dist_environment.world_size,
+            run_uuid.bytes,
+            device_id,
+            config.output_dir,
+        )
+        Timer.set_level(Level.Basic)
+        self.timer = Timer()
 
     def _get_partitioner(self) -> POSSIBLE_PARTITIONERS_TYPES:
         partition_algorithm = self.config.partition_algorithm
@@ -374,20 +392,28 @@ class Simulator:
 
     def run(self) -> None:
         total_done = 0
-        while total_done < self.config.total_steps:
-            # Read the drift word every step (it also reports breaches), then either
-            # repartition on schedule, or refresh only the halo if the watchdog tripped.
-            tripped = total_done > 0 and self.drift_watchdog_tripped()
-            if self.should_rebalance(total_done):
-                self.sync_and_repartition()
-            elif tripped:
-                self.drift_rebuild_steps.append(total_done)
-                self.rebuild_halo()
-            energy = self.step(self.config.timestep_fs)
-            # if should_log(total_done):
-                # _log_energy(total_done, energy)
-            if self.should_write_traj(total_done):
-                self.state.local_state.atom_vertex_numbers = self.state.local_partition_info.partition_indices
-                self.writer.submit(total_done, self.state.local_state)
-            total_done += 1
-        self.writer.flush()
+        try:
+            while total_done < self.config.total_steps:
+                Timer.set_step(total_done)
+                if self.should_rebalance(total_done):
+                    self.timer.start("repartition", TimerClass.Other)
+                    self.sync_and_repartition()
+                    self.timer.stop()
+                # Where.Both: step() launches async CUDA work, so a host-only timer misses it.
+                self.timer.start("iteration", TimerClass.Total, Where.Both)
+                tripped = total_done > 0 and self.drift_watchdog_tripped()
+                if self.should_rebalance(total_done):
+                    self.sync_and_repartition()
+                elif tripped:
+                    self.drift_rebuild_steps.append(total_done)
+                    self.rebuild_halo()
+                energy = self.step(self.config.timestep_fs)
+                self.timer.stop()
+                if self.should_write_traj(total_done):
+                    self.state.local_state.atom_vertex_numbers = self.state.local_partition_info.partition_indices
+                    self.writer.submit(total_done, self.state.local_state)
+                total_done += 1
+            self.writer.flush()
+        finally:
+            # Runs even on exception/interrupt so timing data isn't lost.
+            TimingRegistry.instance().close()

@@ -1,4 +1,5 @@
 #include "distnnp_state/trajectory_writer.hpp"
+#include "distnnp_state/timing.hpp"
 #include <cctype>
 #include <cstring>
 #include <fstream>
@@ -52,7 +53,12 @@ TrajectoryWriter::~TrajectoryWriter() {
 }
 void TrajectoryWriter::flush() {
     if (!flushed) {
+        // Where::Host: closing an fd is host work, and on a networked filesystem
+        // (Delta's /u is NFS) it is not necessarily cheap.
+        Timer t;
+        t.start("traj_flush", TimerClass::Other, Where::Host);
         auto res = close(fd);
+        t.stop();
         if (res != 0) throw std::runtime_error("read failed: " + std::string(strerror(errno)));
         flushed = true;
     }
@@ -266,6 +272,12 @@ void TrajectoryWriter::write_front_matter(float time_per_step, uint32_t steps_pe
 
 void TrajectoryWriter::submit(uint32_t step, MolecularInfo state, c10::optional<torch::Tensor> cell, c10::optional<torch::Tensor> pbc) {
 
+    // Where::Host, not Device: this launches no asynchronous CUDA work. The
+    // .to(kCPU) copies below synchronize internally, so a host clock measures the
+    // real cost — device-to-host transfer plus pwrite — rather than launch overhead.
+    Timer t;
+    t.start("traj_write", TimerClass::Other, Where::Host);
+
     // to make this easier, i think im going to write each tensor one after the other
     // so it will be
     // pbc_cell | 9 x float32 (cell) + 3 x uint8 (pbc) + 1 byte padding, written once per frame by rank 0
@@ -336,6 +348,8 @@ void TrajectoryWriter::submit(uint32_t step, MolecularInfo state, c10::optional<
         write_tensor(state.atom_velocities, field_offset);
         cursor += total_atoms * 3 * sizeof(float);
     }
+
+    t.stop();
 }
 
 MolecularInfo TrajectoryWriter::load_distnnp_file(const std::string& distnnp_file_name) {
