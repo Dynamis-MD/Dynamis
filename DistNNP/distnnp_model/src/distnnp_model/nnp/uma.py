@@ -1,3 +1,4 @@
+import dataclasses
 from contextlib import nullcontext
 import torch
 import torch.distributed as dist
@@ -43,6 +44,10 @@ from distnnp_model.units import EV_PER_A_TO_AMU_A_PER_FS2
 _EV_PER_A_TO_AMU_A_PER_FS2 = EV_PER_A_TO_AMU_A_PER_FS2
 
 
+@torch.compiler.disable
+def _differentiable_all_reduce_sum(t: torch.Tensor) -> torch.Tensor:
+    return dist_nn.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
+
 def balance_channels_batched(
     emb: torch.Tensor,
     target: torch.Tensor,
@@ -65,7 +70,7 @@ def balance_channels_batched(
     system_sums.index_add_(0, batch[:num_local], channels_to_balance_local)
 
     if dist.is_initialized():
-        system_sums = dist_nn.all_reduce(system_sums, op=torch.distributed.ReduceOp.SUM)
+        system_sums = _differentiable_all_reduce_sum(system_sums)
 
     target_sums = (target - target_offset).unsqueeze(1).expand(-1, n_channels)
     
@@ -92,12 +97,33 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         """Set profiler for detailed model timing."""
         self.profiler = profiler
 
+    def maybe_invalidate_mole_cache(self, atomic_numbers_full, num_local, charge, spin, dataset):
+        """Call before the compiled forward to check if local atom composition has changed."""
+        if self.num_experts == 0:
+            return
+        counts = torch.bincount(
+            atomic_numbers_full[:num_local], minlength=self.max_num_elements
+        ).to(torch.int64)
+        if dist.is_initialized():
+            dist.all_reduce(counts)
+        prev = getattr(self, "_mole_cache_key", None)
+        stale = (
+            prev is None
+            or not torch.equal(counts, prev[0])
+            or not torch.equal(charge, prev[1])
+            or not torch.equal(spin, prev[2])
+            or dataset != prev[3]
+        )
+        if stale:
+            self._cached_mole_coefficients = None
+        self._mole_cache_key = (counts, charge.clone(), spin.clone(), dataset)
+
     def set_MOLE_coefficients(self, atomic_numbers_full, batch_full, csd_mixed_emb):
         if self.num_experts == 0:
             return
         
         # OPTIMIZATION: Cache MOLE coefficients - compute once on first call, reuse forever.
-        # In MD simulations with merge_mole=True, composition is static.
+        # In MD simulations with merge_mole=True, composition is static, but only BETWEEN repartitions.
         cached = getattr(self, "_cached_mole_coefficients", None)
         if cached is not None:
             self.global_mole_tensors.expert_mixing_coefficients = cached
@@ -184,7 +210,7 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             
             # Store in cache
             self._cached_mole_coefficients = coefficients
-            
+
             self.global_mole_tensors.expert_mixing_coefficients = coefficients
 
     def balance_channels(
@@ -665,7 +691,12 @@ class UMAModel(DistNNPModel):
             self.device = device
         self.global_rank = global_rank
         self.dataset = dataset
-        inference_settings = guess_inference_settings(inference_settings)
+        # Always feed our own (ghost-aware) graph from radius_graph_pbc_cuda to
+        # the backbone; otherwise fairchem rebuilds it internally and ignores
+        # the edge_index passed in.
+        inference_settings = dataclasses.replace(
+            guess_inference_settings(inference_settings), external_graph_gen=True
+        )
         if overrides is None:
             overrides = {"backbone": {"model": "distributed_escnmd_backbone"}}
         elif "backbone" not in overrides:
@@ -849,7 +880,7 @@ class UMAModel(DistNNPModel):
             pbc,
             torch.tensor([num_atoms], dtype=torch.long, device=device),
             edge_index,
-            -cell_offsets,
+            cell_offsets,
             torch.tensor([edge_index.shape[1]], dtype=torch.long, device=device),
             charge,
             spin,
@@ -858,11 +889,15 @@ class UMAModel(DistNNPModel):
             # batch=batch_full,
             dataset=datasets,
         )
+        num_local = int(num_local)
         data["num_local"] = num_local
         data["num_global"] = torch.tensor([num_global], device=device)
         data.to(device)
 
         self.predictor.move_to_device()
+        backbone = self.main_model.backbone
+        backbone.num_local = data["num_local"]
+        backbone.maybe_invalidate_mole_cache(atom_types, num_local, charge, spin, self.dataset)
         pred = self.predict(data)
 
         energy = pred[f"{datasets}_energy"] * _EV_PER_A_TO_AMU_A_PER_FS2
