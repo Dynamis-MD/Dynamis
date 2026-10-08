@@ -35,19 +35,29 @@ def _finish_ax(ax):
     ax.grid(alpha=0.35, linestyle="--")
     ax.set_axisbelow(True)
 
-ENGINES = ["distnnp-uma", "distnnp-uma-opt", "fairchem-uma", "lammps-mace"]
+ENGINES = ["distnnp-uma", "distnnp-uma-opt", "fairchem-uma", "lammps-mace",
+           "distnnp-orb", "distnnp-mace"]
 ENGINE_LABEL = {
     "distnnp-uma": "DistNNP-UMA",
     "distnnp-uma-opt": "DistNNP-UMA-opt",
     "fairchem-uma": "FairChem-UMA",
     "lammps-mace": "LAMMPS-MACE",
+    "distnnp-orb": "DistNNP-ORB",
+    "distnnp-mace": "DistNNP-MACE",
 }
 COLOR = {
     "distnnp-uma": "#1f77b4",
     "distnnp-uma-opt": "#ff7f0e",
     "fairchem-uma": "#d62728",
     "lammps-mace": "#2ca02c",
+    "distnnp-orb": "#9467bd",
+    "distnnp-mace": "#8c564b",
 }
+
+# Backends that do not go through fairchem InferenceSettings. Their records
+# carry a backend-specific settings dict instead, so the UMA kernel-config
+# consistency check in headline_table() does not apply to them.
+NON_UMA_ENGINES = {"distnnp-orb", "distnnp-mace"}
 
 # distnnp-uma-opt is DELIBERATELY on a different UMA kernel path (turbo) from the
 # matched distnnp-uma/fairchem-uma pair, so it is exempt from the "one kernel
@@ -71,9 +81,16 @@ def _kernel_key(r: dict) -> str:
     `legacy-default` rather than dropping them, so a results dir that mixes
     pre- and post-fix runs is visibly mixed instead of silently wrong.
     """
+    engine = r.get("engine", "")
     s = r.get("inference_settings")
+    # ORB/MACE never had UMA kernels to configure; labelling them
+    # "legacy-default" would claim they ran a fairchem preset they cannot run.
+    if engine in NON_UMA_ENGINES:
+        if not s:
+            return ""
+        return ",".join(f"{k}={s[k]}" for k in sorted(s) if k != "backend")
     if not s:
-        return "" if r.get("engine", "").startswith("lammps") else "legacy-default"
+        return "" if engine.startswith("lammps") else "legacy-default"
     mode = s.get("execution_mode") or (
         "auto>fast_gpu" if s.get("execution_mode_auto_eligible_for_fast_gpu")
         else "auto>general"
@@ -117,8 +134,17 @@ def _ok(rows, tag=None):
     ]
 
 
+def _size_label(n: int) -> str:
+    return f"{n // 1000}k" if n >= 1000 else str(n)
+
+
 def strong_scaling(rows, out_dir):
-    data = _ok(rows, tag="strong")
+    # Any tag starting with "strong" is a fixed-system GPU sweep: the UMA matrix
+    # uses "strong" (32k) and "strong1k" (999), the ORB/MACE sweep derives
+    # "strong1k"/"strong32k". Curves are grouped by (engine, num_atoms), so
+    # differing tag spellings at the same size still land on one line.
+    data = [r for r in _ok(rows)
+            if str(r.get("tag") or "").startswith("strong")]
     if not data:
         print("strong: no data"); return
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2))
@@ -135,7 +161,7 @@ def strong_scaling(rows, out_dir):
             if not pts:
                 continue
             gpus = [p[0] for p in pts]
-            lab = ENGINE_LABEL[eng] + (f" ({size // 1000}k)" if multi_size else "")
+            lab = ENGINE_LABEL[eng] + (f" ({_size_label(size)})" if multi_size else "")
             ax1.plot(gpus, [p[1] for p in pts], "o-", color=COLOR[eng], label=lab)
             ax2.plot(gpus, [p[2] for p in pts], "o-", color=COLOR[eng], label=lab)
             # ideal-linear reference from this curve's smallest-GPU point
