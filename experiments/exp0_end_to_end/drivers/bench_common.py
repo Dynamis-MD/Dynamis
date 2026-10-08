@@ -62,10 +62,16 @@ def parse_bench_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--engine",
         required=True,
         choices=["distnnp-uma", "distnnp-uma-opt", "fairchem-uma",
+                 "distnnp-orb", "distnnp-mace",
                  "lammps-mace", "lammps-sevennet"],
         help="distnnp-uma / fairchem-uma run the MATCHED kernel config (exp0's "
         "apples-to-apples axis); distnnp-uma-opt is the same DistNNP driver at "
-        "its fastest safe config (turbo: tf32 + no-ackpt + merge_mole + compile).",
+        "its fastest safe config (turbo: tf32 + no-ackpt + merge_mole + compile). "
+        "distnnp-orb / distnnp-mace are the ORB and MACE backends on the SAME "
+        "DistNNP decomposition (run_distnnp_nnp.py); they answer 'does DistNNP "
+        "scale for this backend', not 'is ORB faster than UMA' -- their venvs "
+        "carry different torch builds, so cross-backend absolute times are not "
+        "comparable, only the shape of each scaling curve is.",
     )
     p.add_argument("--model", default="uma-s-1p2")
     p.add_argument("--task", default="omol")
@@ -116,6 +122,29 @@ def parse_bench_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=None,
         help="padding (Å) added on every side when a non-periodic box is "
         "synthesised (default: 2*(cutoff + ghost buffer)).",
+    )
+
+    # ---- ORB backend (engine distnnp-orb) --------------------------------
+    p.add_argument(
+        "--orb-precision",
+        default="float32-high",
+        choices=["float32-high", "float32-highest", "float64"],
+        help="ORBModel has no default. 'float32-high' enables TF32 matmuls and "
+        "is the ORB analogue of the UMA k1 kernel config; 'float32-highest' is "
+        "the bit-tight setting the ORB parity test uses and is slower.",
+    )
+
+    # ---- MACE backend (engine distnnp-mace) ------------------------------
+    p.add_argument(
+        "--mace-model-family",
+        default="mp",
+        choices=["mp", "off", "omol", "polar"],
+        help="public MACE foundation-model family passed to load_raw_mace_model.",
+    )
+    p.add_argument(
+        "--mace-head",
+        default=None,
+        help="MACE readout head; default resolves the checkpoint's own head.",
     )
 
     # FairChem only (= number of GPUs on the node)

@@ -155,6 +155,63 @@ DistNNP/.venv-uma/bin/python experiments/exp0_end_to_end/analysis/summarize.py
 
 ---
 
+## ORB and MACE backends (strong scaling)
+
+`ORBModel` (#100) and `MACEModel` (#114) run on the **same** DistNNP spatial
+decomposition as `UMAModel`, so they get the same strong-scaling treatment:
+fixed system, world size 1 / 2 / 4, all cells sequential inside one 4-GPU
+allocation.
+
+```bash
+cd experiments/exp0_end_to_end
+
+EXP0_NNP_ENGINES="distnnp-orb" scripts/sbatch_exp0.sh --gres=gpu:4 \
+    --job-name=exp0-strong-orb --time=01:00:00 scripts/strong_scaling_nnp.sbatch
+
+EXP0_NNP_ENGINES="distnnp-mace" scripts/sbatch_exp0.sh --gres=gpu:4 \
+    --job-name=exp0-strong-mace --time=01:00:00 scripts/strong_scaling_nnp.sbatch
+```
+
+Defaults: `ch4_1k_splited.xyz` (999 atoms) and `ch4_32k_splited.xyz` (32 004),
+10 warmup + 50 timed steps, `--cutoff-angstrom 6.0` (both backends' own graph
+radius: ORB's `adapter.radius` and MACE's `r_max` are each 6.0 Å, and each
+backend builds its graph at that radius rather than at the Simulator's cutoff,
+so a smaller value would silently truncate the receptive field). Every knob is
+overridable — see the header of `scripts/strong_scaling_nnp.sbatch`.
+
+Each engine's cells are gated by a cheap 1-GPU / 3-step **preflight**; a
+backend that cannot construct at all is skipped rather than failing the same
+way six times and burning the allocation.
+
+### Separate venvs, and what that means for the comparison
+
+`mace-torch` 0.3.16 pins `e3nn==0.4.4` while `fairchem` needs `e3nn>=0.5`, so
+the backends cannot share one environment:
+
+| engine | venv | torch |
+|---|---|---|
+| `distnnp-uma` / `fairchem-uma` | `DistNNP/.venv-uma` | 2.8.0+cu129 |
+| `distnnp-orb` | `DistNNP/.venv` | 2.13.0+cu130 |
+| `distnnp-mace` | `DistNNP/.venv-mace` | 2.13.0+cu130 |
+
+All three editable-install *this* checkout, so the checked-out branch is what
+runs. Because the torch builds differ — and because ORB, MACE and UMA are
+different architectures at different parameter counts — **absolute steps/s is
+not comparable across backends.** What these sweeps establish is the *shape* of
+each backend's curve: whether DistNNP's decomposition scales 1 → 2 → 4 GPUs for
+that backend. `summarize.py` plots them on one axis for convenience; read the
+slopes, not the gaps.
+
+### Driver layout
+
+`drivers/distnnp_md.py` holds the engine-agnostic body — partitioning, Langevin,
+warmup/timed loop, OOM capture, JSON schema. `run_distnnp_uma.py` and
+`run_distnnp_nnp.py` (ORB/MACE) supply only a model factory, so no backend can
+silently drift onto a different partitioner, thermostat or timing window than
+the backend it is being compared against.
+
+---
+
 ## Real-system inputs (Workstream A, plan §11)
 
 The synthetic CH₄:O₂ boxes are cubic and fully periodic. The
