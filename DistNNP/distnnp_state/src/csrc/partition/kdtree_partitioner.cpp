@@ -9,6 +9,7 @@
 #include "distnnp_state/partitioner.hpp"
 #include "distnnp_state/kdtree.hpp"
 #include "distnnp_state/radius_graph.hpp"
+#include "distnnp_state/timing.hpp"
 
 namespace distnnp_state
 {
@@ -109,7 +110,16 @@ static PartitionMessagePassingInfo do_partition(
 PartitionMessagePassingInfo KDTreePartitioner::partition(
     const MolecularInfo &state, const DistEnvironment &env)
 {
-    return do_partition(state, env, state.edge_counts);
+
+    Timer t;
+    t.start("partition", TimerClass::Compute,
+            state.atom_positions.is_cuda() ? Where::Device : Where::Host);
+
+    auto result = do_partition(state, env, state.edge_counts);
+
+    t.stop();
+
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +133,10 @@ PartitionMessagePassingInfo KDTreePartitioner::partition(
     const DistEnvironment &env,
     const SimulationConfig &config)
 {
+    // Mode 3 always operates on CUDA tensors (radius_graph_pbc requires it).
+    Timer t;
+    t.start("partition", TimerClass::Compute, Where::Device);
+
     auto pos = state.atom_positions;
     auto device = pos.device();
     auto long_opts = torch::TensorOptions().dtype(torch::kLong).device(device);
@@ -132,7 +146,7 @@ PartitionMessagePassingInfo KDTreePartitioner::partition(
     auto cell = config.cell.to(device).to(torch::kFloat);
     auto pbc  = config.pbc.to(device);
 
-    // Build graph at cutoff radius
+    // Build graph at cutoff radius (timed inside as "build_graph")
     auto graph_result = radius_graph_pbc(
         pos.to(torch::kFloat), cell, pbc, cutoff,
         PARTITION_MAX_NUM_NEIGHBORS, /*enforce_max_strictly=*/false);
@@ -148,6 +162,8 @@ PartitionMessagePassingInfo KDTreePartitioner::partition(
 
     // Store graph for downstream use
     info.edge_index = edge_idx;
+
+    t.stop();
 
     return info;
 }

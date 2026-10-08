@@ -100,11 +100,11 @@ class Langevin(DistNNPIntegrator):
         atom_masses = TORCH_MASSES.to(state.atom_positions.device)[state.atom_types.reshape(-1).to(torch.long)]
 
         if self.prev_forces is None:
-            _, atom_forces = model(dist_state)
-            
+            _, atom_forces = self._compute_force(dist_state, model)
         else:
             atom_forces = self.prev_forces
 
+        # Timed in C++ (langevin_integrator.cu), nested inside integrator_step
         self.halfstep1_(
             state.atom_positions,
             state.atom_velocities,
@@ -115,11 +115,12 @@ class Langevin(DistNNPIntegrator):
         )
 
         # Recompute forces at new positions
-        energy, atom_forces = model(dist_state)
+        energy, atom_forces = self._compute_force(dist_state, model)
         self.prev_forces = atom_forces
 
         # Second random noise draw for the second half-step
         noise2 = torch.randn_like(state.atom_velocities)
+        # Timed in C++ (langevin_integrator.cu), nested inside integrator_step
         self.halfstep2_(
             state.atom_velocities,
             atom_forces,

@@ -1,4 +1,5 @@
 #include "distnnp_state/partitioner.hpp"
+#include "distnnp_state/timing.hpp"
 
 namespace distnnp_state
 {
@@ -6,6 +7,10 @@ namespace distnnp_state
 PartitionMessagePassingInfo SimpleSpatialPartitioner::partition(
     const MolecularInfo &state, const DistEnvironment &env)
 {
+    Timer t;
+    t.start("partition", TimerClass::Compute,
+            state.atom_positions.is_cuda() ? Where::Device : Where::Host);
+
     PartitionMessagePassingInfo info;
     auto device = state.atom_positions.device();
     auto long_opts = torch::TensorOptions().dtype(torch::kLong).device(device);
@@ -35,6 +40,8 @@ PartitionMessagePassingInfo SimpleSpatialPartitioner::partition(
     info.global_send_recv_matrix.index_put_({R, R}, num_local);
 
     info.atom_counts = torch::bincount(info.partition_id, /*weights=*/{}, /*minlength=*/env.world_size);
+
+    t.stop();
 
     return info;
 }
