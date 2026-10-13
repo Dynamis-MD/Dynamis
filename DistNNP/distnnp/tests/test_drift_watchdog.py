@@ -20,7 +20,7 @@ import torch.distributed as dist
 
 from distnnp.simulator import Simulator, SimulatorConfig
 from distnnp.simulatorState import DRIFT_BREACH, DRIFT_TRIP
-from distnnp_integrator.verlet import Verlet
+from dynamis_integrator.verlet import Verlet
 from distnnp_model.comm import drift_flags
 from distnnp_model.empirical.lj_potential_model import LennardJonesPotentialModel
 

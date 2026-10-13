@@ -32,10 +32,10 @@ from pathlib import Path
 
 from distnnp_model.empirical.lj_potential_model import LennardJonesPotentialModel
 from distnnp.simulator import Simulator, SimulatorConfig
-from distnnp_integrator.euler import Euler
-from distnnp_integrator.verlet import Verlet
-from distnnp_integrator.langevin import Langevin
-from distnnp_integrator.masses import TORCH_MASSES
+from dynamis_integrator.euler import Euler
+from dynamis_integrator.verlet import Verlet
+from dynamis_integrator.langevin import Langevin
+from dynamis_integrator.masses import TORCH_MASSES
 from dynamis_state import (
     MolecularInfo,
     DistEnvironment,

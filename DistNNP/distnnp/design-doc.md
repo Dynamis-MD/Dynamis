@@ -4,7 +4,7 @@
 
 - **`dynamis_state`** — atom partitioning, halo map construction, and the shared state struct (`DistNNPState`)
 - **`distnnp_model`** — force and energy computation via a user-supplied `DistNNPModel`
-- **`distnnp_integrator`** — time integration (Euler, Velocity Verlet, Langevin)
+- **`dynamis_integrator`** — time integration (Euler, Velocity Verlet, Langevin)
 
 ---
 
@@ -485,7 +485,7 @@ Because all ranks use `pwrite()` to non-overlapping byte regions, there is no wr
 ```python
 from distnnp import Simulator, SimulatorConfig
 from distnnp_model import LennardJonesPotentialModel
-from distnnp_integrator import Langevin
+from dynamis_integrator import Langevin
 
 config = SimulatorConfig(
     timestep_fs=0.5,
@@ -615,9 +615,9 @@ The following functions and methods are referenced in this document but are not 
 
 | Class | Package | Notes |
 |---|---|---|
-| `Euler` | `distnnp_integrator` | `step(state, model, dt=None)` — single model call, first-order |
-| `Verlet` | `distnnp_integrator` | `step(state, model, dt=None)` + `halfstep1_()` / `halfstep2_()` — NVE |
-| `Langevin` | `distnnp_integrator` | `step(state, model, dt=None)` + `halfstep1_(noise)` / `halfstep2_(noise)`, `gamma`, `kT` — NVT (BBK) |
+| `Euler` | `dynamis_integrator` | `step(state, model, dt=None)` — single model call, first-order |
+| `Verlet` | `dynamis_integrator` | `step(state, model, dt=None)` + `halfstep1_()` / `halfstep2_()` — NVE |
+| `Langevin` | `dynamis_integrator` | `step(state, model, dt=None)` + `halfstep1_(noise)` / `halfstep2_(noise)`, `gamma`, `kT` — NVT (BBK) |
 
 ---
 

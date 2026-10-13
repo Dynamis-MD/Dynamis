@@ -6,5 +6,5 @@ scipy
 # Install local components in editable mode
 -e ./dynamis_state
 -e ./distnnp_model[all]
--e ./distnnp_integrator
+-e ./dynamis_integrator
 -e ./distnnp

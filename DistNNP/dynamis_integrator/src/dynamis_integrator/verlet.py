@@ -1,15 +1,15 @@
 import torch
-from distnnp_integrator.distnnp_integrator_impl import VerletIntegrator
-from distnnp_integrator._data_check import (
+from dynamis_integrator.dynamis_integrator_impl import VerletIntegrator
+from dynamis_integrator._data_check import (
     check_devices,
     check_shape_2D,
     check_mass_shape,
     check_shapes_match,
 )
-from distnnp_integrator.integrator import DistNNPIntegrator
+from dynamis_integrator.integrator import DistNNPIntegrator
 from dynamis_state import DistNNPState
 from distnnp_model import DistNNPModel
-from distnnp_integrator.masses import TORCH_MASSES
+from dynamis_integrator.masses import TORCH_MASSES
 
 
 class Verlet(DistNNPIntegrator):

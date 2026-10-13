@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25.0)
 
 project(
-    distnnp_integrator
+    dynamis_integrator
     VERSION 0.1.0
     DESCRIPTION "A distributed state management library for neural network potentials"
     HOMEPAGE_URL "https://github.com/szaman19/DistNNP"
@@ -105,16 +105,16 @@ find_library(TORCH_PYTHON_LIBRARY torch_python REQUIRED)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
-python_add_library(distnnp_integrator_impl
+python_add_library(dynamis_integrator_impl
     MODULE
     WITH_SOABI
-    src/distnnp_integrator_bindings.cpp
+    src/dynamis_integrator_bindings.cpp
     src/csrc/euler_integrator.cu
     src/csrc/verlet_integrator.cu
     src/csrc/langevin_integrator.cu
 )
 
-target_include_directories(distnnp_integrator_impl
+target_include_directories(dynamis_integrator_impl
     PRIVATE
     include
     ${TORCH_INCLUDE_DIRS}
@@ -127,7 +127,7 @@ target_include_directories(distnnp_integrator_impl
 # Do not link standalone pybind11::module here: torch bundles its own
 # pybind11 and mixing the two causes ABI conflicts (undefined type_caster
 # symbols at import time).
-target_link_libraries(distnnp_integrator_impl
+target_link_libraries(dynamis_integrator_impl
     PRIVATE
     ${TORCH_LIBRARIES}
     torch
@@ -137,12 +137,12 @@ target_link_libraries(distnnp_integrator_impl
 # Linked by SONAME, not absolute path, so reinstalling dynamis_state doesn't
 # break this import, and both modules resolve to the same TimingRegistry.
 if(DYNAMIS_STATE_TIMING_ENABLED)
-    target_link_libraries(distnnp_integrator_impl PRIVATE ${DYNAMIS_STATE_TIMING_LIBRARY})
+    target_link_libraries(dynamis_integrator_impl PRIVATE ${DYNAMIS_STATE_TIMING_LIBRARY})
 endif()
 
-target_compile_options(distnnp_integrator_impl PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)
+target_compile_options(dynamis_integrator_impl PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)
 
-set_target_properties(distnnp_integrator_impl
+set_target_properties(dynamis_integrator_impl
     PROPERTIES
     FILE_SET HEADERS
     CXX_STANDARD 17
@@ -157,12 +157,12 @@ set_target_properties(distnnp_integrator_impl
     INSTALL_RPATH_USE_LINK_PATH ON
 )
 
-install(TARGETS distnnp_integrator_impl DESTINATION .)
+install(TARGETS dynamis_integrator_impl DESTINATION .)
 
 # Manually install the type marker and stubs if they exist
 install(FILES
-    "src/distnnp_integrator/py.typed"
-    "src/distnnp_integrator/distnnp_integrator_impl.pyi"
+    "src/dynamis_integrator/py.typed"
+    "src/dynamis_integrator/dynamis_integrator_impl.pyi"
     DESTINATION .
     OPTIONAL
 )

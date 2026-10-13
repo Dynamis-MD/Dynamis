@@ -1,7 +1,7 @@
 import pytest
 import math
 import torch
-from distnnp_integrator.distnnp_integrator_impl import LangevinIntegrator
+from dynamis_integrator.dynamis_integrator_impl import LangevinIntegrator
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA not available"
