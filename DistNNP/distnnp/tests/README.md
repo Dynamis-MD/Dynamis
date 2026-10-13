@@ -17,7 +17,7 @@ pip install -r requirements-dev.txt
 Reinstall the affected package after any C++/CUDA change:
 
 ```bash
-pip install -e ./distnnp_state
+pip install -e ./dynamis_state
 pip install -e ./distnnp_integrator
 pip install -e ./distnnp_model
 pip install -e ./distnnp

@@ -1,4 +1,4 @@
-from distnnp_state import (
+from dynamis_state import (
     SimpleSpatialPartitioner,
     KDTreePartitioner,
     SFCPartitioner,
@@ -15,7 +15,7 @@ from distnnp_state import (
     Where,
     Level,
 )
-from distnnp_state.io import is_pathlike
+from dynamis_state.io import is_pathlike
 from distnnp_model import DistNNPModel
 from distnnp_model.comm import drift_flags
 from distnnp.simulatorState import SimState, DRIFT_TRIP, DRIFT_BREACH

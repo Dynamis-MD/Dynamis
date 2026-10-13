@@ -1,6 +1,6 @@
 from __future__ import annotations
 import collections.abc
-import distnnp_state.distnnp_state_impl
+import dynamis_state.dynamis_state_impl
 import torch
 import typing
 
@@ -87,11 +87,11 @@ class FeatureExchanger:
         """
         Export CUDA IPC or Fabric handle for a buffer as bytes
         """
-    def feature_push_backward(self, grad_output: torch.Tensor, grad_input_shape: tuple[int, ...], partition_info: distnnp_state.distnnp_state_impl.PartitionMessagePassingInfo) -> torch.Tensor:
+    def feature_push_backward(self, grad_output: torch.Tensor, grad_input_shape: tuple[int, ...], partition_info: dynamis_state.dynamis_state_impl.PartitionMessagePassingInfo) -> torch.Tensor:
         """
         Push feature gradients backward to neighbors
         """
-    def feature_push_forward(self, local_features: torch.Tensor, partition_info: distnnp_state.distnnp_state_impl.PartitionMessagePassingInfo) -> torch.Tensor:
+    def feature_push_forward(self, local_features: torch.Tensor, partition_info: dynamis_state.dynamis_state_impl.PartitionMessagePassingInfo) -> torch.Tensor:
         """
         Push features forward to neighbors
         """

@@ -7,7 +7,7 @@
 3. The **`FeatureExchanger` C++ class** — the communication engine that executes halo exchanges, with a pluggable backend for intra-node (NVLink / PCIe copy engine) and inter-node (GPUDirect RDMA) transport.
 4. The **`push_buffer_create` CUDA kernel** — the GPU-side gather that packs atoms to be sent into a contiguous send buffer.
 
-The module boundary is deliberately narrow: `distnnp_model` only knows about the halo maps in `DistNNPState` (from `distnnp_state`). It does not know about integrators, trajectory output, or repartitioning.
+The module boundary is deliberately narrow: `distnnp_model` only knows about the halo maps in `DistNNPState` (from `dynamis_state`). It does not know about integrators, trajectory output, or repartitioning.
 
 ---
 
@@ -208,13 +208,13 @@ class FeatureExchanger {
 public:
     torch::Tensor feature_push_forward(
         const torch::Tensor &local_features,           // [num_local, F]
-        const distnnp_state::PartitionMessagePassingInfo &partition_info
+        const dynamis_state::PartitionMessagePassingInfo &partition_info
     );  // returns ghost_features [num_ghost, F]
 
     torch::Tensor feature_push_backward(
         const torch::Tensor &grad_output,              // [num_ghost, F]
         const torch::IntArrayRef &grad_input_shape,    // [num_local, F]
-        const distnnp_state::PartitionMessagePassingInfo &partition_info
+        const dynamis_state::PartitionMessagePassingInfo &partition_info
     );  // returns grad_input [num_local, F]
 };
 ```

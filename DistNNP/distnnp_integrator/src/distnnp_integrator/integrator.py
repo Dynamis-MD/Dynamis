@@ -1,6 +1,6 @@
 import functools
 from abc import ABC, abstractmethod
-from distnnp_state import DistNNPState, Timer, TimerClass, Where
+from dynamis_state import DistNNPState, Timer, TimerClass, Where
 import torch
 from typing import Tuple
 

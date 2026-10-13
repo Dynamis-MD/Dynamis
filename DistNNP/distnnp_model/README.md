@@ -1,6 +1,6 @@
 # distnnp_model
 
-`distnnp_model` wraps neural network potentials (NNPs) with the distributed primitives needed to evaluate them across multiple GPUs using the state described by `distnnp_state`.
+`distnnp_model` wraps neural network potentials (NNPs) with the distributed primitives needed to evaluate them across multiple GPUs using the state described by `dynamis_state`.
 
 ---
 
@@ -53,7 +53,7 @@ The C++ extension (`distnnp_model_impl`) will house the low-level distributed co
 
 - Python >= 3.8
 - PyTorch >= 2.0.0
-- `distnnp_state` installed (see `../distnnp_state/README.md`)
+- `dynamis_state` installed (see `../dynamis_state/README.md`)
 - CMake >= 3.25 and a CUDA 12.x toolkit (for the C++ extension)
 - `scikit-build-core >= 0.5` (installed automatically by pip)
 
@@ -106,7 +106,7 @@ Subclass `DistNNPModel` and implement `__call__`. The implementation is responsi
 ```python
 import torch
 from distnnp_model.potential import DistNNPModel
-from distnnp_state import DistNNPState
+from dynamis_state import DistNNPState
 
 
 class MyNNP(DistNNPModel):
@@ -135,4 +135,4 @@ class MyNNP(DistNNPModel):
         ...
 ```
 
-The model does not need to concern itself with how atoms were partitioned — that is handled by `distnnp_state`. It only sees its own local atoms plus whatever halo atoms the distributed primitives deliver.
+The model does not need to concern itself with how atoms were partitioned — that is handled by `dynamis_state`. It only sees its own local atoms plus whatever halo atoms the distributed primitives deliver.

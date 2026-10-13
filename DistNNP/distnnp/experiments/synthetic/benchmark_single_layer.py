@@ -4,7 +4,7 @@ from distnnp.simulator import Simulator, SimulatorConfig
 from distnnp_integrator import Verlet
 from distnnp import SimState
 import torch
-from distnnp_state import TorchDistEnv
+from dynamis_state import TorchDistEnv
 import os
 import gc
 

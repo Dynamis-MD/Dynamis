@@ -36,7 +36,7 @@ from distnnp_model.nnp.mace import (
 # MACEModel returns MD units; the references in this file are raw MACE eV.
 # Import the shared constant rather than re-spelling it so the two can't drift.
 from distnnp_model.units import EV_PER_A_TO_AMU_A_PER_FS2 as EV_TO_MD
-from distnnp_state import (
+from dynamis_state import (
     DistNNPState,
     MolecularInfo,
     SFCCurveType,
@@ -45,7 +45,7 @@ from distnnp_state import (
     TorchDistEnv,
     radius_graph_pbc_cuda,
 )
-from distnnp_state.masses import TORCH_ATOMIC_MASSES
+from dynamis_state.masses import TORCH_ATOMIC_MASSES
 
 try:
     from ase.data import atomic_numbers as ASE_ATOMIC_NUMBERS

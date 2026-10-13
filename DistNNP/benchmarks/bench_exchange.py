@@ -12,7 +12,7 @@ import time
 import torch
 import torch.distributed as dist
 
-from distnnp_state import (
+from dynamis_state import (
     MolecularInfo,
     DistEnvironment,
     SimulationConfig,

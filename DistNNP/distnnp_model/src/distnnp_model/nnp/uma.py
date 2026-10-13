@@ -29,7 +29,7 @@ except ImportError as e:
 from distnnp_model.potential import DistNNPModel
 from distnnp_model.comm.exchanger import Exchanger, GPUDirectExchanger
 from distnnp_model.comm.feature_push import FeaturePushToExchange
-from distnnp_state import (
+from dynamis_state import (
     DistNNPState,
     PartitionMessagePassingInfo,
     radius_graph_pbc_cuda,

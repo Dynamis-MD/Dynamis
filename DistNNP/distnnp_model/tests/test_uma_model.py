@@ -4,7 +4,7 @@ import torch.distributed as dist
 import pytest
 
 from distnnp_model.nnp import UMAModel
-from distnnp_state import (
+from dynamis_state import (
     DistNNPState, 
     DistEnvironment, 
     MolecularInfo, 

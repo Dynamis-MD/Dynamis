@@ -4,7 +4,7 @@ This experiment runs DistNNP on a randomly generated atom system to verify the f
 
 ## What it tests
 
-- Atom partitioning (SFC Morton) and halo map construction via `distnnp_state`
+- Atom partitioning (SFC Morton) and halo map construction via `dynamis_state`
 - Force and energy evaluation via a Lennard-Jones empirical potential (`distnnp_model`)
 - Time integration and simulation loop via `distnnp` `Simulator`
 - Correct single-GPU and multi-GPU operation
@@ -22,7 +22,7 @@ Install all sub-packages in the `distnnp-env` conda environment (from the repo r
 
 ```bash
 conda activate distnnp-env
-pip install -e ./distnnp_state -e ./distnnp_integrator -e ./distnnp_model -e ./distnnp
+pip install -e ./dynamis_state -e ./distnnp_integrator -e ./distnnp_model -e ./distnnp
 ```
 
 ## Running

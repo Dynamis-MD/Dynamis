@@ -13,7 +13,7 @@ import torch
 import torch.distributed as dist
 
 from distnnp import Simulator
-from distnnp_state import TorchDistEnv
+from dynamis_state import TorchDistEnv
 from distnnp_integrator import Verlet
 from distnnp_model.nnp import UMAModel
 

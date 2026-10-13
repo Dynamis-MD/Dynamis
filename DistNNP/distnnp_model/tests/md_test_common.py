@@ -175,7 +175,7 @@ def real_singleton_torch_dist_env():
     rendezvous address and none is provided when launched standalone
     (no torchrun).
     """
-    from distnnp_state import TorchDistEnv
+    from dynamis_state import TorchDistEnv
 
     port = free_port()
     return TorchDistEnv(

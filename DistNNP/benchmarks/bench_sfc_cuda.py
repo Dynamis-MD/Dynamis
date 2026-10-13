@@ -6,7 +6,7 @@ import torch
 import time
 import sys
 
-from distnnp_state import (
+from dynamis_state import (
     MolecularInfo,
     DistEnvironment,
     SFCPartitioner,

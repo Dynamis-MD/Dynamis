@@ -7,7 +7,7 @@ from distnnp_integrator._data_check import (
     check_shapes_match,
 )
 from distnnp_integrator.integrator import DistNNPIntegrator
-from distnnp_state import DistNNPState
+from dynamis_state import DistNNPState
 from distnnp_model import DistNNPModel
 from distnnp_integrator.masses import TORCH_MASSES
 

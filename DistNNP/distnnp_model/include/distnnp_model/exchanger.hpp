@@ -4,7 +4,7 @@
 #include <cuda.h>
 #include <cstdint>
 #include <vector>
-#include "distnnp_state/distnnp_state.hpp"
+#include "dynamis_state/dynamis_state.hpp"
 
 namespace distnnp_model
 {
@@ -189,13 +189,13 @@ public:
     // Forward: copies local_features into IPC buffer, pushes to peers,
     // returns [N_local + N_ghost, F] with ghost region populated.
     torch::Tensor feature_push_forward(const torch::Tensor &local_features,
-                                       const distnnp_state::PartitionMessagePassingInfo &partition_info);
+                                       const dynamis_state::PartitionMessagePassingInfo &partition_info);
 
     // Backward: pushes ghost grads to peers, scatter-adds received grads,
     // returns [N_local, F].
     torch::Tensor feature_push_backward(const torch::Tensor &grad_output,
                                         const torch::IntArrayRef &grad_input_shape,
-                                        const distnnp_state::PartitionMessagePassingInfo &partition_info);
+                                        const dynamis_state::PartitionMessagePassingInfo &partition_info);
 
     // --- IPC configuration (call from Python before first exchange) ---
     static torch::Tensor allocate_ipc_buffer(int64_t rows, int64_t cols, int64_t device_index)

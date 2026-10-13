@@ -8,7 +8,7 @@ import torch
 import torch.multiprocessing as mp
 import pytest
 
-from distnnp_state import (
+from dynamis_state import (
     MolecularInfo,
     DistEnvironment,
     SimulationConfig,
