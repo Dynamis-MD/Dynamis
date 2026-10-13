@@ -22,7 +22,7 @@ Install all sub-packages in the `distnnp-env` conda environment (from the repo r
 
 ```bash
 conda activate distnnp-env
-pip install -e ./dynamis_state -e ./distnnp_integrator -e ./distnnp_model -e ./distnnp
+pip install -e ./dynamis_state -e ./dynamis_integrator -e ./distnnp_model -e ./distnnp
 ```
 
 ## Running

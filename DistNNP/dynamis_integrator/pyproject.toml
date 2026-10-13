@@ -3,7 +3,7 @@ requires = ["scikit-build-core>=0.5"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "distnnp_integrator"
+name = "dynamis_integrator"
 version = "0.0.1"
 description = "C++ molecular dynamics integrator for DistNNP"
 readme = "README.md"
@@ -17,9 +17,9 @@ build-dir = "build"
 test = ["pytest"]
 
 [tool.scikit-build.wheel]
-packages = ["src/distnnp_integrator"]
+packages = ["src/dynamis_integrator"]
 expand-macos-universal-tags = true
-install-dir = "distnnp_integrator"
+install-dir = "dynamis_integrator"
 
 [tool.scikit-build.sdist]
-include = ["src/distnnp_integrator/*.pyi", "src/distnnp_integrator/py.typed"]
+include = ["src/dynamis_integrator/*.pyi", "src/dynamis_integrator/py.typed"]

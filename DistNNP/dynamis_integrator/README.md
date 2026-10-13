@@ -1,6 +1,6 @@
-# distnnp_integrator
+# dynamis_integrator
 
-`distnnp_integrator` provides time integration algorithms for the DistNNP molecular dynamics framework. Each integrator advances atomic positions and velocities by one timestep given the forces computed by `distnnp_forces`. Integrators are written as CUDA kernels for GPU execution and exposed to Python via pybind11.
+`dynamis_integrator` provides time integration algorithms for the DistNNP molecular dynamics framework. Each integrator advances atomic positions and velocities by one timestep given the forces computed by `distnnp_forces`. Integrators are written as CUDA kernels for GPU execution and exposed to Python via pybind11.
 
 Currently implemented: **`EulerIntegrator`** — a first-order explicit integrator that updates velocities and positions according to:
 
@@ -44,7 +44,7 @@ On conda-managed environments neither variable typically needs to be set.
 
 ### Development (editable) install
 
-From the `distnnp_integrator/` directory:
+From the `dynamis_integrator/` directory:
 
 ```bash
 pip install -e .
@@ -72,11 +72,11 @@ python -m build --wheel
 
 | Path | Role |
 |---|---|
-| `include/distnnp_integrator/integrator.hpp` | `AbstractDistNNPIntegrator` ABC and all concrete integrator declarations |
-| `include/distnnp_integrator/macros.hpp` | CUDA error-checking macros (`CUDACHECK`, `CHECK_INPUT`, …) |
+| `include/dynamis_integrator/integrator.hpp` | `AbstractDistNNPIntegrator` ABC and all concrete integrator declarations |
+| `include/dynamis_integrator/macros.hpp` | CUDA error-checking macros (`CUDACHECK`, `CHECK_INPUT`, …) |
 | `src/csrc/<name>.cu` | CUDA kernel implementation for each integrator |
-| `src/distnnp_integrator_bindings.cpp` | pybind11 bindings (`PYBIND11_MODULE`) |
-| `src/distnnp_integrator/__init__.py` | Python re-exports |
+| `src/dynamis_integrator_bindings.cpp` | pybind11 bindings (`PYBIND11_MODULE`) |
+| `src/dynamis_integrator/__init__.py` | Python re-exports |
 
 ---
 
@@ -89,8 +89,8 @@ All integrators inherit from `AbstractDistNNPIntegrator` and override a single `
 Subclass `AbstractDistNNPIntegrator` and declare `step()`:
 
 ```cpp
-// include/distnnp_integrator/integrator.hpp
-namespace distnnp_integrator {
+// include/dynamis_integrator/integrator.hpp
+namespace dynamis_integrator {
 
   class VelocityVerletIntegrator : public AbstractDistNNPIntegrator
   {
@@ -102,7 +102,7 @@ namespace distnnp_integrator {
               const float dt) override;
   };
 
-} // namespace distnnp_integrator
+} // namespace dynamis_integrator
 ```
 
 The `step()` signature is fixed by the ABC and must not change.
@@ -112,8 +112,8 @@ The `step()` signature is fixed by the ABC and must not change.
 Create `src/csrc/velocity_verlet_integrator.cu`. Use `macros.hpp` for input validation and `at::cuda::getCurrentCUDAStream` to submit work on the correct stream. Follow the pattern in `euler_integrator.cu`:
 
 ```cpp
-#include "distnnp_integrator/integrator.hpp"
-#include "distnnp_integrator/macros.hpp"
+#include "dynamis_integrator/integrator.hpp"
+#include "dynamis_integrator/macros.hpp"
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 
@@ -121,7 +121,7 @@ namespace {
   __global__ void velocity_verlet_kernel(...) { /* kernel body */ }
 }
 
-namespace distnnp_integrator {
+namespace dynamis_integrator {
   void VelocityVerletIntegrator::step(...) {
     CHECK_INPUT(positions);
     // ... launch kernel on getCurrentCUDAStream ...
@@ -135,22 +135,22 @@ namespace distnnp_integrator {
 Add the new `.cu` file to the `python_add_library` source list:
 
 ```cmake
-python_add_library(distnnp_integrator_impl
+python_add_library(dynamis_integrator_impl
     MODULE WITH_SOABI
-    src/distnnp_integrator_bindings.cpp
+    src/dynamis_integrator_bindings.cpp
     src/csrc/euler_integrator.cu
     src/csrc/velocity_verlet_integrator.cu   # <-- new file
 )
 ```
 
-### Step 4 — Bind in `distnnp_integrator_bindings.cpp`
+### Step 4 — Bind in `dynamis_integrator_bindings.cpp`
 
 Register the new class inside the existing `PYBIND11_MODULE` block:
 
 ```cpp
-py::class_<distnnp_integrator::VelocityVerletIntegrator>(m, "VelocityVerletIntegrator")
+py::class_<dynamis_integrator::VelocityVerletIntegrator>(m, "VelocityVerletIntegrator")
     .def(py::init<>())
-    .def("step", &distnnp_integrator::VelocityVerletIntegrator::step);
+    .def("step", &dynamis_integrator::VelocityVerletIntegrator::step);
 ```
 
 ### Step 5 — Rebuild
@@ -161,10 +161,10 @@ pip install -e .
 
 ### Step 6 — Re-export from `__init__.py`
 
-Make the new class importable directly from `distnnp_integrator`:
+Make the new class importable directly from `dynamis_integrator`:
 
 ```python
-from distnnp_integrator.distnnp_integrator_impl import VelocityVerletIntegrator
+from dynamis_integrator.dynamis_integrator_impl import VelocityVerletIntegrator
 __all__ = [..., "VelocityVerletIntegrator"]
 ```
 

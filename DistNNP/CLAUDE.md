@@ -20,7 +20,7 @@ This installs PyTorch, pytest, and all sub-packages in editable mode. Each sub-p
 
 ```bash
 pip install -e ./dynamis_state
-pip install -e ./distnnp_integrator
+pip install -e ./dynamis_integrator
 pip install -e ./distnnp_model
 pip install -e ./distnnp
 ```
@@ -33,8 +33,8 @@ Set `CUDA_HOME` (HPC/SLURM) or `CUDAToolkit_ROOT` if CUDA is not found automatic
 
 ```bash
 pytest                              # all tests
-pytest distnnp_integrator/tests/    # single sub-package
-pytest distnnp_integrator/tests/test_euler.py -v  # single file
+pytest dynamis_integrator/tests/    # single sub-package
+pytest dynamis_integrator/tests/test_euler.py -v  # single file
 ```
 
 Tests that require CUDA are skipped automatically when no GPU is present.
@@ -44,7 +44,7 @@ Tests that require CUDA are skipped automatically when no GPU is present.
 ```
 DistNNP/                        # working directory (this repo)
 ├── dynamis_state/              # C++/CUDA: atom state, partitioning, halo maps
-├── distnnp_integrator/         # C++/CUDA: MD time integration kernels
+├── dynamis_integrator/         # C++/CUDA: MD time integration kernels
 ├── distnnp_model/              # Python: distributed NNP model interface
 ├── distnnp/                    # Python: main user-facing entry point (stub)
 ├── requirements-dev.txt        # installs all sub-packages in editable mode
@@ -70,18 +70,18 @@ Python classes are re-exported at the top level: `from dynamis_state import Mole
 
 Stubs are generated via `scripts/stub_gen.sh` (runs `pybind11-stubgen`).
 
-### `distnnp_integrator`
+### `dynamis_integrator`
 C++/CUDA extension. Advances positions and velocities by one timestep.
 
-Interface (`include/distnnp_integrator/integrator.hpp`):
+Interface (`include/dynamis_integrator/integrator.hpp`):
 ```
 AbstractDistNNPIntegrator.step(positions, velocities, forces, masses, dt)
 ```
 Currently implemented: `EulerIntegrator` (CUDA kernel in `src/csrc/euler_integrator.cu`).
 
-To add a new integrator: subclass `AbstractDistNNPIntegrator` in the header → implement `.cu` kernel → add source to `python_add_library` in `CMakeLists.txt` → bind in `src/distnnp_integrator_bindings.cpp` → re-export from `__init__.py`. See `distnnp_integrator/README.md` for the full walkthrough.
+To add a new integrator: subclass `AbstractDistNNPIntegrator` in the header → implement `.cu` kernel → add source to `python_add_library` in `CMakeLists.txt` → bind in `src/dynamis_integrator_bindings.cpp` → re-export from `__init__.py`. See `dynamis_integrator/README.md` for the full walkthrough.
 
-Tests live in `distnnp_integrator/tests/test_euler.py`.
+Tests live in `dynamis_integrator/tests/test_euler.py`.
 
 ### `distnnp_model`
 Pure Python (C++ extension stub present but empty). Defines the model interface.

@@ -5,14 +5,14 @@
 # even if you run the script from a different folder.
 cd "$(dirname "$0")/.." || exit
 
-echo "Generating stubs for distnnp_integrator_impl..."
+echo "Generating stubs for dynamis_integrator_impl..."
 
 # 2. Run the stub generator targeting the project root's src folder
-pybind11-stubgen distnnp_integrator.distnnp_integrator_impl \
+pybind11-stubgen dynamis_integrator.dynamis_integrator_impl \
     -o ./src/ \
     --ignore-invalid-expressions ".*"
 
 # 3. Ensure the py.typed marker exists
-touch ./src/distnnp_integrator/py.typed
+touch ./src/dynamis_integrator/py.typed
 
-echo "Success! Stubs generated in src/distnnp_integrator/"
+echo "Success! Stubs generated in src/dynamis_integrator/"

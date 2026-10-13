@@ -170,7 +170,7 @@ target_link_libraries(dynamis_state_impl
     TorchNCCL::nccl
 )
 
-# Resolved by SONAME so this extension and distnnp_integrator share one TimingRegistry.
+# Resolved by SONAME so this extension and dynamis_integrator share one TimingRegistry.
 if(DISTNNP_TIMING)
     target_link_libraries(dynamis_state_impl PRIVATE dynamis_state_timing)
 endif()

@@ -1,7 +1,7 @@
 from setup_system import generate_synthetic_dataset, Timer
 from distnnp_model.empirical import LennardJonesPotentialModel
 from distnnp.simulator import Simulator, SimulatorConfig
-from distnnp_integrator import Verlet
+from dynamis_integrator import Verlet
 from distnnp import SimState
 import torch
 from dynamis_state import TorchDistEnv

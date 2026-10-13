@@ -1,5 +1,5 @@
-#include "distnnp_integrator/integrator.hpp"
-#include "distnnp_integrator/macros.hpp"
+#include "dynamis_integrator/integrator.hpp"
+#include "dynamis_integrator/macros.hpp"
 #include "dynamis_state/timing.hpp"
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
@@ -51,7 +51,7 @@ namespace
   }
 }
 
-namespace distnnp_integrator
+namespace dynamis_integrator
 {
   void LangevinIntegrator::halfstep1(
           torch::Tensor &positions,

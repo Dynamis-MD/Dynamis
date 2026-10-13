@@ -2,7 +2,7 @@
 
 `dynamis_state` defines the state representation for the DistNNP framework. It provides C++ structs exposed to Python via pybind11 that describe the molecular system (`MolecularInfo`), the distributed compute environment (`DistEnvironment`), and the per-partition message-passing data (`PartitionMessagePassingInfo`). The top-level `DistNNPState` aggregates all three.
 
-This sub-package is a dependency of every other DistNNP component: `distnnp_forces` reads state to compute forces, and `distnnp_integrator` writes state to evolve the system over time.
+This sub-package is a dependency of every other DistNNP component: `distnnp_forces` reads state to compute forces, and `dynamis_integrator` writes state to evolve the system over time.
 
 ---
 

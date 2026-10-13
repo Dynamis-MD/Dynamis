@@ -21,7 +21,7 @@ import numpy as np
 from pathlib import Path
 from scipy.stats import ks_2samp
 import torch.distributed as dist
-from distnnp_integrator.masses import TORCH_MASSES
+from dynamis_integrator.masses import TORCH_MASSES
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 

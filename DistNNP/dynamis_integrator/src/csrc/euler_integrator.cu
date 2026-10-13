@@ -1,5 +1,5 @@
-#include "distnnp_integrator/integrator.hpp"
-#include "distnnp_integrator/macros.hpp"
+#include "dynamis_integrator/integrator.hpp"
+#include "dynamis_integrator/macros.hpp"
 #include "dynamis_state/timing.hpp"
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
@@ -26,7 +26,7 @@ namespace
   }
 } // anonymous namespace
 
-namespace distnnp_integrator
+namespace dynamis_integrator
 {
   void EulerIntegrator::step(
       torch::Tensor &positions,
@@ -74,4 +74,4 @@ namespace distnnp_integrator
     CUDACHECK(cudaGetLastError());
   }
 
-} // namespace distnnp_integrator
+} // namespace dynamis_integrator

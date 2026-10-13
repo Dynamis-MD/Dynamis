@@ -83,7 +83,7 @@ The primary output of the partitioner pipeline. Each rank holds one of these, po
 
 ### `DistNNPState`
 
-Top-level aggregate passed into `distnnp_model` and `distnnp_integrator` at every timestep.
+Top-level aggregate passed into `distnnp_model` and `dynamis_integrator` at every timestep.
 
 ```cpp
 struct DistNNPState {
@@ -312,5 +312,5 @@ SimulationConfig
    └── global_send_recv_matrix (row[rank] filled)
          │
          ▼
- DistNNPState (passed to distnnp_model and distnnp_integrator)
+ DistNNPState (passed to distnnp_model and dynamis_integrator)
 ```

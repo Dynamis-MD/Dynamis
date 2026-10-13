@@ -1,7 +1,7 @@
 #pragma once
 #include <torch/torch.h>
 
-namespace distnnp_integrator
+namespace dynamis_integrator
 {
   class AbstractDistNNPIntegrator
   {
@@ -72,4 +72,4 @@ namespace distnnp_integrator
                    const float kT,
                    const float dt);
   };
-} // namespace distnnp_integrator
+} // namespace dynamis_integrator

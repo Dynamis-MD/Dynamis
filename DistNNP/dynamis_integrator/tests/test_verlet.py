@@ -1,6 +1,6 @@
 import pytest
 import torch
-from distnnp_integrator.distnnp_integrator_impl import VerletIntegrator
+from dynamis_integrator.dynamis_integrator_impl import VerletIntegrator
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA not available"
