@@ -50,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="medium-mpa-0")
     parser.add_argument("--head-name", default="")
     parser.add_argument("--model-family", default="mp", choices=["mp", "off", "omol", "polar"])
+    parser.add_argument(
+        "--enable-cueq",
+        action="store_true",
+        help="Convert the distributed raw MACE model to cuEquivariance.",
+    )
     return parser
 
 
@@ -75,6 +80,7 @@ def main() -> None:
             head_name=args.head_name or None,
             model_family=args.model_family,
             system="silicon",
+            enable_cueq=args.enable_cueq,
         )
         integrator = Verlet(dt=0.5)
         config = make_config(
@@ -118,10 +124,11 @@ def main() -> None:
                 merged.append(frame)
             artifact = {
                 "metadata": {
-                    "artifact_version": 1,
+                    "artifact_version": 2,
                     "model": args.model,
                     "model_family": args.model_family,
                     "head_name": args.head_name,
+                    "enable_cueq": args.enable_cueq,
                     "structure_sha256": structure_sha256(structure),
                     "timestep_fs": config.timestep_fs,
                     "step_count": N_STEPS,

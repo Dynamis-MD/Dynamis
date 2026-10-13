@@ -255,9 +255,15 @@ def build_mace_model(
     head_name: Optional[str] = None,
     model_family: str = "mp",
     system: str = "silicon",
+    enable_cueq: bool = False,
 ) -> MACEModel:
     spec = get_test_system_spec(system)
-    raw_model = load_raw_mace_model(model_family=model_family, model=model, device=device.type)
+    raw_model = load_raw_mace_model(
+        model_family=model_family,
+        model=model,
+        device=device.type,
+        enable_cueq=enable_cueq,
+    )
     supported_atomic_numbers = {int(value) for value in raw_model.atomic_numbers.detach().cpu().tolist()}
     if spec["atomic_number"] not in supported_atomic_numbers:
         raise ValueError(
@@ -351,6 +357,7 @@ def build_monolithic_mace_model(
     head_name: Optional[str] = None,
     model_family: str = "mp",
     system: str = "silicon",
+    enable_cueq: bool = False,
 ) -> MonolithicMACECalculatorAdapter:
     """Build an independent public-calculator reference for trajectory tests."""
     spec = get_test_system_spec(system)
@@ -372,6 +379,7 @@ def build_monolithic_mace_model(
         model=model,
         device=str(device),
         default_dtype="float32",
+        enable_cueq=enable_cueq,
     )
 
     calculator_models = getattr(calculator, "models", None)

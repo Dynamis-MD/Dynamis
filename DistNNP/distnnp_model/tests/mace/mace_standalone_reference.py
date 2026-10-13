@@ -48,7 +48,7 @@ except Exception as exc:  # pragma: no cover - optional dependency
 else:
     _STANDALONE_IMPORT_ERROR = None
 
-ARTIFACT_VERSION = 2
+ARTIFACT_VERSION = 3
 TEST_FILE_DIR = Path(__file__).resolve().parent
 ELEMENT_TO_Z = dict(ASE_ATOMIC_NUMBERS)
 
@@ -98,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-family", choices=["mp", "off", "omol", "polar"], default="mp")
     parser.add_argument("--model", default="medium-mpa-0")
     parser.add_argument("--head-name", default="", help="Optional explicit MACE head name for metadata validation.")
+    parser.add_argument(
+        "--enable-cueq",
+        action="store_true",
+        help="Enable cuEquivariance for both the public calculator and raw-core reference paths.",
+    )
     parser.add_argument("--ghost-cutoff-buffer", type=float, default=0.5)
     parser.add_argument("--output", type=Path, required=True, help="Reference artifact path.")
     parser.add_argument("--benchmark", action="store_true", help="Record standalone timing stats.")
@@ -208,7 +213,7 @@ def raw_to_atoms(raw: Dict[str, Any]) -> Atoms:
     )
 
 
-def load_mace_calculator(model_family: str, model_name: str, device: str):
+def load_mace_calculator(model_family: str, model_name: str, device: str, enable_cueq: bool = False):
     _require_standalone_mace()
     loaders = {"mp": mace_mp, "off": mace_off, "omol": mace_omol, "polar": mace_polar}
     if model_family not in loaders:
@@ -217,6 +222,7 @@ def load_mace_calculator(model_family: str, model_name: str, device: str):
         model=model_name,
         device=device,
         default_dtype="float32",
+        enable_cueq=enable_cueq,
     )
 
 
@@ -360,7 +366,13 @@ def benchmark_step_loop(
     return _timing_statistics(elapsed_samples, num_atoms)
 
 
-def _reference_signature(raw: Dict[str, Any], model_family: str, model_name: str, head_name: str) -> str:
+def _reference_signature(
+    raw: Dict[str, Any],
+    model_family: str,
+    model_name: str,
+    head_name: str,
+    enable_cueq: bool,
+) -> str:
     payload = {
         "system": raw["name"],
         "source_path": raw.get("source_path", f"builtin://{raw['name']}"),
@@ -371,6 +383,7 @@ def _reference_signature(raw: Dict[str, Any], model_family: str, model_name: str
         "model_family": model_family,
         "model_name": model_name,
         "head_name": head_name,
+        "enable_cueq": enable_cueq,
     }
     encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -390,8 +403,9 @@ def reference_artifact_metadata(
         "model_family": args.model_family,
         "model_name": args.model,
         "head_name": head_name,
+        "enable_cueq": args.enable_cueq,
         "cutoff": cutoff,
-        "signature": _reference_signature(raw, args.model_family, args.model, head_name),
+        "signature": _reference_signature(raw, args.model_family, args.model, head_name, args.enable_cueq),
     }
 
 
@@ -403,13 +417,23 @@ def generate_reference_artifact(
 ) -> Dict[str, Any]:
     _require_standalone_mace()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    raw_model = load_raw_mace_model(args.model_family, args.model, str(device)).to(
+    raw_model = load_raw_mace_model(
+        args.model_family,
+        args.model,
+        str(device),
+        enable_cueq=args.enable_cueq,
+    ).to(
         device=device,
         dtype=COMPUTE_DTYPE,
     ).eval()
     head_name = resolve_model_head_name(raw_model, args.head_name or None)
     cutoff = float(raw_model.r_max.detach().cpu())
-    calculator = load_mace_calculator(args.model_family, args.model, str(device))
+    calculator = load_mace_calculator(
+        args.model_family,
+        args.model,
+        str(device),
+        enable_cueq=args.enable_cueq,
+    )
     atoms = raw_to_atoms(raw)
 
     calculator_reference = evaluate_with_calculator(calculator, atoms)
@@ -490,6 +514,7 @@ def print_summary(artifact: Dict[str, Any]) -> None:
     print(f"model_family: {artifact['metadata']['model_family']}")
     print(f"model_name: {artifact['metadata']['model_name']}")
     print(f"head_name: {artifact['metadata']['head_name']}")
+    print(f"enable_cueq: {artifact['metadata']['enable_cueq']}")
     print(f"cutoff: {artifact['metadata']['cutoff']}")
     print(f"artifact_version: {artifact['metadata']['artifact_version']}")
     print(f"calculator_energy: {artifact['reference']['calculator_energy']}")

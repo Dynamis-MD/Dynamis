@@ -55,7 +55,7 @@ except Exception:  # pragma: no cover - optional dependency
     ASE_ATOMIC_NUMBERS = {}
     HAS_ASE = False
 
-ARTIFACT_VERSION = 2
+ARTIFACT_VERSION = 3
 TEST_FILE_DIR = Path(__file__).resolve().parent
 ELEMENT_TO_Z = dict(ASE_ATOMIC_NUMBERS)
 
@@ -114,6 +114,11 @@ def build_parser() -> argparse.ArgumentParser:
     distributed_parser.add_argument("--model-family", choices=["mp", "off", "omol", "polar"], default="mp")
     distributed_parser.add_argument("--model", default="medium-mpa-0")
     distributed_parser.add_argument("--head-name", default="", help="Optional explicit MACE head name.")
+    distributed_parser.add_argument(
+        "--enable-cueq",
+        action="store_true",
+        help="Request cuEquivariance conversion when loading the distributed raw MACE model.",
+    )
     distributed_parser.add_argument("--ghost-cutoff-buffer", type=float, default=0.5)
     distributed_parser.add_argument("--reference-artifact", type=Path, help="Detached standalone reference artifact.")
     distributed_parser.add_argument("--benchmark", action="store_true", help="Time only the distributed adapter loop.")
@@ -365,7 +370,13 @@ def _timing_statistics(seconds_per_step: List[float], num_atoms: int) -> Dict[st
     }
 
 
-def _reference_signature(raw: Dict[str, Any], model_family: str, model_name: str, head_name: str) -> str:
+def _reference_signature(
+    raw: Dict[str, Any],
+    model_family: str,
+    model_name: str,
+    head_name: str,
+    enable_cueq: bool,
+) -> str:
     payload = {
         "system": raw["name"],
         "source_path": raw.get("source_path", f"builtin://{raw['name']}"),
@@ -376,6 +387,7 @@ def _reference_signature(raw: Dict[str, Any], model_family: str, model_name: str
         "model_family": model_family,
         "model_name": model_name,
         "head_name": head_name,
+        "enable_cueq": enable_cueq,
     }
     encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -393,7 +405,13 @@ def load_and_validate_reference_artifact(
         load_raw_mace_model(args.model_family, args.model, "cpu").to(dtype=COMPUTE_DTYPE).eval(),
         args.head_name or None,
     )
-    expected_signature = _reference_signature(raw, args.model_family, args.model, expected_head)
+    expected_signature = _reference_signature(
+        raw,
+        args.model_family,
+        args.model,
+        expected_head,
+        args.enable_cueq,
+    )
     if metadata.get("artifact_version") != ARTIFACT_VERSION:
         raise ValueError(
             f"Reference artifact version mismatch: expected {ARTIFACT_VERSION}, "
@@ -449,7 +467,12 @@ def prepare_distributed(args: argparse.Namespace) -> PreparedExperiment:
         raise RuntimeError("The distributed MACEModel test requires at least two ranks.")
     device = torch_env.device
     raw = load_raw_structure(args)
-    model = load_raw_mace_model(args.model_family, args.model, str(device)).to(device=device).eval()
+    model = load_raw_mace_model(
+        args.model_family,
+        args.model,
+        str(device),
+        enable_cueq=args.enable_cueq,
+    ).to(device=device).eval()
     cutoff = float(model.r_max.detach().cpu())
     state, sim = build_state(raw, cutoff, args.ghost_cutoff_buffer, torch_env)
     adapter = MACEModel(model, head_name=args.head_name or None)
@@ -464,6 +487,7 @@ def prepare_distributed(args: argparse.Namespace) -> PreparedExperiment:
             "model_family": args.model_family,
             "model_name": args.model,
             "head_name": adapter.head_name,
+            "enable_cueq": args.enable_cueq,
         },
     )
 
@@ -565,6 +589,117 @@ def benchmark_distributed(
         local_seconds = (time.perf_counter() - start) / args.benchmark_iterations
         distributed_samples.append(_critical_path_seconds(local_seconds, device))
 
+    stage_samples: Dict[str, List[float]] = {
+        "structural_view_with_position_exchange": [],
+        "owned_graph_build": [],
+        "mace_forward_with_feature_exchange": [],
+        "force_recovery_with_backward_exchange": [],
+        "total_profiled_step": [],
+    }
+    last_view = None
+    last_graph = None
+    for _ in range(args.benchmark_samples):
+        dist.barrier()
+        _synchronize(device)
+        total_start = time.perf_counter()
+
+        stage_start = time.perf_counter()
+        view = adapter._build_structural_view(state)
+        _synchronize(device)
+        stage_samples["structural_view_with_position_exchange"].append(time.perf_counter() - stage_start)
+
+        stage_start = time.perf_counter()
+        graph = adapter._build_owned_graph(view, state)
+        _synchronize(device)
+        stage_samples["owned_graph_build"].append(time.perf_counter() - stage_start)
+
+        adapter.runtime.begin_forward(state, adapter.exchange_enabled)
+        try:
+            stage_start = time.perf_counter()
+            outputs = adapter.runtime(graph.batch_dict)
+            owned_energy = outputs["owned_local_energy"] * EV_TO_MD
+            _synchronize(device)
+            stage_samples["mace_forward_with_feature_exchange"].append(time.perf_counter() - stage_start)
+
+            stage_start = time.perf_counter()
+            adapter._recover_forces(owned_energy, view)
+            _synchronize(device)
+            stage_samples["force_recovery_with_backward_exchange"].append(time.perf_counter() - stage_start)
+        finally:
+            adapter.runtime.end_forward()
+
+        stage_samples["total_profiled_step"].append(time.perf_counter() - total_start)
+        last_view = view
+        last_graph = graph
+
+    if last_view is None or last_graph is None:
+        raise RuntimeError("Stage profiling did not execute.")
+
+    feature_width = int(adapter.runtime._feature_width or 0)
+    feature_exchange_count = max(0, len(adapter.model.interactions) - 1)
+    element_size = torch.empty((), dtype=COMPUTE_DTYPE).element_size()
+    total_send = int(adapter.partition_validation["total_send"])
+    total_recv = int(adapter.partition_validation["total_recv"])
+    forward_send_bytes = total_send * feature_width * element_size * feature_exchange_count
+    forward_recv_bytes = total_recv * feature_width * element_size * feature_exchange_count
+    backward_send_bytes = forward_recv_bytes
+    backward_recv_bytes = forward_send_bytes
+    position_width = 3
+    position_forward_send_bytes = total_send * position_width * element_size
+    position_forward_recv_bytes = total_recv * position_width * element_size
+    position_backward_send_bytes = position_forward_recv_bytes
+    position_backward_recv_bytes = position_forward_send_bytes
+    owned_atoms = int(last_view.num_local)
+    total_atoms = int(last_view.num_total)
+    halo_atoms = total_atoms - owned_atoms
+    pre_filter_edges = int(last_graph.pre_filter_edge_count)
+    owned_edges = int(last_graph.edge_index.shape[1])
+    stage_timings = {
+        name: _timing_statistics(values, owned_atoms)
+        for name, values in stage_samples.items()
+    }
+    profiled_total_ms = stage_timings["total_profiled_step"]["median_ms_per_step"]
+    for name, timing in stage_timings.items():
+        timing["fraction_of_profiled_total"] = (
+            1.0 if name == "total_profiled_step" else timing["median_ms_per_step"] / profiled_total_ms
+        )
+    local_stage_profile = {
+        "rank": dist.get_rank(),
+        "timing_note": (
+            "Diagnostic decomposition with a device synchronization after every stage; stage values "
+            "include synchronization overhead and should not replace the uninterrupted distributed timing."
+        ),
+        "timings": stage_timings,
+        "workload": {
+            "owned_atoms": owned_atoms,
+            "received_halo_atoms": halo_atoms,
+            "total_local_plus_halo_atoms": total_atoms,
+            "halo_to_owned_ratio": 0.0 if owned_atoms == 0 else halo_atoms / owned_atoms,
+            "pre_filter_graph_edges": pre_filter_edges,
+            "owned_destination_edges": owned_edges,
+            "owned_to_pre_filter_edge_ratio": 0.0 if pre_filter_edges == 0 else owned_edges / pre_filter_edges,
+            "send_rows_per_peer": adapter.partition_validation["send_counts_by_peer"],
+            "receive_rows_per_peer": adapter.partition_validation["recv_counts_by_peer"],
+            "feature_width": feature_width,
+            "feature_exchanges_per_forward": feature_exchange_count,
+            "feature_element_size_bytes": element_size,
+            "forward_feature_send_bytes": forward_send_bytes,
+            "forward_feature_receive_bytes": forward_recv_bytes,
+            "backward_feature_send_bytes": backward_send_bytes,
+            "backward_feature_receive_bytes": backward_recv_bytes,
+            "total_feature_traffic_bytes": (
+                forward_send_bytes + forward_recv_bytes + backward_send_bytes + backward_recv_bytes
+            ),
+            "position_width": position_width,
+            "forward_position_send_bytes": position_forward_send_bytes,
+            "forward_position_receive_bytes": position_forward_recv_bytes,
+            "backward_position_send_bytes": position_backward_send_bytes,
+            "backward_position_receive_bytes": position_backward_recv_bytes,
+        },
+    }
+    stage_profiles: List[Optional[Dict[str, Any]]] = [None] * dist.get_world_size()
+    dist.all_gather_object(stage_profiles, local_stage_profile)
+
     init_stats = None
     if args.time_initialize_buffers:
         init_samples: List[float] = []
@@ -596,6 +731,7 @@ def benchmark_distributed(
         "iterations_per_sample": args.benchmark_iterations,
         "num_samples": args.benchmark_samples,
         "distributed": distributed_stats,
+        "per_rank_stage_profiles": [profile for profile in stage_profiles if profile is not None],
     }
     if init_stats is not None:
         benchmark["distributed_initialize_buffers"] = init_stats
@@ -750,6 +886,32 @@ def print_summary(summary: Dict[str, Any]) -> None:
         print(f"iterations_per_sample: {benchmark['iterations_per_sample']}")
         print(f"num_samples: {benchmark['num_samples']}")
         print(f"distributed_median_ms_per_step: {benchmark['distributed']['median_ms_per_step']}")
+        print("\nPer-rank stage diagnostics:")
+        for profile in benchmark["per_rank_stage_profiles"]:
+            workload = profile["workload"]
+            print(
+                f"rank {profile['rank']}: owned={workload['owned_atoms']}, "
+                f"halos={workload['received_halo_atoms']}, total={workload['total_local_plus_halo_atoms']}, "
+                f"pre_filter_edges={workload['pre_filter_graph_edges']}, "
+                f"owned_destination_edges={workload['owned_destination_edges']}"
+            )
+            print(
+                f"  send_rows_per_peer={workload['send_rows_per_peer']}, "
+                f"receive_rows_per_peer={workload['receive_rows_per_peer']}, "
+                f"feature_width={workload['feature_width']}"
+            )
+            print(
+                "  feature_bytes: "
+                f"forward_send={workload['forward_feature_send_bytes']}, "
+                f"forward_receive={workload['forward_feature_receive_bytes']}, "
+                f"backward_send={workload['backward_feature_send_bytes']}, "
+                f"backward_receive={workload['backward_feature_receive_bytes']}"
+            )
+            for stage_name, timing in profile["timings"].items():
+                print(
+                    f"  {stage_name}_median_ms={timing['median_ms_per_step']}, "
+                    f"fraction={timing['fraction_of_profiled_total']}"
+                )
         print(f"calculator_scope: {benchmark['calculator_baseline']['scope']}")
         print(f"calculator_median_ms_per_step: {benchmark['calculator_baseline']['timings']['median_ms_per_step']}")
         print(f"speedup_calculator_over_distributed: {benchmark['calculator_baseline']['speedup_over_distributed']}")
