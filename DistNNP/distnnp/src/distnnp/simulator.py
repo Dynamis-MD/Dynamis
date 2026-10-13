@@ -143,6 +143,8 @@ class Simulator:
         self.device = device
 
         run_uuid = uuid.uuid4()
+        # shared by the timing registry and the trajectory writer (built in setup())
+        self.run_uuid = run_uuid
 
         # Drift watchdog: flags live in the process-wide registry so the model's
         # exchangers carry them without the model knowing (see drift_flags.py).
@@ -248,7 +250,7 @@ class Simulator:
         # TODO figure out what author should be
         self.writer: TrajectoryWriter = TrajectoryWriter(
             dist_env.global_rank,
-            uuid.uuid4().bytes,
+            self.run_uuid.bytes,
             "author",
             self.config.output_dir,
             self.config.traj_file,
