@@ -17,6 +17,7 @@ from distnnp_state import (
     Where,
     Level,
     TIMING_ENABLED,
+    TrajectoryReader,
     TrajectoryWriter,
 )
 
@@ -919,8 +920,9 @@ def test_trajectory_writer_emits_records(tmp_path):
     init_registry(tmp_path)
 
     xyz = os.path.join(os.path.dirname(__file__), "xyz.xyz")
-    with TrajectoryWriter(0, RUN_ID, "author", str(tmp_path), "trajectory.distnnp") as writer:
-        state = writer.initialize(xyz, 1.0, 1)
+    state, cell, pbc = TrajectoryReader.read(xyz)
+    with TrajectoryWriter(0, RUN_ID, "author", str(tmp_path), "trajectory.distnnp",
+                          state, cell, pbc, 1.0, 1) as writer:
         writer.update_atom_counts(torch.tensor([6], dtype=torch.uint32))
         writer.submit(0, state)
         writer.flush()

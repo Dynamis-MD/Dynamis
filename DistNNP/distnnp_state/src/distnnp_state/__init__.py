@@ -25,7 +25,7 @@ from distnnp_state.dist_graph_builder import (
 )
 
 # IO
-TrajectoryWriter = distnnp_state_impl.TrajectoryWriter
+from distnnp_state.io import TrajectoryReader, TrajectoryWriter, translate_distnnp_to_xyz
 
 # Timing
 TimingRegistry = distnnp_state_impl.TimingRegistry
@@ -78,7 +78,9 @@ __all__ = [
     "KDTreePartitioner",
     "SFCPartitioner",
     "SFCCurveType",
+    "TrajectoryReader",
     "TrajectoryWriter",
+    "translate_distnnp_to_xyz",
     "radius_graph_pbc_cuda",
     "TorchDistEnv",
     "DistGraphBuilder",

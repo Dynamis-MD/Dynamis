@@ -3,6 +3,7 @@
 #include "distnnp_state/partitioner.hpp"
 #include "distnnp_state/radius_graph.hpp"
 #include "distnnp_state/timing.hpp"
+#include "distnnp_state/trajectory_reader.hpp"
 #include "distnnp_state/trajectory_writer.hpp"
 #include <ATen/cuda/CUDAContext.h>
 #include <string_view>
@@ -127,51 +128,46 @@ PYBIND11_MODULE(distnnp_state_impl, m) {
            "Partition: auto-compute edge weights via radius_graph_pbc (CUDA)")
       .def("build_halo_maps", &distnnp_state::SFCPartitioner::build_halo_maps);
 
-  py::class_<distnnp_state::TrajectoryWriter>(m, "TrajectoryWriter")
+  py::class_<distnnp_state::TrajectoryWriterImpl>(m, "TrajectoryWriterImpl")
       .def(py::init<uint32_t, py::bytes, const std::string &,
-                    const std::string &, const std::string &>(),
+                    const std::string &, const std::string &,
+                    const distnnp_state::MolecularInfo &, torch::Tensor,
+                    torch::Tensor, const float, const uint32_t,
+                    std::vector<std::string>>(),
+           "Opens/truncates the output file and writes front matter, in one call",
            py::arg("global_rank"), py::arg("run_id"), py::arg("author"),
-           py::arg("output_dir") = "./trajectory",
-           py::arg("output_file") = "trajectory.distnnp")
-      .def("initialize",
-           py::overload_cast<const std::string &, const float, const uint32_t,
-                              std::vector<std::string>>(
-               &distnnp_state::TrajectoryWriter::initialize),
-           "Writes front matter and initializes environment from an xyz file",
-           py::arg("input_file_name"), py::arg("time_per_step"),
-           py::arg("steps_per_write"),
+           py::arg("output_dir"), py::arg("output_file"),
+           py::arg("molecular_info"), py::arg("cell"), py::arg("pbc"),
+           py::arg("time_per_step"), py::arg("steps_per_write"),
            py::arg("opts") = std::vector<std::string>{})
-      .def("initialize",
-           py::overload_cast<const distnnp_state::MolecularInfo &, const float,
-                              const uint32_t, std::vector<std::string>>(
-               &distnnp_state::TrajectoryWriter::initialize),
-           "Writes front matter and initializes environment from MolecularInfo struct",
-           py::arg("input_system"), py::arg("time_per_step"),
-           py::arg("steps_per_write"),
-           py::arg("opts") = std::vector<std::string>{})
-      .def("write_to_xyz", &distnnp_state::TrajectoryWriter::write_to_xyz,
-           "Writes state to an xyz file", py::arg("state"),
-           py::arg("file_name"), py::arg("opts") = std::vector<std::string>{})
       .def("update_atom_counts",
-           &distnnp_state::TrajectoryWriter::update_atom_counts,
+           &distnnp_state::TrajectoryWriterImpl::update_atom_counts,
            "Update the rank offsets. Should be called after every repartition",
            py::arg("counts"))
-      .def("submit", &distnnp_state::TrajectoryWriter::submit,
+      .def("submit", &distnnp_state::TrajectoryWriterImpl::submit,
            "Submits a state to be written. cell/pbc are optional and are "
            "carried forward from the last value seen if omitted",
            py::arg("step"), py::arg("state"),
            py::arg("cell") = c10::optional<at::Tensor>{},
            py::arg("pbc") = c10::optional<at::Tensor>{})
-      .def("get_cell", &distnnp_state::TrajectoryWriter::get_cell,
+      .def("get_cell", &distnnp_state::TrajectoryWriterImpl::get_cell,
            "Returns the currently cached simulation cell (float32 [3, 3])")
-      .def("get_pbc", &distnnp_state::TrajectoryWriter::get_pbc,
+      .def("get_pbc", &distnnp_state::TrajectoryWriterImpl::get_pbc,
            "Returns the currently cached periodic boundary flags (uint8 [3])")
-      .def("flush", &distnnp_state::TrajectoryWriter::flush,
-           "Flushes the queue and closes the file")
-      .def("__enter__",
-           [](distnnp_state::TrajectoryWriter &self) { return &self; })
-      .def("__exit__",
-           [](distnnp_state::TrajectoryWriter &self, py::args args) {});
+      .def("flush", &distnnp_state::TrajectoryWriterImpl::flush,
+           "Flushes the queue and closes the file");
+
+  m.def("read_molecular_info", &distnnp_state::read_molecular_info,
+        "Reads one frame from a .xyz or .distnnp file, returning "
+        "(MolecularInfo, cell, pbc). frame_index defaults to -1 (last frame) "
+        "and indexes real frames for both formats",
+        py::arg("path"), py::arg("frame_index") = -1);
+
+  m.def("translate_distnnp_to_xyz", &distnnp_state::translate_distnnp_to_xyz,
+        "Translates every frame of a .distnnp file into a multi-frame "
+        "extended-xyz file",
+        py::arg("distnnp_path"), py::arg("xyz_path"),
+        py::arg("opts") = std::vector<std::string>{});
 
   m.def("radius_graph_pbc", &radius_graph_pbc,
         "CUDA cell-list radius graph with selective PBC tiling", py::arg("pos"),
