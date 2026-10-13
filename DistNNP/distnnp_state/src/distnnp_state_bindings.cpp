@@ -158,15 +158,15 @@ PYBIND11_MODULE(distnnp_state_impl, m) {
            "Flushes the queue and closes the file");
 
   m.def("read_molecular_info", &distnnp_state::read_molecular_info,
-        "Reads one frame from a .xyz or .distnnp file, returning "
+        "Reads one frame from a .xyz or .dynamis file, returning "
         "(MolecularInfo, cell, pbc). frame_index defaults to -1 (last frame) "
         "and indexes real frames for both formats",
         py::arg("path"), py::arg("frame_index") = -1);
 
-  m.def("translate_distnnp_to_xyz", &distnnp_state::translate_distnnp_to_xyz,
-        "Translates every frame of a .distnnp file into a multi-frame "
+  m.def("translate_dynamis_to_xyz", &distnnp_state::translate_dynamis_to_xyz,
+        "Translates every frame of a .dynamis file into a multi-frame "
         "extended-xyz file",
-        py::arg("distnnp_path"), py::arg("xyz_path"),
+        py::arg("dynamis_path"), py::arg("xyz_path"),
         py::arg("opts") = std::vector<std::string>{});
 
   m.def("radius_graph_pbc", &radius_graph_pbc,

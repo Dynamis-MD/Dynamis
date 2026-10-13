@@ -34,7 +34,7 @@ elif args.frame_mod > 0:
     playback_ratio = f"1:{args.frame_mod + 1}"
 
 # Load trajectory
-if ext == ".distnnp":
+if ext == ".dynamis":
     pipeline = import_file(input_file, input_format=BinaryReader)
 else:
     pipeline = import_file(input_file)
