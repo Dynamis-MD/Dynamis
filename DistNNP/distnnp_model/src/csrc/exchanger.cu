@@ -47,7 +47,7 @@ void FeatureExchanger::teardown()
 
 torch::Tensor FeatureExchanger::feature_push_forward(
     const torch::Tensor &local_features,
-    const distnnp_state::PartitionMessagePassingInfo &partition_info)
+    const dynamis_state::PartitionMessagePassingInfo &partition_info)
 {
     TORCH_CHECK(ipc_.is_setup(),
                 "FeatureExchanger: IPC not set up. Call setup_ipc() first.");
@@ -83,7 +83,7 @@ torch::Tensor FeatureExchanger::feature_push_forward(
 torch::Tensor FeatureExchanger::feature_push_backward(
     const torch::Tensor &grad_output,
     const torch::IntArrayRef &grad_input_shape,
-    const distnnp_state::PartitionMessagePassingInfo &partition_info)
+    const dynamis_state::PartitionMessagePassingInfo &partition_info)
 {
     TORCH_CHECK(ipc_.is_setup(),
                 "FeatureExchanger: IPC not set up. Call setup_ipc() first.");

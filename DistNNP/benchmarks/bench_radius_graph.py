@@ -15,7 +15,7 @@ _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 radius_graph_pbc_v2 = _mod.radius_graph_pbc_v2
 
-import distnnp_state.distnnp_state_impl as _impl
+import dynamis_state.dynamis_state_impl as _impl
 
 
 class FakeData:

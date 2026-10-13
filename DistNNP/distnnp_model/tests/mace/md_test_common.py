@@ -231,7 +231,7 @@ def free_port() -> int:
 
 
 def real_singleton_torch_dist_env():
-    from distnnp_state import TorchDistEnv
+    from dynamis_state import TorchDistEnv
 
     port = free_port()
     return TorchDistEnv(

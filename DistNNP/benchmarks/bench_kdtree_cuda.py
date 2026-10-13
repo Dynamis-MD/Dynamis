@@ -26,7 +26,7 @@ _ROOT = os.path.abspath(os.path.join(_DISTNNP, os.pardir))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from distnnp_state import MolecularInfo, DistEnvironment, KDTreePartitioner
+from dynamis_state import MolecularInfo, DistEnvironment, KDTreePartitioner
 
 
 def _make_state(N: int, device: torch.device) -> MolecularInfo:

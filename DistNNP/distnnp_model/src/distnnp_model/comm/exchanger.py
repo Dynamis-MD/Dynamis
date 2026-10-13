@@ -2,7 +2,7 @@ import torch.distributed as dist
 import torch
 from distnnp_model import FeatureExchanger
 from distnnp_model.comm import drift_flags
-from distnnp_state import PartitionMessagePassingInfo
+from dynamis_state import PartitionMessagePassingInfo
 from abc import ABC, abstractmethod
 
 

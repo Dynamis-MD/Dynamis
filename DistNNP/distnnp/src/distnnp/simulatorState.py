@@ -1,4 +1,4 @@
-from distnnp_state import (
+from dynamis_state import (
     DistNNPState,
     DistEnvironment,
     SimulationConfig,

@@ -14,7 +14,7 @@ except ImportError as e:
         "orb-models must be installed to use ORBModel: "
         "pip install -e ./distnnp_model[orb]"
     ) from e
-from distnnp_state import DistNNPState, radius_graph_pbc_cuda
+from dynamis_state import DistNNPState, radius_graph_pbc_cuda
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 from distnnp_model.comm.exchanger import GPUDirectExchanger
 

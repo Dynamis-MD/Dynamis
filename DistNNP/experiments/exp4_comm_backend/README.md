@@ -5,7 +5,7 @@
 | # | Backend | Implementation | Mechanism |
 |---|---------|---------------|-----------|
 | 1 | **NCCL all_to_all** | `dist.all_to_all_single` | Collective, all ranks participate |
-| 2 | **IPC one-sided push** | `distnnp_state.IPCExchanger` | CUDA IPC, sender writes directly to receiver memory |
+| 2 | **IPC one-sided push** | `dynamis_state.IPCExchanger` | CUDA IPC, sender writes directly to receiver memory |
 
 
 ## 4a. Micro-benchmark (Communication Only)

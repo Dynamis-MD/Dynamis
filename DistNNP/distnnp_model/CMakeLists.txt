@@ -48,21 +48,21 @@ find_library(TORCH_PYTHON_LIBRARY
 
 find_library(TORCH_PYTHON_LIBRARY torch_python REQUIRED)
 
-# Locate distnnp_state public headers using CMake-native find_path.
-find_path(DISTNNP_STATE_INCLUDE_DIR
-    NAMES distnnp_state/distnnp_state.hpp
+# Locate dynamis_state public headers using CMake-native find_path.
+find_path(DYNAMIS_STATE_INCLUDE_DIR
+    NAMES dynamis_state/dynamis_state.hpp
     HINTS
-        "${Python_SITEARCH}/distnnp_state/include"
-        "${Python_SITELIB}/distnnp_state/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../distnnp_state/include"
+        "${Python_SITEARCH}/dynamis_state/include"
+        "${Python_SITELIB}/dynamis_state/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../dynamis_state/include"
     NO_DEFAULT_PATH
 )
-if(NOT DISTNNP_STATE_INCLUDE_DIR)
+if(NOT DYNAMIS_STATE_INCLUDE_DIR)
     message(FATAL_ERROR
-        "Could not find distnnp_state headers. "
-        "Install it first: pip install -e ./distnnp_state")
+        "Could not find dynamis_state headers. "
+        "Install it first: pip install -e ./dynamis_state")
 endif()
-message(STATUS "distnnp_state include dir: ${DISTNNP_STATE_INCLUDE_DIR}")
+message(STATUS "dynamis_state include dir: ${DYNAMIS_STATE_INCLUDE_DIR}")
 
 python_add_library(distnnp_model_impl
     MODULE
@@ -79,7 +79,7 @@ target_include_directories(distnnp_model_impl
     include
     ${TORCH_INCLUDE_DIRS}
     ${CUDAToolkit_INCLUDE_DIRS}
-    ${DISTNNP_STATE_INCLUDE_DIR}
+    ${DYNAMIS_STATE_INCLUDE_DIR}
 )
 
 # torch_python provides pybind11 type_casters for at::Tensor and must be

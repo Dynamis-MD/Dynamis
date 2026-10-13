@@ -12,7 +12,7 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
-from distnnp_state import PartitionMessagePassingInfo
+from dynamis_state import PartitionMessagePassingInfo
 from distnnp_model.comm.exchanger import GPUDirectExchanger
 
 pytestmark = pytest.mark.skipif(

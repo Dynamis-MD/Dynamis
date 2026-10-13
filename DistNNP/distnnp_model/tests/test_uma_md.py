@@ -31,7 +31,7 @@ from distnnp_integrator import Verlet
 from distnnp_model.nnp import UMAModel
 from distnnp_model.nnp.uma import _EV_PER_A_TO_AMU_A_PER_FS2
 from distnnp_model.potential import DistNNPModel
-from distnnp_state import TorchDistEnv
+from dynamis_state import TorchDistEnv
 
 from md_test_common import (
     compare_trajectories,

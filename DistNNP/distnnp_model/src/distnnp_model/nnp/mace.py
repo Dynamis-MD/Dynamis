@@ -26,7 +26,7 @@ from distnnp_model.comm.exchanger import GPUDirectExchanger
 from distnnp_model.comm.feature_push import FeaturePushToExchange
 from distnnp_model.potential import DistNNPModel
 from distnnp_model.units import EV_PER_A_TO_AMU_A_PER_FS2
-from distnnp_state import DistNNPState, PartitionMessagePassingInfo, radius_graph_pbc_cuda
+from dynamis_state import DistNNPState, PartitionMessagePassingInfo, radius_graph_pbc_cuda
 
 COMPUTE_DTYPE = torch.float32
 

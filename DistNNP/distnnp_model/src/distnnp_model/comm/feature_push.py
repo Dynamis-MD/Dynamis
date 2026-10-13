@@ -3,7 +3,7 @@ import torch
 # Uncomment when the communication engine is implemented
 # from distnnp_model.distnnp_model_impl import feature_push
 
-from distnnp_state import DistNNPState, PartitionMessagePassingInfo, Timer, TimerClass, Where
+from dynamis_state import DistNNPState, PartitionMessagePassingInfo, Timer, TimerClass, Where
 from torch.autograd import Function
 from distnnp_model.comm.exchanger import Exchanger
 from typing import Tuple

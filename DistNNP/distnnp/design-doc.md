@@ -2,7 +2,7 @@
 
 `distnnp` is the top-level entry point for the DistNNP framework. Its primary export is the `Simulator` class, which orchestrates distributed molecular dynamics by composing the three sub-packages:
 
-- **`distnnp_state`** — atom partitioning, halo map construction, and the shared state struct (`DistNNPState`)
+- **`dynamis_state`** — atom partitioning, halo map construction, and the shared state struct (`DistNNPState`)
 - **`distnnp_model`** — force and energy computation via a user-supplied `DistNNPModel`
 - **`distnnp_integrator`** — time integration (Euler, Velocity Verlet, Langevin)
 
@@ -608,8 +608,8 @@ The following functions and methods are referenced in this document but are not 
 | `masses_from_atomic_numbers(atom_indices)` | `distnnp` | Returns float32 mass tensor from a lookup table |
 | `redistribute_atoms(local_data, partition_id, dist_env)` | `distnnp` | `all_to_all`-based atom redistribution after repartition |
 | `DistNNPModel.gather_halo(state)` | `distnnp_model` | Executes GPU-to-GPU halo exchange; appends ghost atoms to position tensors in `state` |
-| `state.energy` | `distnnp_state` | Field on `DistNNPState` for the integrator to store the last computed local energy |
-| `state.pos`, `state.vel`, `state.forces`, `state.mass`, `state.vertex_ids` | `distnnp_state` | Convenience aliases (or properties) on `DistNNPState` for the fields in `local_partition_info` |
+| `state.energy` | `dynamis_state` | Field on `DistNNPState` for the integrator to store the last computed local energy |
+| `state.pos`, `state.vel`, `state.forces`, `state.mass`, `state.vertex_ids` | `dynamis_state` | Convenience aliases (or properties) on `DistNNPState` for the fields in `local_partition_info` |
 
 **Integrators (implemented):**
 
@@ -623,7 +623,7 @@ The following functions and methods are referenced in this document but are not 
 
 ## Open Design Questions
 
-1. **Masses and energy on `DistNNPState`**: Currently `DistNNPState` does not carry `masses` or `energy`. The integrators reference `state.mass` and `state.energy` directly. Options: (a) add these fields to `MolecularInfo` / `DistNNPState` in `distnnp_state`, or (b) define them as properties on a thin Python wrapper around `DistNNPState` in `distnnp`. Option (a) is cleaner for checkpointing; option (b) avoids touching the C++ struct.
+1. **Masses and energy on `DistNNPState`**: Currently `DistNNPState` does not carry `masses` or `energy`. The integrators reference `state.mass` and `state.energy` directly. Options: (a) add these fields to `MolecularInfo` / `DistNNPState` in `dynamis_state`, or (b) define them as properties on a thin Python wrapper around `DistNNPState` in `distnnp`. Option (a) is cleaner for checkpointing; option (b) avoids touching the C++ struct.
 
 2. **`state.forces` / `state.mass` aliases**: The integrators access `state.forces` and `state.mass` directly. `SimState` exposes `pos` and `vel` as Python properties over `DistNNPState.local_molecular_info`; `forces` and `mass` need the same treatment — see open question 1.
 

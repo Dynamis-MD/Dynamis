@@ -17,7 +17,7 @@ pip install -r requirements-dev.txt
 
 The distnnp project is organized into several sub-packages, each responsible for a specific aspect of the overall functionality. Below is a brief overview of each sub-package:
 
-- `distnnp_state`: This sub-package contains modules and classes related to the state representation of the system. It defines how the state of the system is represented, including positions, velocities, and other relevant properties related to distribution.
+- `dynamis_state`: This sub-package contains modules and classes related to the state representation of the system. It defines how the state of the system is represented, including positions, velocities, and other relevant properties related to distribution.
 - `distnnp_model`: This sub-package focuses on the computation of forces within the system. It includes modules that calculate forces based on the state representation and other relevant parameters, specifically tailored for distribution-based neural network potentials.
 - `distnnp_integrator`: This sub-package is responsible for the integration of the equations of motion. It includes modules that implement various integration algorithms to evolve the state of the system over time, taking into account the forces computed by the `distnnp_forces` sub-package.
 - `distnnp`: This is the main sub-package that serves as the entry point for users.

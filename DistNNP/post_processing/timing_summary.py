@@ -1,7 +1,7 @@
 """Summarize DistNNP timing_rank*.jsonl files.
 
-Reads the per-rank JSONL files written by distnnp_state's TimingRegistry
-(see DistNNP/distnnp_state/include/distnnp_state/timing.hpp) and prints:
+Reads the per-rank JSONL files written by dynamis_state's TimingRegistry
+(see DistNNP/dynamis_state/include/dynamis_state/timing.hpp) and prints:
 
   - a Compute/Comm/Wait/Other breakdown as a fraction of the `Total`
     ("iteration") self time, aggregated over all ranks

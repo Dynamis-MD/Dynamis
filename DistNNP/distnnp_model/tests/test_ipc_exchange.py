@@ -106,7 +106,7 @@ def _worker(rank, world_size, result_dict):
 
     # --- Forward push ---
     # Create a dummy partition_info (not used by IPC path, but required by interface)
-    from distnnp_state import PartitionMessagePassingInfo
+    from dynamis_state import PartitionMessagePassingInfo
     dummy_info = PartitionMessagePassingInfo()
 
     output = exchanger.feature_push_forward(local_features, dummy_info)

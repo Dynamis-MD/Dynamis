@@ -19,7 +19,7 @@ pip install -r requirements-dev.txt
 This installs PyTorch, pytest, and all sub-packages in editable mode. Each sub-package must be individually reinstalled after C++ or CUDA changes:
 
 ```bash
-pip install -e ./distnnp_state
+pip install -e ./dynamis_state
 pip install -e ./distnnp_integrator
 pip install -e ./distnnp_model
 pip install -e ./distnnp
@@ -43,7 +43,7 @@ Tests that require CUDA are skipped automatically when no GPU is present.
 
 ```
 DistNNP/                        # working directory (this repo)
-├── distnnp_state/              # C++/CUDA: atom state, partitioning, halo maps
+├── dynamis_state/              # C++/CUDA: atom state, partitioning, halo maps
 ├── distnnp_integrator/         # C++/CUDA: MD time integration kernels
 ├── distnnp_model/              # Python: distributed NNP model interface
 ├── distnnp/                    # Python: main user-facing entry point (stub)
@@ -55,18 +55,18 @@ DistNNP/                        # working directory (this repo)
 
 ## Sub-package Status and Architecture
 
-### `distnnp_state`
+### `dynamis_state`
 C++/CUDA extension. Defines the core data structures shared by all other packages.
 
-Key types (in `include/distnnp_state/distnnp_state.hpp`):
+Key types (in `include/dynamis_state/dynamis_state.hpp`):
 - `MolecularInfo` — positions, velocities, atom indices for a partition
 - `DistEnvironment` — rank, world size, GPU topology
 - `PartitionMessagePassingInfo` — partition indices + halo map + send/recv matrix
 - `DistNNPState` — aggregates the above
 
-Partitioner interface (`include/distnnp_state/partitioner.hpp`): `AbstractPartitioner` with concrete subclasses `SimpleSpatialPartitioner`, `KDTreePartitioner`, `SFCPartitioner`.
+Partitioner interface (`include/dynamis_state/partitioner.hpp`): `AbstractPartitioner` with concrete subclasses `SimpleSpatialPartitioner`, `KDTreePartitioner`, `SFCPartitioner`.
 
-Python classes are re-exported at the top level: `from distnnp_state import MolecularInfo, DistNNPState, ...`
+Python classes are re-exported at the top level: `from dynamis_state import MolecularInfo, DistNNPState, ...`
 
 Stubs are generated via `scripts/stub_gen.sh` (runs `pybind11-stubgen`).
 

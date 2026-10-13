@@ -1,7 +1,7 @@
 from distnnp_model.potential import DistNNPModel
 import torch
 import torch.nn.functional as F
-from distnnp_state import (
+from dynamis_state import (
     radius_graph_pbc_cuda,
     DistNNPState,
     PartitionMessagePassingInfo,

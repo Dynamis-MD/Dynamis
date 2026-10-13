@@ -15,7 +15,7 @@ from distnnp_integrator.langevin import Langevin
 from distnnp_integrator.verlet import Verlet
 from distnnp_integrator.euler import Euler
 
-from distnnp_state import (
+from dynamis_state import (
     MolecularInfo,
     DistEnvironment,
 )

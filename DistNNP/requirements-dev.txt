@@ -4,7 +4,7 @@ pytest
 scipy
 
 # Install local components in editable mode
--e ./distnnp_state
+-e ./dynamis_state
 -e ./distnnp_model[all]
 -e ./distnnp_integrator
 -e ./distnnp

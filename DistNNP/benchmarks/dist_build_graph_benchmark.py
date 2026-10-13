@@ -36,8 +36,8 @@ import traceback
 import torch
 import torch.distributed as dist
 
-import distnnp_state.distnnp_state_impl as _impl
-from distnnp_state.dist_graph_builder import (
+import dynamis_state.dynamis_state_impl as _impl
+from dynamis_state.dist_graph_builder import (
     DistGraphBuilder,
     _cell_block_partition,
     _all_reduce_degrees,

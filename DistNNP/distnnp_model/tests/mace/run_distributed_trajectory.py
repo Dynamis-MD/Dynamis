@@ -16,7 +16,7 @@ import torch.distributed as dist
 
 from distnnp import Simulator
 from distnnp_integrator import Verlet
-from distnnp_state import TorchDistEnv
+from dynamis_state import TorchDistEnv
 
 if __package__:
     from .md_test_common import (

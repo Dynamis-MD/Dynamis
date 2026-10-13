@@ -56,7 +56,7 @@ from distnnp_model.nnp.orb import (
     # constant rather than re-spelling it so the two can never drift apart.
     _EV_PER_A_TO_AMU_A_PER_FS2 as EV_TO_MD,
 )
-from distnnp_state import (
+from dynamis_state import (
     DistNNPState,
     DistEnvironment,
     MolecularInfo,

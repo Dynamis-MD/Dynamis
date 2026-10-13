@@ -2,7 +2,7 @@ import os
 import torch
 import torch.distributed as dist
 
-from distnnp_state import (
+from dynamis_state import (
     MolecularInfo,
     SimulationConfig,
     SFCPartitioner,
@@ -50,7 +50,6 @@ def generate_synthetic_dataset(
     mol_info.atom_types = torch.randint(
         1, 100, (num_atoms,), dtype=torch.long, device=device
     )
-    mol_info.atom_forces = torch.zeros_like(mol_info.atom_positions)
 
     return mol_info
 
