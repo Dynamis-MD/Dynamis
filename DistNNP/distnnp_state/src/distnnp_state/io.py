@@ -12,11 +12,11 @@ def is_pathlike(file_path) -> bool:
 
 
 class TrajectoryReader:
-    """Stateless reader for .xyz and .distnnp trajectory files."""
+    """Stateless reader for .xyz and .dynamis trajectory files."""
 
     @staticmethod
     def read(path, frame_index: int = -1):
-        """Reads one frame from a .xyz or .distnnp file.
+        """Reads one frame from a .xyz or .dynamis file.
 
         Dispatches on extension. frame_index defaults to -1 (the last frame)
         and indexes real frames uniformly for both formats; an out-of-range
@@ -76,6 +76,6 @@ class TrajectoryWriter:
         self.flush()
 
 
-def translate_distnnp_to_xyz(distnnp_path, xyz_path, opts: Optional[list] = None) -> None:
-    """Translates every frame of a .distnnp file into a multi-frame extended-xyz file."""
-    distnnp_state_impl.translate_distnnp_to_xyz(os.fspath(distnnp_path), os.fspath(xyz_path), opts or [])
+def translate_dynamis_to_xyz(dynamis_path, xyz_path, opts: Optional[list] = None) -> None:
+    """Translates every frame of a .dynamis file into a multi-frame extended-xyz file."""
+    distnnp_state_impl.translate_dynamis_to_xyz(os.fspath(dynamis_path), os.fspath(xyz_path), opts or [])

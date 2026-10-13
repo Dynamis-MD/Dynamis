@@ -25,7 +25,7 @@ from distnnp_state.dist_graph_builder import (
 )
 
 # IO
-from distnnp_state.io import TrajectoryReader, TrajectoryWriter, translate_distnnp_to_xyz
+from distnnp_state.io import TrajectoryReader, TrajectoryWriter, translate_dynamis_to_xyz
 
 # Timing
 TimingRegistry = distnnp_state_impl.TimingRegistry
@@ -80,7 +80,7 @@ __all__ = [
     "SFCCurveType",
     "TrajectoryReader",
     "TrajectoryWriter",
-    "translate_distnnp_to_xyz",
+    "translate_dynamis_to_xyz",
     "radius_graph_pbc_cuda",
     "TorchDistEnv",
     "DistGraphBuilder",

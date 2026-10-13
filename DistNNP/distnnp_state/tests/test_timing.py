@@ -921,7 +921,7 @@ def test_trajectory_writer_emits_records(tmp_path):
 
     xyz = os.path.join(os.path.dirname(__file__), "xyz.xyz")
     state, cell, pbc = TrajectoryReader.read(xyz)
-    with TrajectoryWriter(0, RUN_ID, "author", str(tmp_path), "trajectory.distnnp",
+    with TrajectoryWriter(0, RUN_ID, "author", str(tmp_path), "trajectory.dynamis",
                           state, cell, pbc, 1.0, 1) as writer:
         writer.update_atom_counts(torch.tensor([6], dtype=torch.uint32))
         writer.submit(0, state)

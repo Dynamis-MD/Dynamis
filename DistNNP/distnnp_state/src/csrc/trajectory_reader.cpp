@@ -17,7 +17,7 @@ namespace distnnp_state {
 namespace {
 
 // Resolves a possibly-negative frame_index against a known frame count,
-// shared by both the xyz and distnnp read paths.
+// shared by both the xyz and dynamis read paths.
 int64_t resolve_frame_index(int64_t frame_index, uint64_t frame_count, const std::string& path) {
     int64_t count = static_cast<int64_t>(frame_count);
     int64_t resolved = frame_index < 0 ? count + frame_index : frame_index;
@@ -39,10 +39,10 @@ bool validate_xyz_opts(const std::vector<std::string>& opts) {
         if (o == "velocities") has_velocities = true;
         else if (o == "positions") has_positions = true;
         else if (o == "indices") continue; // xyz never writes an id column
-        else throw std::runtime_error("translate_distnnp_to_xyz: unknown option '" + o + "'");
+        else throw std::runtime_error("translate_dynamis_to_xyz: unknown option '" + o + "'");
     }
     if (!has_positions) {
-        throw std::runtime_error("translate_distnnp_to_xyz: 'positions' cannot be excluded from options");
+        throw std::runtime_error("translate_dynamis_to_xyz: 'positions' cannot be excluded from options");
     }
     return has_velocities;
 }
@@ -97,9 +97,9 @@ void write_xyz_frame(std::ostream& out, const MolecularInfo& state, torch::Tenso
     }
 }
 
-// ─── .distnnp reading ──────────────────────────────────────────────────────
+// ─── .dynamis reading ──────────────────────────────────────────────────────
 
-struct DistnnpHeader {
+struct DynamisHeader {
     uint64_t num_atoms{ 0 };
     uint32_t bytes_per_atom{ 0 };
     std::vector<std::string> field_names;
@@ -109,25 +109,25 @@ struct DistnnpHeader {
     uint64_t frame_count{ 0 };
 };
 
-DistnnpHeader read_distnnp_header(int fd, const std::string& path) {
+DynamisHeader read_dynamis_header(int fd, const std::string& path) {
     ssize_t n;
 
     uint8_t magic[8];
     n = pread(fd, magic, sizeof(magic), layout::kMagicOffset);
     CHECK_READ(n, sizeof(magic));
     if (memcmp(magic, kMagicBytes, sizeof(magic)) != 0) {
-        throw std::runtime_error("'" + path + "' is not a valid distnnp file (bad magic)");
+        throw std::runtime_error("'" + path + "' is not a valid dynamis file (bad magic)");
     }
 
     uint32_t version;
     n = pread(fd, &version, sizeof(version), layout::kVersionOffset);
     CHECK_READ(n, sizeof(version));
     if (version != 1) {
-        throw std::runtime_error("'" + path + "': unsupported distnnp version " + std::to_string(version) +
+        throw std::runtime_error("'" + path + "': unsupported dynamis version " + std::to_string(version) +
                                   " (only version 1 is supported)");
     }
 
-    DistnnpHeader h;
+    DynamisHeader h;
 
     n = pread(fd, &h.num_atoms, sizeof(h.num_atoms), layout::kTotalAtomsOffset);
     CHECK_READ(n, sizeof(h.num_atoms));
@@ -183,7 +183,7 @@ DistnnpHeader read_distnnp_header(int fd, const std::string& path) {
     return h;
 }
 
-std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_distnnp_frame(int fd, const DistnnpHeader& h, const std::string& path, uint64_t frame_index) {
+std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_dynamis_frame(int fd, const DynamisHeader& h, const std::string& path, uint64_t frame_index) {
     ssize_t n;
 
     MolecularInfo atoms;
@@ -251,14 +251,14 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_distnnp_frame(int f
     return { atoms, cell, pbc };
 }
 
-std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> load_distnnp_file(const std::string& path, int64_t frame_index) {
+std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> load_dynamis_file(const std::string& path, int64_t frame_index) {
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) throw std::runtime_error("failed to open '" + path + "': " + strerror(errno));
 
     try {
-        DistnnpHeader h = read_distnnp_header(fd, path);
+        DynamisHeader h = read_dynamis_header(fd, path);
         int64_t resolved = resolve_frame_index(frame_index, h.frame_count, path);
-        auto result = read_distnnp_frame(fd, h, path, static_cast<uint64_t>(resolved));
+        auto result = read_dynamis_frame(fd, h, path, static_cast<uint64_t>(resolved));
         close(fd);
         return result;
     } catch (...) {
@@ -493,18 +493,18 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_molecular_info(cons
     if (len >= 4 && path.compare(len - 4, 4, ".xyz") == 0) {
         return load_xyz_file(path, frame_index);
     }
-    if (len >= 8 && path.compare(len - 8, 8, ".distnnp") == 0) {
-        return load_distnnp_file(path, frame_index);
+    if (len >= 8 && path.compare(len - 8, 8, ".dynamis") == 0) {
+        return load_dynamis_file(path, frame_index);
     }
-    throw std::runtime_error("'" + path + "': unsupported file type (expected .xyz or .distnnp)");
+    throw std::runtime_error("'" + path + "': unsupported file type (expected .xyz or .dynamis)");
 }
 
-void translate_distnnp_to_xyz(const std::string& distnnp_path, const std::string& xyz_path,
+void translate_dynamis_to_xyz(const std::string& dynamis_path, const std::string& xyz_path,
                                std::vector<std::string> opts) {
     bool has_velocities = validate_xyz_opts(opts);
 
-    int fd = open(distnnp_path.c_str(), O_RDONLY);
-    if (fd < 0) throw std::runtime_error("failed to open '" + distnnp_path + "': " + strerror(errno));
+    int fd = open(dynamis_path.c_str(), O_RDONLY);
+    if (fd < 0) throw std::runtime_error("failed to open '" + dynamis_path + "': " + strerror(errno));
 
     std::ofstream out(xyz_path);
     if (!out.is_open()) {
@@ -513,9 +513,9 @@ void translate_distnnp_to_xyz(const std::string& distnnp_path, const std::string
     }
 
     try {
-        DistnnpHeader h = read_distnnp_header(fd, distnnp_path);
+        DynamisHeader h = read_dynamis_header(fd, dynamis_path);
         for (uint64_t i = 0; i < h.frame_count; i++) {
-            auto [state, cell, pbc] = read_distnnp_frame(fd, h, distnnp_path, i);
+            auto [state, cell, pbc] = read_dynamis_frame(fd, h, dynamis_path, i);
             write_xyz_frame(out, state, cell, pbc, has_velocities);
         }
     } catch (...) {

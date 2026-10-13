@@ -18,11 +18,11 @@ ELEMENT_SYMBOLS = {
     81: 'Tl', 82: 'Pb',
 }
 
-# Byte layout of the .distnnp front matter. Everything up to field_count is
+# Byte layout of the .dynamis front matter. Everything up to field_count is
 # fixed-size regardless of which fields a writer selected; field_count and
 # field_descriptors then determine where front_matter_size (and everything
 # after it) actually lives, so those offsets must be computed, not assumed.
-MAGIC = b"DISTNNP\x00"
+MAGIC = b"DYNAMIS\x00"
 OFFSET_NUM_ATOMS = 92
 OFFSET_BYTES_PER_ATOM = 108
 OFFSET_FIELD_COUNT = 112
@@ -46,7 +46,7 @@ def _read_header(f):
     """
     f.seek(0)
     if f.read(8) != MAGIC:
-        raise ValueError("not a valid distnnp file (bad magic)")
+        raise ValueError("not a valid dynamis file (bad magic)")
 
     f.seek(OFFSET_NUM_ATOMS)
     num_atoms = int(np.fromfile(f, dtype=np.uint64, count=1)[0])
@@ -65,11 +65,11 @@ def _read_header(f):
         if name == "pbc_cell":
             continue  # per-frame block, not a per-atom field
         if name not in FIELD_LAYOUT:
-            raise ValueError(f"unknown field descriptor '{name}' in distnnp file")
+            raise ValueError(f"unknown field descriptor '{name}' in dynamis file")
         field_names.append(name)
 
     if "position" not in field_names:
-        raise ValueError("'position' field missing from distnnp file, cannot load")
+        raise ValueError("'position' field missing from dynamis file, cannot load")
 
     # front_matter_size immediately follows the field_descriptors block, whose
     # size depends on field_count, so this offset moves with the field set.
@@ -84,7 +84,7 @@ class BinaryReader(FileReaderInterface):
     @staticmethod
     def detect(filename: str):
         try:
-            is_correct_ext = os.path.splitext(filename)[1].lower() == ".distnnp"
+            is_correct_ext = os.path.splitext(filename)[1].lower() == ".dynamis"
             if not is_correct_ext or os.path.getsize(filename) < OFFSET_FIELD_DESCRIPTORS:
                 return False
             with open(filename, "rb") as f:
@@ -151,7 +151,7 @@ class BinaryReader(FileReaderInterface):
             # 3. Walk the field descriptors (in file order) to find each active
             # field's byte offset within the rest of the frame; fields absent
             # from field_names simply aren't in the map. Mirrors the cursor
-            # logic in TrajectoryWriter::load_distnnp_file.
+            # logic in TrajectoryWriter::load_dynamis_file.
             field_offsets = {}
             cursor = frame_offset + pbc_cell_block_size
             for name in field_names:

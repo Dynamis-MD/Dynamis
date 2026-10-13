@@ -8,7 +8,7 @@ import torch
 import torch.multiprocessing as mp
 import pytest
 
-from distnnp_state import MolecularInfo, TrajectoryReader, TrajectoryWriter, translate_distnnp_to_xyz
+from distnnp_state import MolecularInfo, TrajectoryReader, TrajectoryWriter, translate_dynamis_to_xyz
 from distnnp_state.masses import TORCH_ATOMIC_MASSES
 
 
@@ -163,18 +163,18 @@ def test_xyz_malformed_atom_line_raises(tmp_path):
         TrajectoryReader.read(str(bad_file))
 
 
-def test_distnnp_bad_magic_raises(tmp_path):
-    bad_file = tmp_path / "bad_magic.distnnp"
+def test_dynamis_bad_magic_raises(tmp_path):
+    bad_file = tmp_path / "bad_magic.dynamis"
     bad_file.write_bytes(b"NOTAMAGIC" + b"\x00" * 100)
     with pytest.raises(RuntimeError):
         TrajectoryReader.read(str(bad_file))
 
 
-def test_distnnp_unsupported_version_raises(tmp_path):
-    bad_file = tmp_path / "bad_version.distnnp"
+def test_dynamis_unsupported_version_raises(tmp_path):
+    bad_file = tmp_path / "bad_version.dynamis"
     fixed = struct.pack(
         "<8sI16s64sQfIII",
-        b"DISTNNP\x00", 2,
+        b"DYNAMIS\x00", 2,
         b"1234".ljust(16, b"\x00"),
         b"author".ljust(64, b"\x00"),
         1, 1.0, 1, 12, 0,
@@ -190,7 +190,7 @@ def test_read_missing_position_field_raises(tmp_path):
 
     fixed = struct.pack(
         "<8sI16s64sQfIII",
-        b"DISTNNP\x00", 1,
+        b"DYNAMIS\x00", 1,
         b"1234".ljust(16, b"\x00"),
         b"author".ljust(64, b"\x00"),
         2, 1.0, 1, 12, 1,
@@ -203,7 +203,7 @@ def test_read_missing_position_field_raises(tmp_path):
     velocities = struct.pack("<6f", 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
     pbc_cell = b"\x00" * 40
 
-    bad_file = tmp_path / "missing_position.distnnp"
+    bad_file = tmp_path / "missing_position.dynamis"
     bad_file.write_bytes(fixed + field_descriptor + front_matter_size + header_padding
                           + atom_types + atom_type_padding + pbc_cell + velocities)
 
@@ -213,11 +213,11 @@ def test_read_missing_position_field_raises(tmp_path):
 
 def test_reader_missing_file_raises():
     with pytest.raises(RuntimeError):
-        TrajectoryReader.read("./does_not_exist.distnnp")
+        TrajectoryReader.read("./does_not_exist.dynamis")
 
 
 def test_reader_reads_xyz_directly():
-    """read() should transparently handle a .xyz source, not just .distnnp."""
+    """read() should transparently handle a .xyz source, not just .dynamis."""
     result, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
 
     assert result.num_atoms == 6
@@ -234,12 +234,12 @@ def test_reader_accepts_pathlike():
 
 def test_write_front_matter():
     source, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
-    TrajectoryWriter(0, b"1234", "author", "./", "trajectory.distnnp", source, cell, pbc, 1.0, 1).flush()
+    TrajectoryWriter(0, b"1234", "author", "./", "trajectory.dynamis", source, cell, pbc, 1.0, 1).flush()
 
     fixed_format = "<8sI16s64sQfIII32s32s32s32sQ4x6B2x"
     fixed_size = struct.calcsize(fixed_format)
 
-    with open("./trajectory.distnnp", "rb") as f:
+    with open("./trajectory.dynamis", "rb") as f:
         raw_fixed = f.read(fixed_size)
         if len(raw_fixed) < fixed_size:
             raise ValueError(f"File too small to contain a valid header. got {len(raw_fixed)} expected {fixed_size}")
@@ -264,7 +264,7 @@ def test_write_front_matter():
             "atom_types":      vals[14:20]
         }
 
-        assert h["magic"] == b"DISTNNP\x00"
+        assert h["magic"] == b"DYNAMIS\x00"
         assert h["version"] == 1
         assert h["run_id"] == uuid.UUID(bytes=b"1234".ljust(16, b'\x00'))
         assert h["author"] == "author"
@@ -286,8 +286,8 @@ def test_write_frame():
     env1, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
     env2, _, _ = TrajectoryReader.read("tests/xyz.xyz")
 
-    base_writer = TrajectoryWriter(0, b"1234", "author", "./", "trajectory.distnnp", env1, cell, pbc, 1.0, 1)
-    writer1 = TrajectoryWriter(1, b"1234", "author", "./", "trajectory.distnnp", env2, cell, pbc, 1.0, 1)
+    base_writer = TrajectoryWriter(0, b"1234", "author", "./", "trajectory.dynamis", env1, cell, pbc, 1.0, 1)
+    writer1 = TrajectoryWriter(1, b"1234", "author", "./", "trajectory.dynamis", env2, cell, pbc, 1.0, 1)
 
     # split up the envs
     # 6 atoms
@@ -319,7 +319,7 @@ def test_write_frame():
     format = "<264x 9f3B1x 6Q 18f 18f"
     size = struct.calcsize(format)
 
-    with open("./trajectory.distnnp", "rb") as f:
+    with open("./trajectory.dynamis", "rb") as f:
         raw = f.read(size)
         if len(raw) < size:
             raise ValueError(f"File too small to contain a valid header. got {len(raw)} expected {size}")
@@ -353,7 +353,7 @@ def test_submit_cell_pbc_roundtrip_and_carry_forward():
     """cell/pbc passed to submit() are persisted per-frame and carried
     forward (without re-passing) on subsequent submit() calls."""
     env, source_cell, source_pbc = TrajectoryReader.read("tests/xyz.xyz")
-    with TrajectoryWriter(0, b"1234", "author", "./", "trajectory.distnnp", env, source_cell, source_pbc, 1.0, 1) as writer:
+    with TrajectoryWriter(0, b"1234", "author", "./", "trajectory.dynamis", env, source_cell, source_pbc, 1.0, 1) as writer:
         writer.update_atom_counts(torch.tensor([6], dtype=torch.uint32))
 
         cell = torch.tensor([[10.0, 0.0, 0.0], [0.0, 20.0, 0.0], [0.0, 0.0, 30.0]])
@@ -371,7 +371,7 @@ def test_submit_cell_pbc_roundtrip_and_carry_forward():
     frame_size = header_size + atom_block
     front_matter_size = 264  # for the 6-atom xyz.xyz fixture
 
-    with open("./trajectory.distnnp", "rb") as f:
+    with open("./trajectory.dynamis", "rb") as f:
         for step in range(2):
             f.seek(front_matter_size + step * frame_size)
             vals = struct.unpack(frame_header_fmt, f.read(header_size))
@@ -384,7 +384,7 @@ def test_submit_cell_pbc_roundtrip_and_carry_forward():
 def test_submit_distinct_cells_per_frame():
     """Two frames written with different cells must not collide."""
     env, source_cell, source_pbc = TrajectoryReader.read("tests/xyz.xyz")
-    with TrajectoryWriter(0, b"1234", "author", "./", "trajectory.distnnp", env, source_cell, source_pbc, 1.0, 1) as writer:
+    with TrajectoryWriter(0, b"1234", "author", "./", "trajectory.dynamis", env, source_cell, source_pbc, 1.0, 1) as writer:
         writer.update_atom_counts(torch.tensor([6], dtype=torch.uint32))
 
         cell_a = torch.eye(3) * 5.0
@@ -401,7 +401,7 @@ def test_submit_distinct_cells_per_frame():
     frame_size = header_size + atom_block
     front_matter_size = 264
 
-    with open("./trajectory.distnnp", "rb") as f:
+    with open("./trajectory.dynamis", "rb") as f:
         f.seek(front_matter_size)
         vals_a = struct.unpack(frame_header_fmt, f.read(header_size))
         f.seek(front_matter_size + frame_size)
@@ -421,7 +421,7 @@ def test_opts_reduced_fields_round_trip():
     positions = torch.concat((values, values), dim=0).reshape([6, 3]).to(torch.float32)
 
     env, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
-    with TrajectoryWriter(0, b"1234", "author", "./", "opts_reduced.distnnp", env, cell, pbc, 1.0, 1,
+    with TrajectoryWriter(0, b"1234", "author", "./", "opts_reduced.dynamis", env, cell, pbc, 1.0, 1,
                            ["positions", "indices"]) as writer:
         writer.update_atom_counts(torch.tensor([6], dtype=torch.uint32))
         writer.submit(0, env)
@@ -429,12 +429,12 @@ def test_opts_reduced_fields_round_trip():
     # header should reflect only 2 fields (id + position), bytes_per_atom = 8 + 12 = 20
     fixed_format = "<8sI16s64sQfIII"
     fixed_size = struct.calcsize(fixed_format)
-    with open("./opts_reduced.distnnp", "rb") as f:
+    with open("./opts_reduced.dynamis", "rb") as f:
         vals = struct.unpack(fixed_format, f.read(fixed_size))
         assert vals[7] == 20  # bytes_per_atom
         assert vals[8] == 3   # field_count (pbc_cell + id + position)
 
-    env2, _, _ = TrajectoryReader.read("./opts_reduced.distnnp")
+    env2, _, _ = TrajectoryReader.read("./opts_reduced.dynamis")
 
     assert env2.num_atoms == 6
     assert torch.equal(torch.tensor([20, 35, 1, 6, 1, 1], dtype=torch.long), env2.atom_types)
@@ -447,12 +447,12 @@ def test_opts_missing_indices_assumes_sequential_order():
     """Writing without "indices" should read back as sequential [0, num_atoms)."""
 
     env, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
-    with TrajectoryWriter(0, b"1234", "author", "./", "opts_no_indices.distnnp", env, cell, pbc, 1.0, 1,
+    with TrajectoryWriter(0, b"1234", "author", "./", "opts_no_indices.dynamis", env, cell, pbc, 1.0, 1,
                            ["positions", "velocities"]) as writer:
         writer.update_atom_counts(torch.tensor([6], dtype=torch.uint32))
         writer.submit(0, env)
 
-    env2, _, _ = TrajectoryReader.read("./opts_no_indices.distnnp")
+    env2, _, _ = TrajectoryReader.read("./opts_no_indices.dynamis")
 
     assert torch.equal(torch.arange(0, 6, 1).to(torch.int64), env2.atom_vertex_numbers)
 
@@ -461,27 +461,27 @@ def test_opts_positions_required_on_write():
     """opts that exclude "positions" should be rejected."""
     env, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
     with pytest.raises(RuntimeError):
-        TrajectoryWriter(0, b"1234", "author", "./", "opts_invalid.distnnp", env, cell, pbc, 1.0, 1,
+        TrajectoryWriter(0, b"1234", "author", "./", "opts_invalid.dynamis", env, cell, pbc, 1.0, 1,
                           ["indices", "velocities"])
 
 
 def test_opts_unknown_option_rejected():
     env, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
     with pytest.raises(RuntimeError):
-        TrajectoryWriter(0, b"1234", "author", "./", "opts_unknown.distnnp", env, cell, pbc, 1.0, 1,
+        TrajectoryWriter(0, b"1234", "author", "./", "opts_unknown.dynamis", env, cell, pbc, 1.0, 1,
                           ["positions", "not_a_real_field"])
 
 
 def test_writer_reader_round_trip():
-    """Writing then reading a MolecularInfo through a .distnnp file should
+    """Writing then reading a MolecularInfo through a .dynamis file should
     round-trip all fields intact."""
     source, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
 
-    with TrajectoryWriter(0, b"1234", "author", "./", "io_round_trip.distnnp", source, cell, pbc, 1.0, 1) as writer:
+    with TrajectoryWriter(0, b"1234", "author", "./", "io_round_trip.dynamis", source, cell, pbc, 1.0, 1) as writer:
         writer.update_atom_counts(torch.tensor([source.num_atoms], dtype=torch.uint32))
         writer.submit(0, source)
 
-    result, result_cell, result_pbc = TrajectoryReader.read("./io_round_trip.distnnp")
+    result, result_cell, result_pbc = TrajectoryReader.read("./io_round_trip.dynamis")
 
     assert result.num_atoms == source.num_atoms
     assert torch.equal(result.atom_types, source.atom_types)
@@ -495,12 +495,12 @@ def test_writer_reader_round_trip_with_opts():
     should synthesize sequential indices and zero-filled velocities."""
     source, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
 
-    with TrajectoryWriter(0, b"1234", "author", "./", "io_round_trip_opts.distnnp", source, cell, pbc, 1.0, 1,
+    with TrajectoryWriter(0, b"1234", "author", "./", "io_round_trip_opts.dynamis", source, cell, pbc, 1.0, 1,
                            ["positions"]) as writer:
         writer.update_atom_counts(torch.tensor([source.num_atoms], dtype=torch.uint32))
         writer.submit(0, source)
 
-    result, _, _ = TrajectoryReader.read("./io_round_trip_opts.distnnp")
+    result, _, _ = TrajectoryReader.read("./io_round_trip_opts.dynamis")
 
     assert torch.equal(result.atom_positions, source.atom_positions)
     assert torch.equal(result.atom_vertex_numbers, torch.arange(0, source.num_atoms, dtype=torch.int64))
@@ -512,12 +512,12 @@ def test_writer_accepts_pathlike():
     source, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
 
     out_dir = pathlib.Path(".")
-    out_file = pathlib.Path("io_pathlike.distnnp")
+    out_file = pathlib.Path("io_pathlike.dynamis")
     with TrajectoryWriter(0, b"1234", "author", out_dir, out_file, source, cell, pbc, 1.0, 1) as writer:
         writer.update_atom_counts(torch.tensor([source.num_atoms], dtype=torch.uint32))
         writer.submit(0, source)
 
-    result, _, _ = TrajectoryReader.read(pathlib.Path("io_pathlike.distnnp"))
+    result, _, _ = TrajectoryReader.read(pathlib.Path("io_pathlike.dynamis"))
     assert torch.equal(result.atom_positions, source.atom_positions)
 
 
@@ -525,7 +525,7 @@ def test_writer_accepts_pathlike():
 #
 # Mirrors the multi-process pattern used by test_ipc_exchanger.py's
 # TestIPCExchanger, except here "distributed" only means separate OS processes
-# each writing their own local slice of atoms to a shared .distnnp file --
+# each writing their own local slice of atoms to a shared .dynamis file --
 # exactly how distnnp/simulator.py drives one TrajectoryWriter per rank. No
 # extra locking is needed beyond a single barrier: rank 0's O_TRUNC happens in
 # the constructor, and every rank's submit() writes into a disjoint byte range
@@ -593,8 +593,8 @@ def _run_distributed_write(world_size, output_dir, filename, atom_counts, opts=N
 
 
 def _read_raw_frame(path, frame_index, num_atoms, has_indices, has_velocities):
-    """Manually parses the .distnnp binary layout (mirrors
-    read_distnnp_frame in trajectory_reader.cpp) to pull back one specific
+    """Manually parses the .dynamis binary layout (mirrors
+    read_dynamis_frame in trajectory_reader.cpp) to pull back one specific
     frame by index, as a cross-check independent of TrajectoryReader.read()."""
     with open(path, "rb") as f:
         f.seek(112)
@@ -635,7 +635,7 @@ def test_distributed_multi_rank_write_read_round_trip():
     the same shared file, write several frames, submitting only their own slice
     of atoms each time. Every frame -- not just the last -- should be
     individually addressable via TrajectoryReader.read(path, frame_index)."""
-    filename = "dist_multirank_full.distnnp"
+    filename = "dist_multirank_full.dynamis"
     num_frames = 3
 
     _run_distributed_write(
@@ -674,7 +674,7 @@ def test_distributed_multi_rank_write_read_round_trip_reduced_opts():
     opts=["positions", "indices"]: velocities should be dropped from the file
     entirely, every frame should still read back distinctly, and the last
     frame should zero-fill velocities on read."""
-    filename = "dist_multirank_opts.distnnp"
+    filename = "dist_multirank_opts.dynamis"
     num_frames = 2
 
     _run_distributed_write(
@@ -704,10 +704,10 @@ def test_distributed_multi_rank_write_read_round_trip_reduced_opts():
         assert velocities is None
 
 
-# ─── translate_distnnp_to_xyz ──────────────────────────────────────────────
+# ─── translate_dynamis_to_xyz ──────────────────────────────────────────────
 
 
-def _write_multiframe_distnnp(path, num_frames=3, opts=None):
+def _write_multiframe_dynamis(path, num_frames=3, opts=None):
     source, _, _ = TrajectoryReader.read("tests/xyz.xyz")
     cell = torch.eye(3) * 12.0
     pbc = torch.tensor([True, False, True])
@@ -728,11 +728,11 @@ def _write_multiframe_distnnp(path, num_frames=3, opts=None):
     return source
 
 
-def test_translate_distnnp_to_xyz_multi_frame():
+def test_translate_dynamis_to_xyz_multi_frame():
     num_frames = 3
-    source = _write_multiframe_distnnp("translate_source.distnnp", num_frames=num_frames)
+    source = _write_multiframe_dynamis("translate_source.dynamis", num_frames=num_frames)
 
-    translate_distnnp_to_xyz("./translate_source.distnnp", "./translate_out.xyz")
+    translate_dynamis_to_xyz("./translate_source.dynamis", "./translate_out.xyz")
 
     with open("./translate_out.xyz") as f:
         lines = f.readlines()
@@ -757,10 +757,10 @@ def test_translate_distnnp_to_xyz_multi_frame():
         assert torch.equal(torch.tensor([1, 0, 1], dtype=torch.uint8), pbc)
 
 
-def test_translate_distnnp_to_xyz_opts_drops_velocities():
-    _write_multiframe_distnnp("translate_opts.distnnp", num_frames=2)
+def test_translate_dynamis_to_xyz_opts_drops_velocities():
+    _write_multiframe_dynamis("translate_opts.dynamis", num_frames=2)
 
-    translate_distnnp_to_xyz("./translate_opts.distnnp", "./translate_opts_out.xyz", ["positions"])
+    translate_dynamis_to_xyz("./translate_opts.dynamis", "./translate_opts_out.xyz", ["positions"])
 
     with open("./translate_opts_out.xyz") as f:
         lines = f.readlines()
@@ -777,20 +777,20 @@ def test_translate_distnnp_to_xyz_opts_drops_velocities():
             assert len(line.split()) == 4  # species + 3 pos, no velocities
 
 
-def test_translate_distnnp_to_xyz_round_trip():
+def test_translate_dynamis_to_xyz_round_trip():
     """translate -> re-read every frame from the xyz -> compare against
-    TrajectoryReader.read() on the original .distnnp at the same frame_index."""
+    TrajectoryReader.read() on the original .dynamis at the same frame_index."""
     num_frames = 3
-    _write_multiframe_distnnp("translate_roundtrip.distnnp", num_frames=num_frames)
+    _write_multiframe_dynamis("translate_roundtrip.dynamis", num_frames=num_frames)
 
-    translate_distnnp_to_xyz("./translate_roundtrip.distnnp", "./translate_roundtrip.xyz")
+    translate_dynamis_to_xyz("./translate_roundtrip.dynamis", "./translate_roundtrip.xyz")
 
     for step in range(num_frames):
-        distnnp_info, distnnp_cell, distnnp_pbc = TrajectoryReader.read("./translate_roundtrip.distnnp", step)
+        dynamis_info, dynamis_cell, dynamis_pbc = TrajectoryReader.read("./translate_roundtrip.dynamis", step)
         xyz_info, xyz_cell, xyz_pbc = TrajectoryReader.read("./translate_roundtrip.xyz", step)
 
-        assert torch.equal(distnnp_info.atom_types, xyz_info.atom_types)
-        assert torch.allclose(distnnp_info.atom_positions, xyz_info.atom_positions)
-        assert torch.allclose(distnnp_info.atom_velocities, xyz_info.atom_velocities)
-        assert torch.equal(distnnp_cell, xyz_cell)
-        assert torch.equal(distnnp_pbc, xyz_pbc)
+        assert torch.equal(dynamis_info.atom_types, xyz_info.atom_types)
+        assert torch.allclose(dynamis_info.atom_positions, xyz_info.atom_positions)
+        assert torch.allclose(dynamis_info.atom_velocities, xyz_info.atom_velocities)
+        assert torch.equal(dynamis_cell, xyz_cell)
+        assert torch.equal(dynamis_pbc, xyz_pbc)

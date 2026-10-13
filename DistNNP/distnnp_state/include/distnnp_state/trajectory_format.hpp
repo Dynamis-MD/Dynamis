@@ -47,7 +47,7 @@ static const std::vector<FieldSpec> kFieldOrder = {
 };
 
 // Not a C string so only compare the 8 bytes even on a corrupt file
-static constexpr uint8_t kMagicBytes[8] = { 'D', 'I', 'S', 'T', 'N', 'N', 'P', 0 };
+static constexpr uint8_t kMagicBytes[8] = { 'D', 'Y', 'N', 'A', 'M', 'I', 'S', 0 };
 
 // cell (9 x f32) + pbc (3 x u8) + padding (1)
 static constexpr uint32_t kPbcCellBlockSize = 40;
