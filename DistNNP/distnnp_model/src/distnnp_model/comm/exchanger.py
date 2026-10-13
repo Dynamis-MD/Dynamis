@@ -142,6 +142,196 @@ class Exchanger(ABC):
         )
 
 
+class PythonNCCLExchanger(Exchanger):
+    def __init__(self) -> None:
+        super().__init__()
+        self.send_buffer: torch.Tensor | None = None
+        self.grad_recv_buffer: torch.Tensor | None = None
+
+    def setup_exchanger(
+        self,
+        feature_dim: int,
+        partition_info: PartitionMessagePassingInfo,
+        device: torch.device,
+    ) -> None:
+        """Setup the Python NCCL feature exchanger.
+
+        Args:
+            feature_dim (int): The feature dimension of the tensors to exchange.
+            partition_info (PartitionMessagePassingInfo): Partition info containing CSR offsets and send indices.
+            device (torch.device): Device on which exchange tensors reside.
+        """
+        assert dist.is_initialized(), "Distributed process group is not initialized"
+        self.is_ipc_setup = True
+
+    def feature_push_impl(
+        self,
+        features_to_push: torch.Tensor,
+        partition_info: PartitionMessagePassingInfo,
+    ) -> torch.Tensor:
+        """Low-level implementation of the feature push operation using NCCL all_to_all_single.
+
+        Dynamically extracts send/recv CSR offsets and send indices from partition_info
+        so that topology and halo map updates during MD simulations are handled immediately.
+
+        Args:
+            features_to_push (torch.Tensor): Local features tensor [n_local, feature_dim].
+            partition_info (PartitionMessagePassingInfo): Partition information containing send/recv details.
+
+        Returns:
+            torch.Tensor: Combined tensor [n_local + total_recv, feature_dim] containing local and ghost features.
+        """
+        device = features_to_push.device
+        dtype = features_to_push.dtype
+        n_local = features_to_push.shape[0]
+        feature_dim = features_to_push.shape[1]
+        world_size = dist.get_world_size()
+
+        # Extract CSR offsets dynamically from partition_info (for MD where topology changes over time)
+        send_offsets = partition_info.send_offsets.cpu().tolist()
+        recv_offsets = partition_info.recv_offsets.cpu().tolist()
+
+        send_splits = [
+            send_offsets[r + 1] - send_offsets[r] for r in range(world_size)
+        ]
+        recv_splits = [
+            recv_offsets[r + 1] - recv_offsets[r] for r in range(world_size)
+        ]
+
+        total_send = send_offsets[-1]
+        total_recv = recv_offsets[-1]
+
+        # Allocate output buffer: local features + ghost features
+        output = torch.empty(
+            (n_local + total_recv, feature_dim),
+            dtype=dtype,
+            device=device,
+        )
+        output[:n_local].copy_(features_to_push)
+
+        # Gather features to push to peers
+        if total_send > 0:
+            send_local_indices = partition_info.send_local_indices.to(
+                device=device, dtype=torch.int64
+            )
+            if (
+                self.send_buffer is None
+                or self.send_buffer.shape != (total_send, feature_dim)
+                or self.send_buffer.dtype != dtype
+                or self.send_buffer.device != device
+            ):
+                self.send_buffer = torch.empty(
+                    (total_send, feature_dim), dtype=dtype, device=device
+                )
+            torch.index_select(
+                features_to_push,
+                dim=0,
+                index=send_local_indices,
+                out=self.send_buffer,
+            )
+            send_tensor = self.send_buffer
+        else:
+            send_tensor = torch.empty((0, feature_dim), dtype=dtype, device=device)
+
+        # Exchange ghost features using all_to_all_single (alltoallv)
+        dist.all_to_all_single(
+            output=output[n_local:],
+            input=send_tensor,
+            output_split_sizes=recv_splits,
+            input_split_sizes=send_splits,
+        )
+
+        return output
+
+    def feature_push_backward_impl(
+        self,
+        grad_output: torch.Tensor,
+        input_feature_shape: torch.Size,
+        partition_info: PartitionMessagePassingInfo,
+    ) -> torch.Tensor:
+        """Low-level implementation of the backward pass for the feature push operation using reverse all_to_all_single.
+
+        Dynamically extracts send/recv CSR offsets and send indices from partition_info
+        so that topology and halo map updates during MD simulations are handled immediately.
+
+        Args:
+            grad_output (torch.Tensor): Gradients received from neighboring partitions [n_local + total_recv, feature_dim].
+            input_feature_shape (torch.Size): Shape of the input features [n_local, feature_dim].
+            partition_info (PartitionMessagePassingInfo): Partition information containing send/recv details.
+
+        Returns:
+            torch.Tensor: Gradients for the input features [n_local, feature_dim].
+        """
+        device = grad_output.device
+        dtype = grad_output.dtype
+        n_local = input_feature_shape[0]
+        feature_dim = input_feature_shape[1]
+        world_size = dist.get_world_size()
+
+        # Extract CSR offsets dynamically from partition_info
+        send_offsets = partition_info.send_offsets.cpu().tolist()
+        recv_offsets = partition_info.recv_offsets.cpu().tolist()
+
+        send_splits = [
+            send_offsets[r + 1] - send_offsets[r] for r in range(world_size)
+        ]
+        recv_splits = [
+            recv_offsets[r + 1] - recv_offsets[r] for r in range(world_size)
+        ]
+
+        total_send = send_offsets[-1]
+        total_recv = recv_offsets[-1]
+
+        grad_local = grad_output[:n_local]
+        grad_ghost = grad_output[n_local : n_local + total_recv]
+
+        if not grad_ghost.is_contiguous():
+            grad_ghost = grad_ghost.contiguous()
+
+        # Receive buffer for gradients sent by peer ranks
+        if total_send > 0:
+            if (
+                self.grad_recv_buffer is None
+                or self.grad_recv_buffer.shape != (total_send, feature_dim)
+                or self.grad_recv_buffer.dtype != dtype
+                or self.grad_recv_buffer.device != device
+            ):
+                self.grad_recv_buffer = torch.empty(
+                    (total_send, feature_dim), dtype=dtype, device=device
+                )
+            grad_recv = self.grad_recv_buffer
+        else:
+            grad_recv = torch.empty((0, feature_dim), dtype=dtype, device=device)
+
+        # Reverse all_to_all_single: send ghost grads (input_split_sizes=recv_splits)
+        # to receive owner grads (output_split_sizes=send_splits)
+        dist.all_to_all_single(
+            output=grad_recv,
+            input=grad_ghost,
+            output_split_sizes=send_splits,
+            input_split_sizes=recv_splits,
+        )
+
+        grad_input = grad_local.clone()
+        if total_send > 0:
+            send_local_indices = partition_info.send_local_indices.to(
+                device=device, dtype=torch.int64
+            )
+            grad_input.index_add_(0, send_local_indices, grad_recv)
+
+        return grad_input
+
+    def reset_buffers(self):
+        """Reset the internal buffers of the exchanger to prepare for the next communication round."""
+        if self.send_buffer is not None:
+            del self.send_buffer
+            self.send_buffer = None
+        if self.grad_recv_buffer is not None:
+            del self.grad_recv_buffer
+            self.grad_recv_buffer = None
+        self.is_ipc_setup = False
+
+
 class GPUDirectExchanger(Exchanger):
     def __init__(
         self,
@@ -246,7 +436,6 @@ class GPUDirectExchanger(Exchanger):
 
         send_offsets = partition_info.send_offsets
         recv_offsets = partition_info.recv_offsets
-        
 
         # Buffer sizes must come from this rank's own CSR offsets, which
         # build_halo_maps fills locally and correctly. The global_send_recv_matrix
@@ -276,7 +465,9 @@ class GPUDirectExchanger(Exchanger):
         grad_handle = self.exchanger.export_ipc_handle(grad_recv_buffer)
 
         handle_size = len(halo_exchanger_handle)
-        halo_exchanger_handle_tensor = torch.tensor(halo_exchanger_handle, dtype=torch.uint8, device=device)
+        halo_exchanger_handle_tensor = torch.tensor(
+            halo_exchanger_handle, dtype=torch.uint8, device=device
+        )
         grad_handle_tensor = torch.tensor(grad_handle, dtype=torch.uint8, device=device)
 
         all_halo_exchanger_handles_tensor = [
@@ -291,7 +482,9 @@ class GPUDirectExchanger(Exchanger):
         dist.all_gather(all_halo_exchanger_handles_tensor, halo_exchanger_handle_tensor)
         dist.all_gather(all_grad_handles_tensor, grad_handle_tensor)
 
-        all_halo_exchanger_handles = [t.cpu().tolist() for t in all_halo_exchanger_handles_tensor]
+        all_halo_exchanger_handles = [
+            t.cpu().tolist() for t in all_halo_exchanger_handles_tensor
+        ]
         all_grad_handles = [t.cpu().tolist() for t in all_grad_handles_tensor]
 
         # Gather recv_offsets and num_local from all ranks
@@ -338,13 +531,9 @@ class GPUDirectExchanger(Exchanger):
 
         # --- Setup push-sync counter ---
         sync_handle = self.exchanger.create_and_export_sync_handle()
-        sync_handle_tensor = torch.tensor(
-            sync_handle, dtype=torch.uint8, device=device
-        )
+        sync_handle_tensor = torch.tensor(sync_handle, dtype=torch.uint8, device=device)
         all_sync_handles_tensor = [
-            torch.zeros(
-                len(sync_handle), dtype=torch.uint8, device=device
-            )
+            torch.zeros(len(sync_handle), dtype=torch.uint8, device=device)
             for _ in range(world_size)
         ]
         dist.all_gather(all_sync_handles_tensor, sync_handle_tensor)

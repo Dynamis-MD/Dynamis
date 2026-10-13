@@ -16,6 +16,7 @@ from distnnp import Simulator
 from distnnp_state import TorchDistEnv
 from distnnp_integrator import Verlet
 from distnnp_model.nnp import UMAModel
+from distnnp_model.comm.exchanger import GPUDirectExchanger, PythonNCCLExchanger
 
 from md_test_common import (
     ensure_test_structure,
@@ -27,7 +28,19 @@ from md_test_common import (
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", required=True)
+    parser.add_argument(
+        "--exchanger",
+        choices=["gpudirect", "nccl"],
+        default="gpudirect",
+        help="halo-exchange backend: gpudirect (CUDA IPC, single-node) or "
+        "nccl (torch.distributed all_to_all, multi-node capable)",
+    )
     args = parser.parse_args()
+
+    exchanger_cls = {
+        "gpudirect": GPUDirectExchanger,
+        "nccl": PythonNCCLExchanger,
+    }[args.exchanger]
 
     structure = f"{args.path}/system.xyz"
     output_dir = f"{args.path}/dist_out"

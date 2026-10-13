@@ -414,7 +414,7 @@ This matches the `FeaturePushToExchange` API contract: it returns ghost features
 For multi-node NVLink architectures (such as NVIDIA NVL72, GH200, and GB200 clusters), legacy `cudaIpc*` APIs cannot cross OS / node boundaries. DistNNP supports CUDA 12+ Fabric Handles (`CU_MEM_HANDLE_TYPE_FABRIC` via the Virtual Memory Management `cuMem*` APIs) with automatic fallback to legacy IPC on single-node or older systems:
 
 - **Dynamic Detection:** `supports_fabric_handles(device_id)` queries `CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED`. If supported and running CUDA 12+, Fabric VMM allocations are used.
-- **Physical Allocation & Export:** `cuMemCreate` allocates physical GPU memory with `CU_MEM_HANDLE_TYPE_FABRIC`, exported via `cuMemExportToShareableHandle` as a 64-byte `CUDA_MEM_FABRIC_HANDLE`.
+- **Physical Allocation & Export:** `cuMemCreate` allocates physical GPU memory with `CU_MEM_HANDLE_TYPE_FABRIC`, exported via `cuMemExportToShareableHandle` as a 64-byte `CUmemFabricHandle`.
 - **Remote Import & Virtual Address Mapping:** Receiving ranks import the handle via `cuMemImportFromShareableHandle`, reserve virtual address space (`cuMemAddressReserve`), map the allocation (`cuMemMap`), and set permissions (`cuMemSetAccess`).
 - **Push Synchronization:** Both SM push kernels and the Copy Engine DMA paths operate directly on mapped virtual addresses across multi-node NVLink Fabric. Synchronization counters also utilize Fabric handles.
 - **Backward Compatibility:** On systems without Fabric support, the implementation seamlessly falls back to legacy `cudaMalloc`, `cudaIpcGetMemHandle`, and `cudaIpcOpenMemHandle`.
