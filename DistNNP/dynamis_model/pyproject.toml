@@ -1,0 +1,45 @@
+[build-system]
+requires = ["scikit-build-core>=0.5"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "dynamis_model"
+version = "0.0.1"
+description = "NNP models wrapped with Dynamis distributed primitives"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+mace = [
+    "mace-torch==0.3.16"
+]
+mace-cueq = [
+    "mace-torch==0.3.16",
+    "cuequivariance==0.9.1",
+    "cuequivariance-torch==0.9.1",
+    "cuequivariance-ops-cu12==0.9.1",
+    "cuequivariance-ops-torch-cu12==0.9.1"
+]
+uma = [
+    "fairchem-core"
+]
+
+orb = [
+    "orb-models==0.7.0"
+]
+all = [
+    "dynamis_model[uma,orb]"
+]
+
+[tool.scikit-build]
+build-dir = "skbuild"
+
+
+[tool.scikit-build.wheel]
+packages = ["src/dynamis_model"]
+expand-macos-universal-tags = true
+install-dir = "dynamis_model"
+
+[tool.scikit-build.sdist]
+include = ["src/dynamis_model/*.pyi", "src/dynamis_model/py.typed"]
