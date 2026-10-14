@@ -9,7 +9,7 @@ We gratefully acknowledge everyone who has contributed code, architecture, resea
 * Shehtab Zaman
 * Huanyi Qin
 * Obadiah Smolenski 
-* Preston Kostiukov
+* Preston Kostioukov
 * Robin Cramer
 * Hiten Malhotra
 * Jayakaran Saravanan Indira
