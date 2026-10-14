@@ -6,8 +6,10 @@
 ## Motivation
 
 Molecular Dynamics (MD) simulations of million-atom systems are essential for suppressing finite-size artifacts, yet achieving ab initio accuracy at this scale remains intractable. Neural Network Potentials (NNPs) offer Density Functional Theory (DFT) fidelity at lower cost, but scaling them exposes a critical gap: traditional MD engines are not designed for deep-learning workloads, while general distributed deep-learning frameworks fail to support MD's dynamic, sparse communication and strict numerical precision.
+
 Existing simulation ecosystems are ill-equipped for this workload: traditional MD engines are architecturally rigid and not designed for deep learning operations, while general-purpose distributed deep learning frameworks assume dense, static communication schedules and tolerate reduced numerical precision. In contrast, NNP-driven MD relies on Graph Neural Network (GNN) message passing over sparse, time-varying neighbor lists that require continual re-derivation, compounded by the strict precision demands needed to keep dynamical trajectories physically stable.
-To address this, we present Dynamis, a purpose-built distributed MD engine tailored for NNP inference. Our framework introduces custom GPU-accelerated kernels for dynamic graph construction, spatial partitioning, halo exchange, and numerical integration, alongside low-latency, GPU-native communication primitives. By evaluating state-of-the-art architectures (Orb~\cite{orbv1, orbv3}, UMA~\cite{uma}, MACE~\cite{mace}) with pre-trained weights, we demonstrate scalable multi-GPU and multi-node DFT-quality simulations at length scales previously restricted to empirical force fields.
+
+To address this, we present Dynamis, a purpose-built distributed MD engine tailored for NNP inference. Our framework introduces custom GPU-accelerated kernels for dynamic graph construction, spatial partitioning, halo exchange, and numerical integration, alongside low-latency, GPU-native communication primitives. By evaluating state-of-the-art architectures (Orb UMA, MACE) with pre-trained weights, we demonstrate scalable multi-GPU and multi-node DFT-quality simulations at length scales previously restricted to empirical force fields.
 
 
 ## Design Philosophy
