@@ -2,7 +2,7 @@
 test_drift_watchdog.py — the drift watchdog and the flag word it piggybacks on the IPC
 push-sync handshake.
 
-    torchrun --nproc_per_node=2 -m pytest distnnp/tests/test_drift_watchdog.py -v
+    torchrun --nproc_per_node=2 -m pytest dynamis/tests/test_drift_watchdog.py -v
 
 What must hold, on every rank:
   * after a step, global_ == bitwise OR over ranks of the words carried by that step;
@@ -18,8 +18,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from distnnp.simulator import Simulator, SimulatorConfig
-from distnnp.simulatorState import DRIFT_BREACH, DRIFT_TRIP
+from dynamis.simulator import Simulator, SimulatorConfig
+from dynamis.simulatorState import DRIFT_BREACH, DRIFT_TRIP
 from dynamis_integrator.verlet import Verlet
 from distnnp_model.comm import drift_flags
 from distnnp_model.empirical.lj_potential_model import LennardJonesPotentialModel

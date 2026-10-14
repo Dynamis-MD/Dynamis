@@ -11,7 +11,7 @@ from dynamis_state import (
     TorchDistEnv,
 )
 
-from distnnp import SimState
+from dynamis import SimState
 
 import json
 

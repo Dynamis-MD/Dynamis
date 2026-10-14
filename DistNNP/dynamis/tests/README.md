@@ -1,4 +1,4 @@
-# Running the `distnnp` tests
+# Running the `dynamis` tests
 
 These tests exercise the `Simulator` end to end: partitioning, halo exchange,
 force evaluation and integration. They are **distributed tests** and must be
@@ -20,7 +20,7 @@ Reinstall the affected package after any C++/CUDA change:
 pip install -e ./dynamis_state
 pip install -e ./dynamis_integrator
 pip install -e ./distnnp_model
-pip install -e ./distnnp
+pip install -e ./dynamis
 ```
 
 ### 2. Get 2 GPUs
@@ -39,12 +39,12 @@ The regression tests compare against a single-GPU baseline that is **not**
 checked in. Generate it once (and again whenever the physics changes):
 
 ```bash
-torchrun --nproc_per_node=1 distnnp/tests/fixtures/generate_reference.py
+torchrun --nproc_per_node=1 dynamis/tests/fixtures/generate_reference.py
 ```
 
 Note `--nproc_per_node=1` — this is the single-rank reference. It writes
 `lj_reference_euler.pt`, `lj_reference_verlet.pt` and `lj_reference_langevin.pt`
-into `distnnp/tests/fixtures/`. The Langevin file takes considerably longer
+into `dynamis/tests/fixtures/`. The Langevin file takes considerably longer
 than the other two, since it runs several long trajectories to build its
 statistical baseline.
 
@@ -55,17 +55,17 @@ on a real regression.
 
 ```bash
 # everything
-torchrun --nproc_per_node=2 -m pytest distnnp/tests/ -v
+torchrun --nproc_per_node=2 -m pytest dynamis/tests/ -v
 
 # skip the noisy timing tests (recommended day to day)
-torchrun --nproc_per_node=2 -m pytest distnnp/tests/ -v -m "not perf"
+torchrun --nproc_per_node=2 -m pytest dynamis/tests/ -v -m "not perf"
 
 # only the timing tests
-torchrun --nproc_per_node=2 -m pytest distnnp/tests/ -v -m perf
+torchrun --nproc_per_node=2 -m pytest dynamis/tests/ -v -m perf
 
 # a single file, or a single test
-torchrun --nproc_per_node=2 -m pytest distnnp/tests/test_simulation_regression.py -v
-torchrun --nproc_per_node=2 -m pytest distnnp/tests/test_simulation_regression.py -v -k euler
+torchrun --nproc_per_node=2 -m pytest dynamis/tests/test_simulation_regression.py -v
+torchrun --nproc_per_node=2 -m pytest dynamis/tests/test_simulation_regression.py -v -k euler
 ```
 
 To run the other sub-packages' tests as well, drop the path argument —

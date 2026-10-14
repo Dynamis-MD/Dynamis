@@ -1,12 +1,12 @@
 # Synthetic End-to-End Experiment
 
-This experiment runs DistNNP on a randomly generated atom system to verify the full distributed pipeline without requiring a real molecular structure file. It is the primary integration test for the `distnnp` package.
+This experiment runs DistNNP on a randomly generated atom system to verify the full distributed pipeline without requiring a real molecular structure file. It is the primary integration test for the `dynamis` package.
 
 ## What it tests
 
 - Atom partitioning (SFC Morton) and halo map construction via `dynamis_state`
 - Force and energy evaluation via a Lennard-Jones empirical potential (`distnnp_model`)
-- Time integration and simulation loop via `distnnp` `Simulator`
+- Time integration and simulation loop via `dynamis` `Simulator`
 - Correct single-GPU and multi-GPU operation
 
 ## Files
@@ -22,7 +22,7 @@ Install all sub-packages in the `distnnp-env` conda environment (from the repo r
 
 ```bash
 conda activate distnnp-env
-pip install -e ./dynamis_state -e ./dynamis_integrator -e ./distnnp_model -e ./distnnp
+pip install -e ./dynamis_state -e ./dynamis_integrator -e ./distnnp_model -e ./dynamis
 ```
 
 ## Running
@@ -31,7 +31,7 @@ pip install -e ./dynamis_state -e ./dynamis_integrator -e ./distnnp_model -e ./d
 
 ```bash
 conda activate distnnp-env
-cd distnnp/experiments/synthetic
+cd dynamis/experiments/synthetic
 python main.py
 ```
 
@@ -41,7 +41,7 @@ No launcher is required. `setup_system.py` detects the absence of `RANK` / `SLUR
 
 ```bash
 conda activate distnnp-env
-cd distnnp/experiments/synthetic
+cd dynamis/experiments/synthetic
 torchrun --nproc_per_node=<NUM_GPUS> main.py
 ```
 
