@@ -1,5 +1,5 @@
-from distnnp.simulator import Simulator, SimulatorConfig
-from distnnp.simulatorState import SimState
+from dynamis.simulator import Simulator, SimulatorConfig
+from dynamis.simulatorState import SimState
 
 __all__ = [
     "Simulator",

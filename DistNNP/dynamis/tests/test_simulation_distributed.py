@@ -4,7 +4,7 @@ test_simulation_distributed.py — integration tests for the Simulation class.
 These tests verify that Simulation can be constructed and stepped without error
 in a multi-GPU distributed setting.  Run via:
 
-    torchrun --nproc_per_node=2 -m pytest distnnp/tests/ -v
+    torchrun --nproc_per_node=2 -m pytest dynamis/tests/ -v
 """
 
 import torch

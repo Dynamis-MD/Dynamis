@@ -7,4 +7,4 @@ scipy
 -e ./dynamis_state
 -e ./distnnp_model[all]
 -e ./dynamis_integrator
--e ./distnnp
+-e ./dynamis

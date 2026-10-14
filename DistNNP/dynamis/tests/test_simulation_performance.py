@@ -6,7 +6,7 @@ Bounds are mean + 1.5*std over 20 baseline runs on 2x A100 GPUs (see comments be
 Re-baseline if hardware or system size changes.
 
 Run via:
-    torchrun --nproc_per_node=2 -m pytest distnnp/tests/test_simulation_performance.py -v -m perf
+    torchrun --nproc_per_node=2 -m pytest dynamis/tests/test_simulation_performance.py -v -m perf
 """
 
 import torch

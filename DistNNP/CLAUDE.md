@@ -22,7 +22,7 @@ This installs PyTorch, pytest, and all sub-packages in editable mode. Each sub-p
 pip install -e ./dynamis_state
 pip install -e ./dynamis_integrator
 pip install -e ./distnnp_model
-pip install -e ./distnnp
+pip install -e ./dynamis
 ```
 
 ### CUDA location
@@ -46,7 +46,7 @@ DistNNP/                        # working directory (this repo)
 ├── dynamis_state/              # C++/CUDA: atom state, partitioning, halo maps
 ├── dynamis_integrator/         # C++/CUDA: MD time integration kernels
 ├── distnnp_model/              # Python: distributed NNP model interface
-├── distnnp/                    # Python: main user-facing entry point (stub)
+├── dynamis/                     # Python: main user-facing entry point (stub)
 ├── requirements-dev.txt        # installs all sub-packages in editable mode
 ../baseline/                    # reference production implementation (read-only)
 ../refs/                        # git submodules: fairchem, nvalchemi, DGraph, batmobile
@@ -93,7 +93,7 @@ __call__(distributed_state: DistNNPState) -> Tuple[energy, forces]
 
 Design: each GPU (1) fetches halo atoms from neighbours according to `DistNNPState`, (2) evaluates the NNP locally to get a scalar energy, (3) calls `energy.backward()` to obtain forces via autograd (`F = -dE/dx`). For GNN-based NNPs, halo atoms must be re-fetched once per message-passing layer since updated embeddings on one partition are inputs to the next layer on a neighbouring partition.
 
-### `distnnp` (stub)
+### `dynamis` (stub)
 Empty entry point. Will orchestrate the other sub-packages.
 
 ## Build System

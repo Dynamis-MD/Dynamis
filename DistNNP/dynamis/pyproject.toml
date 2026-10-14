@@ -3,7 +3,7 @@ requires = ["scikit-build-core>=0.5"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "distnnp"
+name = "dynamis"
 version = "0.0.1"
 description = "A Python package for distributed neural network potentials (NNPs) in molecular dynamics simulations, providing tools for model management, state handling, and integration with MD engines."
 readme = "README.md"
@@ -18,9 +18,9 @@ build-dir = "skbuild"
 
 
 [tool.scikit-build.wheel]
-packages = ["src/distnnp"]
+packages = ["src/dynamis"]
 expand-macos-universal-tags = true
-install-dir = "distnnp"
+install-dir = "dynamis"
 
 [tool.scikit-build.sdist]
-include = ["src/distnnp/*.pyi", "src/distnnp/py.typed"]
+include = ["src/dynamis/*.pyi", "src/dynamis/py.typed"]

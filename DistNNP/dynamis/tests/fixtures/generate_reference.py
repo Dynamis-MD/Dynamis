@@ -5,9 +5,9 @@ Reference system: 16-atom LJ argon in an 8x8x8 box, fixed seed=100.
 Uses the same setup as conftest.py simulation_factory (dt=1e-3).
 
 Run via:
-    torchrun --nproc_per_node=1 distnnp/tests/fixtures/generate_reference.py
+    torchrun --nproc_per_node=1 dynamis/tests/fixtures/generate_reference.py
 
-Output: distnnp/tests/fixtures/lj_reference_{integrator_name}.pt
+Output: dynamis/tests/fixtures/lj_reference_{integrator_name}.pt
 
 For deterministic integrators (euler, verlet) each snapshot is:
     {"positions": Tensor(n_atoms, 3),
@@ -31,7 +31,7 @@ import torch.distributed as dist
 from pathlib import Path
 
 from distnnp_model.empirical.lj_potential_model import LennardJonesPotentialModel
-from distnnp.simulator import Simulator, SimulatorConfig
+from dynamis.simulator import Simulator, SimulatorConfig
 from dynamis_integrator.euler import Euler
 from dynamis_integrator.verlet import Verlet
 from dynamis_integrator.langevin import Langevin
