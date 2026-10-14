@@ -10,9 +10,7 @@ All commands below are run from the repository root.
 
 ### 1. Install the sub-packages
 
-```bash
-pip install -r requirements-dev.txt
-```
+See the Installation section of the root `README.md`.
 
 Reinstall the affected package after any C++/CUDA change:
 
