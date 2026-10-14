@@ -1,5 +1,7 @@
 # Dynamis
 
+[![DOI](https://zenodo.org/badge/1101657801.svg)](https://doi.org/10.5281/zenodo.23377445)
+
 `Dynamis` is a distributed neural network potential framework designed to efficiently compute forces and energies for large-scale molecular simulations. It is built on top of PyTorch and provides a modular architecture for defining state representations, force computations, and integration algorithms on multi-GPU systems. The framework uses custom CUDA kernels to optimize performance and scalability, making it suitable for simulating complex systems with millions of atoms.
 
 
@@ -77,6 +79,22 @@ Run the tests with `pytest`.
 ## Samples
 The `samples` directory contains example scripts that demonstrate how to use the DistNNP framework for a large-scale molecular simulation.
 
+## Citation
+
+Please cite the software release:
+
+```bibtex
+@software{dynamis,
+  author    = {Chiu, Kenneth and Zaman, Shehtab and Qin, Huanyi and
+               Smolenski, Obadiah and Kostiukov, Preston and Cramer, Robin and
+               Malhotra, Hiten and Saravanan Indira, Jayakaran},
+  title     = {Dynamis},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.23377445},
+  url       = {https://doi.org/10.5281/zenodo.23377445}
+}
+```
 
 ## Copyright
 
