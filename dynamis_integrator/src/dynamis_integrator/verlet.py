@@ -6,13 +6,13 @@ from dynamis_integrator._data_check import (
     check_mass_shape,
     check_shapes_match,
 )
-from dynamis_integrator.integrator import DistNNPIntegrator
-from dynamis_state import DistNNPState
+from dynamis_integrator.integrator import DynamisIntegrator
+from dynamis_state import DynamisState
 from dynamis_model import DynamisModel
 from dynamis_integrator.masses import TORCH_MASSES
 
 
-class Verlet(DistNNPIntegrator):
+class Verlet(DynamisIntegrator):
     def __init__(self, dt: float) -> None:
         super().__init__()
         self.dt = dt
@@ -71,12 +71,12 @@ class Verlet(DistNNPIntegrator):
 
         self.cpp_integrator.halfstep2(vel, frc, mass, dt)
 
-    def step(self, dist_state: DistNNPState, model: DynamisModel, dt=None):
+    def step(self, dist_state: DynamisState, model: DynamisModel, dt=None):
         """
         Update positions and velocities based on the Velocity Verlet integration method.
 
         Args:
-            dist_state (DistNNPState): The current state of the system, containing positions, velocities, forces, and masses.
+            dist_state (DynamisState): The current state of the system, containing positions, velocities, forces, and masses.
             model (DynamisModel): The potential model used to compute forces based on the current state.
             dt (float, optional): Optional override for the time step size.
         """

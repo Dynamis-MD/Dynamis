@@ -21,8 +21,8 @@ from typing import List, Dict
 import torch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_DISTNNP = os.path.abspath(os.path.join(_HERE, os.pardir))
-_ROOT = os.path.abspath(os.path.join(_DISTNNP, os.pardir))
+_DYNAMIS = os.path.abspath(os.path.join(_HERE, os.pardir))
+_ROOT = os.path.abspath(os.path.join(_DYNAMIS, os.pardir))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 

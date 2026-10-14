@@ -673,7 +673,7 @@ def test_writer_accepts_pathlike():
 # Mirrors the multi-process pattern used by test_ipc_exchanger.py's
 # TestIPCExchanger, except here "distributed" only means separate OS processes
 # each writing their own local slice of atoms to a shared .dynamis file --
-# exactly how distnnp/simulator.py drives one TrajectoryWriter per rank. No
+# exactly how dynamis/simulator.py drives one TrajectoryWriter per rank. No
 # extra locking is needed beyond a single barrier: rank 0's O_TRUNC happens in
 # the constructor, and every rank's submit() writes into a disjoint byte range
 # of the same file, so as long as the truncate has already happened no two

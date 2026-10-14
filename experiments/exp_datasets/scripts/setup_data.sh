@@ -18,7 +18,7 @@
 #                                         dependent output — not recommended)
 #
 # The hosted archive needs a source; configure it before running Tier 3:
-#   export DISTNNP_ARCHIVE_URL=<url>     or     export DISTNNP_ARCHIVE_LOCAL=<path>
+#   export DYNAMIS_ARCHIVE_URL=<url>     or     export DYNAMIS_ARCHIVE_LOCAL=<path>
 # (see download_datasets.sh).
 
 set -euo pipefail
@@ -36,7 +36,7 @@ case "${1:-}" in
 esac
 
 echo "======================================================"
-echo "  DistNNP experiment data setup  (mode: $MODE)"
+echo "  Dynamis experiment data setup  (mode: $MODE)"
 echo "======================================================"
 
 if [[ "$MODE" == "scratch" ]]; then

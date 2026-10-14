@@ -15,38 +15,38 @@
 #   bash download_datasets.sh --archive-only
 #
 # Archive source resolution (first hit that verifies wins):
-#   1. DISTNNP_ARCHIVE_LOCAL      — explicit local copy (never downloaded/deleted)
-#   2. shared-dir cache           — DISTNNP_ARCHIVE_SHARED_DIR/<archive> (see below)
+#   1. DYNAMIS_ARCHIVE_LOCAL      — explicit local copy (never downloaded/deleted)
+#   2. shared-dir cache           — DYNAMIS_ARCHIVE_SHARED_DIR/<archive> (see below)
 #   3. gh release download        — authenticated (needed for a PRIVATE repo)
-#   4. wget from DISTNNP_ARCHIVE_URL / GitHub Release URL (public only)
+#   4. wget from DYNAMIS_ARCHIVE_URL / GitHub Release URL (public only)
 # On a shared cluster (e.g. Delta) the archive lives in a group-readable dir so
 # the ~23 MB download happens ONCE for the whole team; only a miss or a stale
 # copy falls through to the network. A fresh download is cached back there.
 #
 # The archive is distributed as a GitHub Release asset (NOT committed to git —
 # it stays out of the repo's history). Create it once with:
-#   gh release create datasets-v1 distnnp_exp_datasets_v1.tar.xz \
-#       --title "DistNNP experiment datasets v1" --notes "protein/membrane/capsid XYZ"
+#   gh release create datasets-v1 dynamis_exp_datasets_v1.tar.xz \
+#       --title "Dynamis experiment datasets v1" --notes "protein/membrane/capsid XYZ"
 # Override the source via any of:
-#   export DISTNNP_ARCHIVE_REPO="owner/repo"      # default: szaman19/DistNNP
-#   export DISTNNP_ARCHIVE_TAG="datasets-v1"      # release tag
-#   export DISTNNP_ARCHIVE_URL="https://.../distnnp_exp_datasets_v1.tar.xz"  # full URL
-#   export DISTNNP_ARCHIVE_LOCAL="/path/to/distnnp_exp_datasets_v1.tar.xz"   # local copy
-#   export DISTNNP_ARCHIVE_SHARED_DIR="/projects/bcpt/public/distnnp_datasets" # shared cache (default)
+#   export DYNAMIS_ARCHIVE_REPO="owner/repo"      # default: Dynamis-MD/Dynamis
+#   export DYNAMIS_ARCHIVE_TAG="datasets-v1"      # release tag
+#   export DYNAMIS_ARCHIVE_URL="https://.../dynamis_exp_datasets_v1.tar.xz"  # full URL
+#   export DYNAMIS_ARCHIVE_LOCAL="/path/to/dynamis_exp_datasets_v1.tar.xz"   # local copy
+#   export DYNAMIS_ARCHIVE_SHARED_DIR="/projects/bcpt/public/dynamis_datasets" # shared cache (default)
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATASETS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"        # experiments/exp_datasets/
 CHECKSUMS="$SCRIPT_DIR/checksums.txt"
 
-ARCHIVE_NAME="distnnp_exp_datasets_v1.tar.xz"
+ARCHIVE_NAME="dynamis_exp_datasets_v1.tar.xz"
 # Default source: a GitHub Release asset (see header for how to create it).
-ARCHIVE_REPO="${DISTNNP_ARCHIVE_REPO:-szaman19/DistNNP}"
-ARCHIVE_TAG="${DISTNNP_ARCHIVE_TAG:-datasets-v1}"
-ARCHIVE_URL="${DISTNNP_ARCHIVE_URL:-https://github.com/${ARCHIVE_REPO}/releases/download/${ARCHIVE_TAG}/${ARCHIVE_NAME}}"
-ARCHIVE_LOCAL="${DISTNNP_ARCHIVE_LOCAL:-}"
+ARCHIVE_REPO="${DYNAMIS_ARCHIVE_REPO:-Dynamis-MD/Dynamis}"
+ARCHIVE_TAG="${DYNAMIS_ARCHIVE_TAG:-datasets-v1}"
+ARCHIVE_URL="${DYNAMIS_ARCHIVE_URL:-https://github.com/${ARCHIVE_REPO}/releases/download/${ARCHIVE_TAG}/${ARCHIVE_NAME}}"
+ARCHIVE_LOCAL="${DYNAMIS_ARCHIVE_LOCAL:-}"
 # Shared group-readable cache (checked before any download; "" disables).
-ARCHIVE_SHARED_DIR="${DISTNNP_ARCHIVE_SHARED_DIR:-/projects/bcpt/public/distnnp_datasets}"
+ARCHIVE_SHARED_DIR="${DYNAMIS_ARCHIVE_SHARED_DIR:-/projects/bcpt/public/dynamis_datasets}"
 
 DO_PDB=1
 DO_ARCHIVE=1
@@ -114,13 +114,13 @@ if [[ "$DO_ARCHIVE" == "1" ]]; then
         # Download to a TEMP file, never to "$DATASETS_DIR/$ARCHIVE_NAME": a
         # locally-built archive may already live there, and cleanup on failure
         # (rm -f "$src") would destroy it.
-        src="$(mktemp "${TMPDIR:-/tmp}/distnnp_archive.XXXXXX")"; cleanup=1
+        src="$(mktemp "${TMPDIR:-/tmp}/dynamis_archive.XXXXXX")"; cleanup=1
         got=0
         # Preferred: authenticated download via gh. Required for a PRIVATE repo —
         # release assets inherit repo visibility, so an unauthenticated wget of a
         # private asset 404s. Skipped when the user pinned an explicit public URL
-        # via DISTNNP_ARCHIVE_URL.
-        if [[ -z "${DISTNNP_ARCHIVE_URL:-}" ]] && command -v gh >/dev/null 2>&1; then
+        # via DYNAMIS_ARCHIVE_URL.
+        if [[ -z "${DYNAMIS_ARCHIVE_URL:-}" ]] && command -v gh >/dev/null 2>&1; then
             echo "  Downloading via gh: ${ARCHIVE_REPO} ${ARCHIVE_TAG}/${ARCHIVE_NAME} ..."
             if gh release download "$ARCHIVE_TAG" -R "$ARCHIVE_REPO" \
                    -p "$ARCHIVE_NAME" -O "$src" --clobber 2>/dev/null; then
@@ -130,7 +130,7 @@ if [[ "$DO_ARCHIVE" == "1" ]]; then
             fi
         fi
         # Fallback: unauthenticated direct URL. Works only if the asset is PUBLIC,
-        # or DISTNNP_ARCHIVE_URL points at a public host. The interface is kept for
+        # or DYNAMIS_ARCHIVE_URL points at a public host. The interface is kept for
         # when the archive is eventually published publicly — nothing is uploaded here.
         if [[ "$got" == "0" ]]; then
             echo "  Downloading $ARCHIVE_URL ..."
@@ -145,7 +145,7 @@ if [[ "$DO_ARCHIVE" == "1" ]]; then
             echo "  download. Do one of:"
             echo "    - gh auth login   (with read access to ${ARCHIVE_REPO}), then re-run"
             echo "    - publish it:  gh release create ${ARCHIVE_TAG} ${ARCHIVE_NAME} -R ${ARCHIVE_REPO} --title '...' --notes '...'"
-            echo "    - override:    DISTNNP_ARCHIVE_LOCAL=<path>  or  DISTNNP_ARCHIVE_URL=<public-url>"
+            echo "    - override:    DYNAMIS_ARCHIVE_LOCAL=<path>  or  DYNAMIS_ARCHIVE_URL=<public-url>"
             echo "    - shared cache: put ${ARCHIVE_NAME} in ${ARCHIVE_SHARED_DIR:-<disabled>}"
             exit 1
         fi

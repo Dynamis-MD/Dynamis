@@ -4,7 +4,7 @@ project(
     dynamis_model
     VERSION 0.1.0
     DESCRIPTION "A distributed torch-based neural network potentials library"
-    HOMEPAGE_URL "https://github.com/szaman19/Dynamis"
+    HOMEPAGE_URL "https://github.com/Dynamis-MD/Dynamis"
     LANGUAGES CXX CUDA
 )
 

@@ -10,7 +10,7 @@
 #include <type_traits>
 #include <cuda_runtime_api.h>
 
-#ifdef DISTNNP_TIMING
+#ifdef DYNAMIS_TIMING
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -60,7 +60,7 @@ struct ParentSpan {
     uint64_t id{ 0 };
 };
 
-#ifdef DISTNNP_TIMING
+#ifdef DYNAMIS_TIMING
 
 // Singleton owning all timing state for one rank; initialized once from
 // Simulator.__init__, and every Timer writes into it.
@@ -289,7 +289,7 @@ private:
     cudaStream_t stream{ nullptr };
 };
 
-#else // !DISTNNP_TIMING
+#else // !DYNAMIS_TIMING
 
 // No-op twins of the classes above: header-only, nothing to link against.
 // `Timer t; t.start(...); t.stop();` compiles to nothing, so call sites stay
@@ -338,10 +338,10 @@ public:
 
 // Checks the "costs nothing" claim above rather than trusting it: empty means
 // constructing touches no storage, trivially destructible means no code on scope exit.
-static_assert(std::is_empty_v<Timer>, "Timer must have no members when DISTNNP_TIMING is off");
+static_assert(std::is_empty_v<Timer>, "Timer must have no members when DYNAMIS_TIMING is off");
 static_assert(std::is_trivially_destructible_v<Timer>,
-              "Timer must be trivially destructible when DISTNNP_TIMING is off");
+              "Timer must be trivially destructible when DYNAMIS_TIMING is off");
 
-#endif // DISTNNP_TIMING
+#endif // DYNAMIS_TIMING
 
 } // namespace dynamis_state

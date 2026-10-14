@@ -23,7 +23,7 @@ from dynamis_integrator import (
     Euler,
     Verlet,
     Langevin,
-    DistNNPIntegrator,
+    DynamisIntegrator,
     AVALIABLE_INTEGRATORS,
 )
 from typing import List, Union, Literal, Optional
@@ -141,7 +141,7 @@ class Simulator:
     ):
         self.model = model
         check_integrator(integrator)
-        self.integrator: DistNNPIntegrator = integrator
+        self.integrator: DynamisIntegrator = integrator
         self.config = config
         self.dist_environment = dist_environment
         self.device = device

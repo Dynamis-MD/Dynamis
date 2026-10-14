@@ -30,10 +30,10 @@ export TORCH_CUDA_ARCH_LIST="8.0"
 # Rendezvous master: first node in the allocation
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 
-cd /projects/bcpt/hqin1/git/DistNNP
+cd /projects/bcpt/hqin1/git/Dynamis
 
 echo "============================================================"
-echo "  DistNNP distributed benchmark — W=$BENCH_W"
+echo "  Dynamis distributed benchmark — W=$BENCH_W"
 echo "  Job:    $SLURM_JOB_ID"
 echo "  Nodes:  $SLURM_JOB_NODELIST"
 echo "  Master: $MASTER_ADDR:$MASTER_PORT"

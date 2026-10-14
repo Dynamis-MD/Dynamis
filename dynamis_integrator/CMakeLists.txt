@@ -4,11 +4,11 @@ project(
     dynamis_integrator
     VERSION 0.1.0
     DESCRIPTION "A distributed state management library for neural network potentials"
-    HOMEPAGE_URL "https://github.com/szaman19/DistNNP"
+    HOMEPAGE_URL "https://github.com/Dynamis-MD/Dynamis"
     LANGUAGES CXX CUDA
 )
 
-# No DISTNNP_TIMING option here: it's inherited from dynamis_state's build via
+# No DYNAMIS_TIMING option here: it's inherited from dynamis_state's build via
 # timing_config.hpp, so this project can't silently disagree with it.
 
 # Use the modern CUDAToolkit finder first to resolve the correct include path.
@@ -64,9 +64,9 @@ endif()
 message(STATUS "dynamis_state include dir: ${DYNAMIS_STATE_INCLUDE_DIR}")
 
 # Read the build's decision rather than re-deciding it; `#cmakedefine` expands
-# to `#define DISTNNP_TIMING` when on, a comment when off.
-file(READ "${DYNAMIS_STATE_INCLUDE_DIR}/dynamis_state/timing_config.hpp" _distnnp_timing_config)
-if(_distnnp_timing_config MATCHES "(^|\n)[ \t]*#define[ \t]+DISTNNP_TIMING")
+# to `#define DYNAMIS_TIMING` when on, a comment when off.
+file(READ "${DYNAMIS_STATE_INCLUDE_DIR}/dynamis_state/timing_config.hpp" _dynamis_timing_config)
+if(_dynamis_timing_config MATCHES "(^|\n)[ \t]*#define[ \t]+DYNAMIS_TIMING")
     set(DYNAMIS_STATE_TIMING_ENABLED TRUE)
 else()
     set(DYNAMIS_STATE_TIMING_ENABLED FALSE)

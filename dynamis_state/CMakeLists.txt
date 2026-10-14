@@ -4,14 +4,14 @@ project(
     dynamis_state
     VERSION 0.1.0
     DESCRIPTION "A distributed state management library for neural network potentials"
-    HOMEPAGE_URL "https://github.com/szaman19/DistNNP"
+    HOMEPAGE_URL "https://github.com/Dynamis-MD/Dynamis"
     LANGUAGES CXX CUDA
 )
 
-option(DISTNNP_TIMING "Compile in timing instrumentation" ON)
+option(DYNAMIS_TIMING "Compile in timing instrumentation" ON)
 
 # Single source of truth for the on/off decision, installed for downstream
-# packages to inherit. Do NOT add_compile_definitions(DISTNNP_TIMING) here —
+# packages to inherit. Do NOT add_compile_definitions(DYNAMIS_TIMING) here —
 # that would only reach this project.
 set(DYNAMIS_STATE_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 configure_file(
@@ -68,7 +68,7 @@ find_library(TORCH_PYTHON_LIBRARY torch_python REQUIRED)
 # TimingRegistry is a singleton, so every module needs to share ONE copy of it —
 # hence a real shared library with a SONAME, not the CPython extension (which
 # carries none). Built only when timing is on; off, there's nothing to link.
-if(DISTNNP_TIMING)
+if(DYNAMIS_TIMING)
     add_library(dynamis_state_timing SHARED src/csrc/timing.cpp)
 
     target_include_directories(dynamis_state_timing
@@ -138,10 +138,10 @@ check_cxx_source_compiles("
     (void)&ncclCommWindowRegister; (void)&ncclMemAlloc;
     (void)d.opCnt;
     return 0;
-  }" DISTNNP_HAVE_NCCL_RMA)
+  }" DYNAMIS_HAVE_NCCL_RMA)
 
-if(DISTNNP_HAVE_NCCL_RMA)
-  target_compile_definitions(dynamis_state_impl PRIVATE DISTNNP_HAVE_NCCL_RMA=1)
+if(DYNAMIS_HAVE_NCCL_RMA)
+  target_compile_definitions(dynamis_state_impl PRIVATE DYNAMIS_HAVE_NCCL_RMA=1)
 else()
   message(STATUS "NCCL RMA (PutSignal/WaitSignal) unavailable — "
                  "RMATransport will raise at construction.")
@@ -171,7 +171,7 @@ target_link_libraries(dynamis_state_impl
 )
 
 # Resolved by SONAME so this extension and dynamis_integrator share one TimingRegistry.
-if(DISTNNP_TIMING)
+if(DYNAMIS_TIMING)
     target_link_libraries(dynamis_state_impl PRIVATE dynamis_state_timing)
 endif()
 

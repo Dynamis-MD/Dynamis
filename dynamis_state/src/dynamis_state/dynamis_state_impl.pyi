@@ -4,7 +4,7 @@ import typing
 
 __all__: list[str] = [
     "DistEnvironment",
-    "DistNNPState",
+    "DynamisState",
     "KDTreePartitioner",
     "MolecularInfo",
     "PartitionMessagePassingInfo",
@@ -28,7 +28,7 @@ class DistEnvironment:
     world_size: int
     def __init__(self) -> None: ...
 
-class DistNNPState:
+class DynamisState:
     dist_env: DistEnvironment
     global_molecular_info: MolecularInfo
     local_molecular_info: MolecularInfo

@@ -2,24 +2,24 @@
 #include <torch/torch.h>
 
 namespace dynamis_integrator {
-class AbstractDistNNPIntegrator
+class AbstractDynamisIntegrator
 {
 public:
-    virtual ~AbstractDistNNPIntegrator() = default;
+    virtual ~AbstractDynamisIntegrator() = default;
     // Pure virtual method to perform a single integration step
     virtual void step(torch::Tensor &positions, torch::Tensor &velocities,
                       const torch::Tensor &forces, const torch::Tensor &massees,
                       const float dt) = 0;
 };
 
-class EulerIntegrator : public AbstractDistNNPIntegrator
+class EulerIntegrator : public AbstractDynamisIntegrator
 {
 public:
     void step(torch::Tensor &positions, torch::Tensor &velocities, const torch::Tensor &forces,
               const torch::Tensor &massees, const float dt) override;
 };
 
-class VerletIntegrator : public AbstractDistNNPIntegrator
+class VerletIntegrator : public AbstractDynamisIntegrator
 {
 public:
     // Retain step for interface compliance, but we'll primarily use step1 and step2
@@ -35,7 +35,7 @@ public:
                    const torch::Tensor &masses, const float dt);
 };
 
-class LangevinIntegrator : public AbstractDistNNPIntegrator
+class LangevinIntegrator : public AbstractDynamisIntegrator
 {
 public:
     void step(torch::Tensor &positions, torch::Tensor &velocities, const torch::Tensor &forces,

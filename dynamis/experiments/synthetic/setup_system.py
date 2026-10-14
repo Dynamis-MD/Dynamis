@@ -7,7 +7,7 @@ from dynamis_state import (
     SimulationConfig,
     SFCPartitioner,
     SFCCurveType,
-    DistNNPState,
+    DynamisState,
     TorchDistEnv,
 )
 
@@ -56,13 +56,13 @@ def generate_synthetic_dataset(
 
 def create_dist_sim_state(num_atoms: int) -> SimState:
     """
-    This helper function creates a starting DistNNPState to use with the Simulator.
+    This helper function creates a starting DynamisState to use with the Simulator.
     Given the number of atoms, it:
 
     (0) Initializes a distributed system with Torch and make a DistEnvironment
     (1) Creates a synthetic system on all ranks to create a MolecularInfo
     (2) Uses a partitioner to generate a partitioning and make a PartitionMessagePassingInfo
-    (3) Use the aforementioned DistEnvironment, MolecularInfo, and PartitionMessagePassingInfo to create a DistNNPState
+    (3) Use the aforementioned DistEnvironment, MolecularInfo, and PartitionMessagePassingInfo to create a DynamisState
 
     Args:
         num_atoms (int): number of atoms in the system

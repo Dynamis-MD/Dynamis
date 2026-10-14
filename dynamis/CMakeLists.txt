@@ -4,7 +4,7 @@ project(
     dynamis
     VERSION 0.0.1
     DESCRIPTION "Distributed neural network potentials for molecular dynamics simulations"
-    HOMEPAGE_URL "https://github.com/szaman19/DistNNP"
+    HOMEPAGE_URL "https://github.com/Dynamis-MD/Dynamis"
     LANGUAGES NONE
 )
 

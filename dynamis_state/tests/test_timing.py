@@ -23,7 +23,7 @@ from dynamis_state import (
 
 pytestmark = pytest.mark.skipif(
     not TIMING_ENABLED,
-    reason="dynamis_state built with -DDISTNNP_TIMING=OFF",
+    reason="dynamis_state built with -DDYNAMIS_TIMING=OFF",
 )
 
 requires_cuda = pytest.mark.skipif(
