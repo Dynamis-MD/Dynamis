@@ -13,8 +13,13 @@ import gc
 
 # Load reference implementation directly (avoid baseline __init__.py)
 _ref_path = os.path.join(
-    os.path.dirname(__file__), "..", "..", "baseline",
-    "local_fairchem", "graph", "radius_graph_pbc.py"
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "baseline",
+    "local_fairchem",
+    "graph",
+    "radius_graph_pbc.py",
 )
 _spec = importlib.util.spec_from_file_location("_ref", _ref_path)
 _mod = importlib.util.module_from_spec(_spec)
@@ -84,8 +89,13 @@ def verify_correctness(ref_ei, ref_co, cuda_ei, cuda_co):
         tgt = ei[1].cpu()
         cs = co.cpu().to(torch.int)
         # Pack into single int64 for fast set comparison
-        keys = (src.long() << 40) | (tgt.long() << 26) | \
-               ((cs[:, 0].long() + 4) << 6) | ((cs[:, 1].long() + 4) << 3) | (cs[:, 2].long() + 4)
+        keys = (
+            (src.long() << 40)
+            | (tgt.long() << 26)
+            | ((cs[:, 0].long() + 4) << 6)
+            | ((cs[:, 1].long() + 4) << 3)
+            | (cs[:, 2].long() + 4)
+        )
         return set(keys.tolist())
 
     ref_set = edge_set(ref_ei, ref_co)
@@ -203,7 +213,11 @@ def bench_file(filepath, n_warmup=3, n_iter=10):
         else:
             return f"{t:.1f}ms"
 
-    edges_str = str(ref_edges) if ref_edges >= 0 else str(cuda_edges) if cuda_edges >= 0 else "?"
+    edges_str = (
+        str(ref_edges)
+        if ref_edges >= 0
+        else str(cuda_edges) if cuda_edges >= 0 else "?"
+    )
 
     print(
         f"{fname:30s}  N={n_atoms:>8d}  edges={edges_str:>10s}  "
@@ -238,7 +252,20 @@ if __name__ == "__main__":
     )
     print("=" * 145)
 
-    sizes = ["1k", "2k", "4k", "8k", "16k", "32k", "64k", "100k", "128k", "256k", "512k", "1024k"]
+    sizes = [
+        "1k",
+        "2k",
+        "4k",
+        "8k",
+        "16k",
+        "32k",
+        "64k",
+        "100k",
+        "128k",
+        "256k",
+        "512k",
+        "1024k",
+    ]
     for sz in sizes:
         fpath = os.path.join(DATA_DIR, f"ch4_{sz}_splited.xyz")
         if os.path.exists(fpath):

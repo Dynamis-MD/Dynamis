@@ -29,6 +29,7 @@ from dynamis_state import (
 # torchrun) or skips the entire session.
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="session", autouse=True)
 def dist_init():
     """Initialize NCCL process group from torchrun environment variables."""
@@ -48,11 +49,15 @@ def dist_init():
     dist.barrier()
     dist.destroy_process_group()
 
+
 # ---------------------------------------------------------------------------
 # Utility Functions
 # ---------------------------------------------------------------------------
 
-def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> MolecularInfo:
+
+def _make_global_state(
+    num_atoms: int, seed: int, device: torch.device
+) -> MolecularInfo:
     """
     Create a MolecularInfo with random positions in an 8x8x8 box.
     We make this with a fixed seed but set that fixed seed as a parameter.
@@ -60,7 +65,7 @@ def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> Molec
     torch.manual_seed(seed)
     state = MolecularInfo()
     state.num_atoms = num_atoms
-    
+
     # Generate on CPU to ensure all ranks start with the SAME universe
     state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long)
     state.atom_positions = torch.rand(num_atoms, 3) * 8.0
@@ -76,6 +81,7 @@ def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> Molec
     state.atom_types = state.atom_types.to(device)
     return state
 
+
 def _make_env(rank: int, world_size: int, local_rank: int) -> DistEnvironment:
     gpus_per_node = int(os.environ.get("LOCAL_WORLD_SIZE", world_size))
     env = DistEnvironment()
@@ -85,6 +91,7 @@ def _make_env(rank: int, world_size: int, local_rank: int) -> DistEnvironment:
     env.num_nodes = world_size // gpus_per_node
     env.local_rank = local_rank
     return env
+
 
 # ---------------------------------------------------------------------------
 # simulation_factory fixture
@@ -149,5 +156,5 @@ def simulation_factory(request):
     # Teardown everything in created
     for exchanger in created:
         exchanger.teardown()
-        
+
     created.clear()

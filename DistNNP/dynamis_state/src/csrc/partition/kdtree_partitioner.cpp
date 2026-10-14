@@ -11,8 +11,7 @@
 #include "dynamis_state/radius_graph.hpp"
 #include "dynamis_state/timing.hpp"
 
-namespace dynamis_state
-{
+namespace dynamis_state {
 
 static constexpr int64_t PARTITION_MAX_NUM_NEIGHBORS = 1000;
 
@@ -20,20 +19,18 @@ static constexpr int64_t PARTITION_MAX_NUM_NEIGHBORS = 1000;
 // Recursive bisection: split atoms along the longest-extent axis.
 // Weighted mode splits so each half has ~equal cumulative edge cost.
 // ---------------------------------------------------------------------------
-static void kdtree_bisect(
-    torch::Tensor idx,                 // [M] global atom indices for this subset
-    torch::Tensor &labels,             // [N] output partition labels (mutated in-place)
-    const torch::Tensor &coords,       // [N, 3] all atom positions
-    const torch::Tensor &weights,      // [N] edge counts (may be undefined)
-    int64_t parts,
-    int64_t base_label)
+static void kdtree_bisect(torch::Tensor idx, // [M] global atom indices for this subset
+                          torch::Tensor &labels, // [N] output partition labels (mutated in-place)
+                          const torch::Tensor &coords, // [N, 3] all atom positions
+                          const torch::Tensor &weights, // [N] edge counts (may be undefined)
+                          int64_t parts, int64_t base_label)
 {
     if (parts <= 1 || idx.numel() == 0) {
-        labels.index_put_({idx}, base_label);
+        labels.index_put_({ idx }, base_label);
         return;
     }
 
-    auto sub_coords = coords.index_select(0, idx);  // [M, 3]
+    auto sub_coords = coords.index_select(0, idx); // [M, 3]
 
     // Find longest axis
     auto extent = std::get<0>(sub_coords.max(0)) - std::get<0>(sub_coords.min(0));
@@ -60,16 +57,16 @@ static void kdtree_bisect(
     }
 
     kdtree_bisect(sorted_idx.slice(0, 0, mid), labels, coords, weights, left_parts, base_label);
-    kdtree_bisect(sorted_idx.slice(0, mid, M), labels, coords, weights, right_parts, base_label + left_parts);
+    kdtree_bisect(sorted_idx.slice(0, mid, M), labels, coords, weights, right_parts,
+                  base_label + left_parts);
 }
 
 // ---------------------------------------------------------------------------
 // Common helper: bisect + extract local atoms for rank R.
 // ---------------------------------------------------------------------------
-static PartitionMessagePassingInfo do_partition(
-    const MolecularInfo &state,
-    const DistEnvironment &env,
-    const torch::Tensor &weights)   // may be undefined
+static PartitionMessagePassingInfo do_partition(const MolecularInfo &state,
+                                                const DistEnvironment &env,
+                                                const torch::Tensor &weights) // may be undefined
 {
     PartitionMessagePassingInfo info;
     auto device = state.atom_positions.device();
@@ -81,10 +78,9 @@ static PartitionMessagePassingInfo do_partition(
 
     torch::Tensor labels;
     if (device.is_cuda()) {
-        labels = kdtree_bisect_cuda(
-            state.atom_positions.to(torch::kFloat), weights, W);
+        labels = kdtree_bisect_cuda(state.atom_positions.to(torch::kFloat), weights, W);
     } else {
-        labels = torch::zeros({N}, long_opts);
+        labels = torch::zeros({ N }, long_opts);
         auto all_idx = torch::arange(N, long_opts);
         kdtree_bisect(all_idx, labels, state.atom_positions, weights, W, 0);
     }
@@ -97,9 +93,9 @@ static PartitionMessagePassingInfo do_partition(
     auto my_indices = torch::nonzero(my_mask).squeeze(-1);
     int64_t num_local = my_indices.size(0);
 
-    info.partition_indices     = state.atom_vertex_numbers.index_select(0, my_indices);
-    info.global_send_recv_matrix = torch::zeros({W, W}, long_opts);
-    info.global_send_recv_matrix.index_put_({R, R}, num_local);
+    info.partition_indices = state.atom_vertex_numbers.index_select(0, my_indices);
+    info.global_send_recv_matrix = torch::zeros({ W, W }, long_opts);
+    info.global_send_recv_matrix.index_put_({ R, R }, num_local);
 
     return info;
 }
@@ -107,8 +103,8 @@ static PartitionMessagePassingInfo do_partition(
 // ---------------------------------------------------------------------------
 // Mode 1 & 2: unweighted or user-provided edge_counts
 // ---------------------------------------------------------------------------
-PartitionMessagePassingInfo KDTreePartitioner::partition(
-    const MolecularInfo &state, const DistEnvironment &env)
+PartitionMessagePassingInfo KDTreePartitioner::partition(const MolecularInfo &state,
+                                                         const DistEnvironment &env)
 {
 
     Timer t;
@@ -128,10 +124,9 @@ PartitionMessagePassingInfo KDTreePartitioner::partition(
 // then partitions by cumulative edge cost.
 // Stores graph in info.edge_index for downstream NNP model use.
 // ---------------------------------------------------------------------------
-PartitionMessagePassingInfo KDTreePartitioner::partition(
-    const MolecularInfo &state,
-    const DistEnvironment &env,
-    const SimulationConfig &config)
+PartitionMessagePassingInfo KDTreePartitioner::partition(const MolecularInfo &state,
+                                                         const DistEnvironment &env,
+                                                         const SimulationConfig &config)
 {
     // Mode 3 always operates on CUDA tensors (radius_graph_pbc requires it).
     Timer t;
@@ -144,18 +139,18 @@ PartitionMessagePassingInfo KDTreePartitioner::partition(
 
     float cutoff = static_cast<float>(config.cutoff);
     auto cell = config.cell.to(device).to(torch::kFloat);
-    auto pbc  = config.pbc.to(device);
+    auto pbc = config.pbc.to(device);
 
     // Build graph at cutoff radius (timed inside as "build_graph")
-    auto graph_result = radius_graph_pbc(
-        pos.to(torch::kFloat), cell, pbc, cutoff,
-        PARTITION_MAX_NUM_NEIGHBORS, /*enforce_max_strictly=*/false);
-    auto edge_idx = std::get<0>(graph_result);  // [2, E]
+    auto graph_result =
+            radius_graph_pbc(pos.to(torch::kFloat), cell, pbc, cutoff, PARTITION_MAX_NUM_NEIGHBORS,
+                             /*enforce_max_strictly=*/false);
+    auto edge_idx = std::get<0>(graph_result); // [2, E]
 
     // Count edges per atom (dst-based, matching baseline: compute is on dst atoms)
-    auto dst = edge_idx[1];  // [E]
-    auto edge_counts = torch::zeros({N}, long_opts);
-    edge_counts.scatter_add_(0, dst, torch::ones({dst.size(0)}, long_opts));
+    auto dst = edge_idx[1]; // [E]
+    auto edge_counts = torch::zeros({ N }, long_opts);
+    edge_counts.scatter_add_(0, dst, torch::ones({ dst.size(0) }, long_opts));
 
     // Partition using computed weights
     auto info = do_partition(state, env, edge_counts);

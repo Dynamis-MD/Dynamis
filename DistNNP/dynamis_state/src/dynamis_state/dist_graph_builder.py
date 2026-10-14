@@ -23,6 +23,7 @@ Mode B (steady, K-1/K steps):
 
 See `docs/v4_scaling_results.md` §10 for the design discussion.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -43,14 +44,17 @@ class BuildMode(Enum):
 @dataclass
 class DistBuildGraphResult:
     """Per-step output. `halo_info` matches `main::build_halo_maps` semantics."""
-    edges_outer: torch.Tensor             # [2, E_local] global ids, dst ∈ my_outer
-    cell_shifts_outer: torch.Tensor       # [E_local, 3] float
-    pid_outer: torch.Tensor               # [N] int32
-    my_outer_atoms: torch.Tensor          # [num_local] int64 global ids
+
+    edges_outer: torch.Tensor  # [2, E_local] global ids, dst ∈ my_outer
+    cell_shifts_outer: torch.Tensor  # [E_local, 3] float
+    pid_outer: torch.Tensor  # [N] int32
+    my_outer_atoms: torch.Tensor  # [num_local] int64 global ids
     halo_info: _impl.PartitionMessagePassingInfo
-    interior_mask: torch.Tensor           # [num_local] bool
-    full_degrees: torch.Tensor            # [N] int32 — r-degrees from last refresh
-    halo_recv_global_ids: torch.Tensor    # [total_recv] int64, ordered by peer then atom-id
+    interior_mask: torch.Tensor  # [num_local] bool
+    full_degrees: torch.Tensor  # [N] int32 — r-degrees from last refresh
+    halo_recv_global_ids: (
+        torch.Tensor
+    )  # [total_recv] int64, ordered by peer then atom-id
     mode: BuildMode
 
 
@@ -96,7 +100,7 @@ def _cell_block_partition(
     cx = torch.clamp((pos_w[:, 0] / cx_size).floor().to(torch.int64), 0, nx - 1)
     cy = torch.clamp((pos_w[:, 1] / cy_size).floor().to(torch.int64), 0, ny - 1)
     cz = torch.clamp((pos_w[:, 2] / cz_size).floor().to(torch.int64), 0, nz - 1)
-    cell_id = cx + cy * nx + cz * (nx * ny)            # [N] int64
+    cell_id = cx + cy * nx + cz * (nx * ny)  # [N] int64
 
     # Block-assign cells to ranks. ceil-div so last rank may get fewer cells.
     my_cells_lo = (rank * n_cells) // world_size
@@ -167,16 +171,30 @@ def _extract_halo_info_local(
     # mask) is done by the fused CUDA op `_impl.extract_halo_info`; Python only
     # assembles the PartitionMessagePassingInfo struct around the returned
     # tensors. Bit-exact with the previous ATen implementation.
-    (send_offsets, send_local_indices, recv_offsets, recv_ghost_indices,
-     interior_mask, recv_atom) = _impl.extract_halo_info(
-        edges, pid_outer, my_outer_atoms, my_rank, world_size, N,
+    (
+        send_offsets,
+        send_local_indices,
+        recv_offsets,
+        recv_ghost_indices,
+        interior_mask,
+        recv_atom,
+    ) = _impl.extract_halo_info(
+        edges,
+        pid_outer,
+        my_outer_atoms,
+        my_rank,
+        world_size,
+        N,
     )
 
     info = _impl.PartitionMessagePassingInfo()
     info.partition_id = pid_outer
     info.partition_indices = my_outer_atoms
     info.global_send_recv_matrix = torch.zeros(
-        world_size, world_size, dtype=torch.int64, device=device,
+        world_size,
+        world_size,
+        dtype=torch.int64,
+        device=device,
     )
     info.send_offsets = send_offsets
     info.send_local_indices = send_local_indices
@@ -260,13 +278,15 @@ class DistGraphBuilder:
         self.max_num_neighbors = int(max_num_neighbors)
         self.enforce_max_strictly = bool(enforce_max_strictly)
         self.drift_threshold = (
-            float(drift_threshold) if drift_threshold is not None
+            float(drift_threshold)
+            if drift_threshold is not None
             else self.ghost_buffer / 2.0
         )
         self.process_group = process_group
         self.sfc_curve_type = sfc_curve_type
         self.partition_cell_size = (
-            float(partition_cell_size) if partition_cell_size is not None
+            float(partition_cell_size)
+            if partition_cell_size is not None
             else self.r_plus_skin
         )
 
@@ -278,7 +298,7 @@ class DistGraphBuilder:
         self._interior_mask: Optional[torch.Tensor] = None
         self._full_degrees: Optional[torch.Tensor] = None
         self._pos_w_at_refresh: Optional[torch.Tensor] = None
-        self._steps_since_refresh = self.refresh_interval     # force first call → Mode A
+        self._steps_since_refresh = self.refresh_interval  # force first call → Mode A
 
         self._L_vec = cell.diag().contiguous()
 
@@ -325,44 +345,71 @@ class DistGraphBuilder:
 
         # 2. Cell-block partition
         my_target_atoms = _cell_block_partition(
-            pos_w, L_vec, self.partition_cell_size, R, W,
+            pos_w,
+            L_vec,
+            self.partition_cell_size,
+            R,
+            W,
         )
 
         # 3. Local r-degrees (count-only kernel; full pos as source)
         if my_target_atoms.numel() > 0:
             degrees_local = _impl.radius_graph_pbc_counts_ex(
-                pos_w, cell, pbc, self.cutoff, my_target_atoms,
+                pos_w,
+                cell,
+                pbc,
+                self.cutoff,
+                my_target_atoms,
             )
         else:
             degrees_local = torch.empty(0, dtype=torch.int32, device=device)
 
         # 4. all_reduce(degrees)
         full_degrees = _all_reduce_degrees(
-            degrees_local, my_target_atoms, N, group=self.process_group,
+            degrees_local,
+            my_target_atoms,
+            N,
+            group=self.process_group,
         )
 
         # 5. SFC weighted partition
         pid_outer = _compute_sfc_weighted_partition(
-            pos_w, full_degrees, env, curve_type=self.sfc_curve_type,
+            pos_w,
+            full_degrees,
+            env,
+            curve_type=self.sfc_curve_type,
         )
         my_outer_atoms = torch.nonzero(pid_outer.eq(R), as_tuple=False).squeeze(-1)
 
         # 6. Edge build at r+skin with target=my_outer (full pos as source)
         edges_at_r_skin, cell_shifts_skin, _, _ = _impl.radius_graph_pbc_ex(
-            pos_w, cell, pbc, self.r_plus_skin,
-            self.max_num_neighbors, self.enforce_max_strictly,
+            pos_w,
+            cell,
+            pbc,
+            self.r_plus_skin,
+            self.max_num_neighbors,
+            self.enforce_max_strictly,
             my_outer_atoms,
         )
 
         # 7. Extract halo / send / recv / interior locally (no NCCL)
         halo_info, interior_mask, halo_recv_global_ids = _extract_halo_info_local(
-            edges_at_r_skin, pid_outer, my_outer_atoms,
-            R, W, N, device,
+            edges_at_r_skin,
+            pid_outer,
+            my_outer_atoms,
+            R,
+            W,
+            N,
+            device,
         )
 
         # 8. Filter edges r+skin → r as Mode A's output
         edges_outer, cell_shifts_outer = _filter_edges_to_radius(
-            edges_at_r_skin, cell_shifts_skin, pos_w, cell, self.cutoff,
+            edges_at_r_skin,
+            cell_shifts_skin,
+            pos_w,
+            cell,
+            self.cutoff,
         )
 
         # Cache for K-1 Mode B steps
@@ -407,11 +454,16 @@ class DistGraphBuilder:
         local_pos = pos_w.index_select(0, my_full_set).contiguous()
         target_local = torch.arange(
             self._my_outer_atoms.numel(),
-            dtype=torch.int64, device=device,
+            dtype=torch.int64,
+            device=device,
         )
         edges_local, cell_shifts, _, _ = _impl.radius_graph_pbc_ex(
-            local_pos, cell, pbc, self.cutoff,
-            self.max_num_neighbors, self.enforce_max_strictly,
+            local_pos,
+            cell,
+            pbc,
+            self.cutoff,
+            self.max_num_neighbors,
+            self.enforce_max_strictly,
             target_local,
         )
         if edges_local.numel() == 0:

@@ -3,20 +3,15 @@
 #include "dynamis_state/sfc.hpp"
 
 // Forward declaration of internal CUDA implementation (defined in sfc_kernels.cu)
-at::Tensor sfc_partition_cuda_impl(at::Tensor pos, at::Tensor weights,
-                                    int64_t W, int64_t curve_type);
+at::Tensor sfc_partition_cuda_impl(at::Tensor pos, at::Tensor weights, int64_t W,
+                                   int64_t curve_type);
 
-at::Tensor sfc_partition_cuda(
-    at::Tensor pos,
-    at::Tensor weights,
-    int64_t W,
-    int64_t curve_type
-) {
+at::Tensor sfc_partition_cuda(at::Tensor pos, at::Tensor weights, int64_t W, int64_t curve_type)
+{
     TORCH_CHECK(pos.is_cuda(), "pos must be a CUDA tensor");
-    TORCH_CHECK(pos.dim() == 2 && pos.size(1) == 3,
-                "pos must have shape [N, 3], got [", pos.size(0), ", ", pos.size(1), "]");
-    TORCH_CHECK(pos.scalar_type() == at::kFloat,
-                "pos must be float32, got ", pos.scalar_type());
+    TORCH_CHECK(pos.dim() == 2 && pos.size(1) == 3, "pos must have shape [N, 3], got [",
+                pos.size(0), ", ", pos.size(1), "]");
+    TORCH_CHECK(pos.scalar_type() == at::kFloat, "pos must be float32, got ", pos.scalar_type());
     pos = pos.contiguous();
 
     TORCH_CHECK(W >= 1, "W must be >= 1, got ", W);

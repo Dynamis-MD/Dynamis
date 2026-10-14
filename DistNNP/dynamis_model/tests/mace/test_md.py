@@ -57,7 +57,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--path", required=True)
     parser.add_argument("--model", default="medium-mpa-0")
     parser.add_argument("--head-name", default="")
-    parser.add_argument("--model-family", default="mp", choices=["mp", "off", "omol", "polar"])
+    parser.add_argument(
+        "--model-family", default="mp", choices=["mp", "off", "omol", "polar"]
+    )
     parser.add_argument(
         "--enable-cueq",
         action="store_true",
@@ -103,7 +105,9 @@ def main() -> None:
             system="silicon",
             enable_cueq=args.enable_cueq,
         )
-        print(f"Running {args.reference_mode} singleton MACE reference trajectory for silicon.")
+        print(
+            f"Running {args.reference_mode} singleton MACE reference trajectory for silicon."
+        )
         integrator = Verlet(dt=0.5)
         config = make_config(
             str(output_dir),
@@ -115,10 +119,14 @@ def main() -> None:
         sim.setup(str(structure))
 
         ref_traj = run_md_loop(sim, config)
-        assert dist_dump.exists(), f"Distributed trajectory artifact not found: {dist_dump}"
+        assert (
+            dist_dump.exists()
+        ), f"Distributed trajectory artifact not found: {dist_dump}"
         artifact = torch.load(dist_dump, weights_only=False)
         if not isinstance(artifact, dict) or set(artifact) != {"metadata", "frames"}:
-            raise ValueError("Distributed trajectory artifact must contain exactly 'metadata' and 'frames'.")
+            raise ValueError(
+                "Distributed trajectory artifact must contain exactly 'metadata' and 'frames'."
+            )
         expected_metadata = {
             "artifact_version": 2,
             "model": args.model,
@@ -138,7 +146,11 @@ def main() -> None:
                 "Distributed trajectory metadata does not match the singleton reference: "
                 f"expected {expected_metadata}, got {artifact['metadata']}"
             )
-        compare_trajectories(ref_traj, artifact["frames"], report_path=str(output_dir / "comparison_report.csv"))
+        compare_trajectories(
+            ref_traj,
+            artifact["frames"],
+            report_path=str(output_dir / "comparison_report.csv"),
+        )
     except AssertionError as exc:
         print(f"FAILED: {exc}")
         sys.exit(1)

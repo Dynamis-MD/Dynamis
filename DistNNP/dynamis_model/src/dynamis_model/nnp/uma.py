@@ -6,6 +6,7 @@ import torch.nn as nn
 import numpy as np
 from torch.profiler import record_function
 from typing import List, Literal
+
 try:
     from fairchem.core import pretrained_mlip
     from fairchem.core.datasets.atomic_data import AtomicData, warn_if_upcasting
@@ -22,7 +23,9 @@ try:
         guess_inference_settings,
     )
     from fairchem.core.units.mlip_unit.utils import tf32_context_manager
-    from fairchem.core.units.mlip_unit.single_atom_patch import single_atom_prediction_from_lookup
+    from fairchem.core.units.mlip_unit.single_atom_patch import (
+        single_atom_prediction_from_lookup,
+    )
 except ImportError as e:
     raise ImportError("fairchem-core must be installed to use UMAModel") from e
 
@@ -58,7 +61,7 @@ def balance_channels_batched(
     n_channels = end_idx - start_idx
 
     channels_to_balance_local = emb[:num_local, 0, start_idx:end_idx]
-    
+
     system_sums = torch.zeros(
         num_systems, n_channels, device=emb.device, dtype=emb.dtype
     )
@@ -68,13 +71,14 @@ def balance_channels_batched(
         system_sums = dist_nn.all_reduce(system_sums, op=torch.distributed.ReduceOp.SUM)
 
     target_sums = (target - target_offset).unsqueeze(1).expand(-1, n_channels)
-    
+
     corrections = (system_sums - target_sums) / natoms_global.unsqueeze(1)
 
     channels_to_balance_all = emb[:, 0, start_idx:end_idx]
     out_emb[:, 0, start_idx:end_idx] = channels_to_balance_all - corrections[batch]
-    
+
     return out_emb
+
 
 @registry.register_model("distributed_escnmd_backbone")
 class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
@@ -86,8 +90,10 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         self.num_local = 0
         self.profiler = None  # CUDAEventProfiler for detailed timing
         self._cached_mole_coefficients = None  # MOLE cache for first-call pattern
-        self.differentiable_exchange = False  # Differentiable feature exchange for correct force gradients
-    
+        self.differentiable_exchange = (
+            False  # Differentiable feature exchange for correct force gradients
+        )
+
     def set_profiler(self, profiler):
         """Set profiler for detailed model timing."""
         self.profiler = profiler
@@ -95,20 +101,19 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
     def set_MOLE_coefficients(self, atomic_numbers_full, batch_full, csd_mixed_emb):
         if self.num_experts == 0:
             return
-        
+
         # OPTIMIZATION: Cache MOLE coefficients - compute once on first call, reuse forever.
         # In MD simulations with merge_mole=True, composition is static.
         cached = getattr(self, "_cached_mole_coefficients", None)
         if cached is not None:
             self.global_mole_tensors.expert_mixing_coefficients = cached
             return
-        
-        
+
         # Ensure inputs are on correct device
         if self.use_composition_embedding:
-             device = self.composition_embedding.weight.device
-             atomic_numbers_full = atomic_numbers_full.to(device)
-             batch_full = batch_full.to(device)
+            device = self.composition_embedding.weight.device
+            atomic_numbers_full = atomic_numbers_full.to(device)
+            batch_full = batch_full.to(device)
 
         with torch.autocast(device_type=atomic_numbers_full.device.type, enabled=False):
             embeddings = []
@@ -118,48 +123,54 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                     num_local = self.num_local
                     if num_local is None:
                         num_local = atomic_numbers_full.shape[0]
-                    
+
                     if num_local > atomic_numbers_full.shape[0]:
-                         num_local = atomic_numbers_full.shape[0]
+                        num_local = atomic_numbers_full.shape[0]
 
                     local_an = atomic_numbers_full[:num_local]
                     local_comp = self.composition_embedding(local_an)
                     local_sum = local_comp.sum(0)
-                    local_count = torch.tensor([num_local], device=device, dtype=local_sum.dtype)
-                    
+                    local_count = torch.tensor(
+                        [num_local], device=device, dtype=local_sum.dtype
+                    )
+
                     # Handle CPU tensors with NCCL backend (which doesn't support CPU all_reduce)
                     is_cpu = local_sum.device.type == "cpu"
                     if is_cpu and dist.get_backend() == "nccl":
                         local_sum_cuda = local_sum.cuda()
                         local_count_cuda = local_count.cuda()
-                        
+
                         local_sum_cuda = dist_nn.all_reduce(local_sum_cuda)
                         dist.all_reduce(local_count_cuda)
-                        
+
                         local_sum = local_sum_cuda.cpu()
                         local_count = local_count_cuda.cpu()
                     else:
                         local_sum = dist_nn.all_reduce(local_sum)
                         dist.all_reduce(local_count)
-                    
+
                     # Match eSCNMDMoeBackbone behavior for include_self
                     # Default version 1.0 uses include_self=True
                     if np.isclose(self.model_version, 1.0).item():
-                        local_count = local_count + 1.0 # Denominator adds 1 (implicit 0-vector self)
+                        local_count = (
+                            local_count + 1.0
+                        )  # Denominator adds 1 (implicit 0-vector self)
                         # Numerator adds 0 (self value) -> no change
-                        
+
                     global_mean = local_sum / local_count
-                    
+
                     # Assume 1 system for MD inference usually
                     # If multiple systems, this logic needs batch-awareness?
                     # For now, replicate to match csd_mixed_emb shape [B, C]
                     # But index_reduce reduces to unique batch indices.
                     # In MD inference, batch is usually all 0s.
-                    composition = global_mean.unsqueeze(0) 
-                    
+                    composition = global_mean.unsqueeze(0)
+
                 else:
                     # Fallback to local calculation (Serial or Single Rank)
-                    composition_by_atom = self.composition_embedding(atomic_numbers_full)
+                    composition_by_atom = self.composition_embedding(
+                        atomic_numbers_full
+                    )
                     composition = composition_by_atom.new_zeros(
                         csd_mixed_emb.shape[0],
                         self.sphere_channels,
@@ -181,10 +192,10 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             coefficients = self.mole_expert_coefficient_norm(
                 self.mole_dropout(expert_mixing_coefficients_before_norm)
             )
-            
+
             # Store in cache
             self._cached_mole_coefficients = coefficients
-            
+
             self.global_mole_tensors.expert_mixing_coefficients = coefficients
 
     def balance_channels(
@@ -233,11 +244,11 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
 
         num_local = None
         if "num_local" in data_dict:
-             num_local = data_dict["num_local"]
-             if isinstance(num_local, torch.Tensor) and num_local.numel() == 1:
-                 num_local = num_local.item()
+            num_local = data_dict["num_local"]
+            if isinstance(num_local, torch.Tensor) and num_local.numel() == 1:
+                num_local = num_local.item()
         self.num_local = num_local
-        
+
         self.set_MOLE_coefficients(
             atomic_numbers_full=data_dict["atomic_numbers_full"],
             batch_full=data_dict["batch_full"],
@@ -255,23 +266,27 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             graph_dict = self._generate_graph(data_dict)
         if self.profiler:
             self.profiler.stop("generate_graph")
-            
+
         # DYNAMIS OPTIMIZATION: Filter redundant edges early
         # Keep reference to original edges for MOLE stats
         original_edge_index = graph_dict["edge_index"]
-        
+
         # Filter if num_local is valid
-        if num_local is not None and isinstance(num_local, int) and num_local < data_dict["pos"].shape[0]:
+        if (
+            num_local is not None
+            and isinstance(num_local, int)
+            and num_local < data_dict["pos"].shape[0]
+        ):
             self.num_local = num_local
 
             mask = graph_dict["edge_index"][1] < num_local
 
             # Apply filter to all edge tensors
             graph_dict["edge_index"] = graph_dict["edge_index"][:, mask]
-            
+
             if "edge_distance" in graph_dict:
-                 graph_dict["edge_distance"] = graph_dict["edge_distance"][mask]
-                 
+                graph_dict["edge_distance"] = graph_dict["edge_distance"][mask]
+
             if "edge_distance_vec" in graph_dict:
                 graph_dict["edge_distance_vec"] = graph_dict["edge_distance_vec"][mask]
 
@@ -279,9 +294,7 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                 graph_dict["cell_offsets"] = graph_dict["cell_offsets"][mask]
 
         if graph_dict["edge_index"].numel() == 0:
-             raise ValueError(
-                f"No edges found. Check cutoff {self.cutoff}."
-            )
+            raise ValueError(f"No edges found. Check cutoff {self.cutoff}.")
 
         if self.profiler:
             self.profiler.start("wigner")
@@ -342,14 +355,14 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             x_edge = torch.cat(
                 (edge_distance_embedding, source_embedding, target_embedding), dim=1
             )
-            
-            # Exchange before edge_degree_embedding? 
+
+            # Exchange before edge_degree_embedding?
             # edge_degree_embedding uses neighbors. If neighbors are ghosts, we need their features.
-            # But x_message is just initialized from atomic numbers. 
+            # But x_message is just initialized from atomic numbers.
             # Atomic numbers of ghosts are already known (exchanged in structural halo).
             # So x_message for ghosts is locally computable at this stage!
             # No exchange needed yet.
-            
+
             wigner_inv_envelope = wigner_inv * edge_envelope
 
             x_message = self.edge_degree_embedding(
@@ -362,7 +375,9 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             if self._feature_exchangers:
                 exchanger = self._feature_exchangers[-1]
                 n_local = self.num_local
-                orig_shape = x_message.shape # [n_atoms, sph_feature_size, sphere_channels]
+                orig_shape = (
+                    x_message.shape
+                )  # [n_atoms, sph_feature_size, sphere_channels]
                 feat_dim = orig_shape[1] * orig_shape[2]
                 x_local_flat = x_message[:n_local].reshape(n_local, feat_dim)
 
@@ -380,7 +395,9 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         # We only need to aggregate messages INTO local atoms.
         # Edges where destination (edge_index[1]) is a ghost atom can be skipped.
 
-        effective_num_local = self.num_local if self.num_local > 0 else data_dict["pos"].shape[0]
+        effective_num_local = (
+            self.num_local if self.num_local > 0 else data_dict["pos"].shape[0]
+        )
 
         local_dest_mask = graph_dict["edge_index"][1] < effective_num_local
 
@@ -388,36 +405,40 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
 
         # === OVERLAP OPTIMIZATION (Area 3) ===
         # Check config flag first to avoid any overhead when disabled
-        use_overlap = getattr(self, 'enable_overlap', False)
+        use_overlap = getattr(self, "enable_overlap", False)
 
         with record_function("layer_radial_emb"):
             x_edge_per_layer = self.backend.get_layer_radial_emb(x_edge, self)
-        
+
         if use_overlap:
             # Only compute overlap-related tensors when enabled
-            _could_use_overlap = (hasattr(self, 'interior_mask') and
-                                  self.interior_mask is not None and
-                                  self.interior_mask.numel() > 0 and
-                                  dist.get_world_size() > 1)
-            
+            _could_use_overlap = (
+                hasattr(self, "interior_mask")
+                and self.interior_mask is not None
+                and self.interior_mask.numel() > 0
+                and dist.get_world_size() > 1
+            )
+
             if not _could_use_overlap:
                 use_overlap = False
             else:
                 # Filter x_edge for overlap path
-                local_x_edge_per_layer = [x_edge_per_layer[i][local_dest_mask] for i in range(self.num_layers)]
-                
-                # Build masks for interior edges (dst is interior atom) 
+                local_x_edge_per_layer = [
+                    x_edge_per_layer[i][local_dest_mask] for i in range(self.num_layers)
+                ]
+
+                # Build masks for interior edges (dst is interior atom)
                 # and boundary edges (dst is boundary atom)
                 interior_atom_mask = self.interior_mask.to(local_edge_index.device)
-                
+
                 # Edge goes to interior atom if dst is marked as interior
                 interior_edge_mask = interior_atom_mask[local_edge_index[1]]
                 boundary_edge_mask = ~interior_edge_mask
-                
+
                 # Pre-filter edges for interior and boundary
                 interior_edge_index = local_edge_index[:, interior_edge_mask]
                 boundary_edge_index = local_edge_index[:, boundary_edge_mask]
-                
+
                 # === Area 3 Fix: Pre-compute Wigner filtered tensors ONCE (not per-layer) ===
                 def _filter_wigner_once(wigner_dict, mask, full_mask):
                     """Filter wigner dict by edge mask, relative to local_dest_mask"""
@@ -426,7 +447,10 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                     if isinstance(wigner_dict, dict):
                         filtered = {}
                         for k, v in wigner_dict.items():
-                            if isinstance(v, torch.Tensor) and v.shape[0] == graph_dict["edge_index"].shape[1]:
+                            if (
+                                isinstance(v, torch.Tensor)
+                                and v.shape[0] == graph_dict["edge_index"].shape[1]
+                            ):
                                 filtered[k] = v[full_mask][mask]
                             else:
                                 filtered[k] = v
@@ -434,18 +458,25 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                     elif isinstance(wigner_dict, torch.Tensor):
                         return wigner_dict[full_mask][mask]
                     return wigner_dict
-                
+
                 # Log overlap stats once (skip under torch.compile to avoid dynamo errors)
-                if not hasattr(self, '_logged_overlap_stats') and not torch.compiler.is_compiling():
+                if (
+                    not hasattr(self, "_logged_overlap_stats")
+                    and not torch.compiler.is_compiling()
+                ):
                     interior_count = interior_atom_mask.sum().item()
                     total_local = self.num_local
                     interior_edges = interior_edge_index.shape[1]
                     boundary_edges = boundary_edge_index.shape[1]
                     if self.exchanger.rank == 0:
-                        print(f"Overlap enabled: {interior_count}/{total_local} interior atoms ({100*interior_count/total_local:.1f}%)")
-                        print(f"  Interior edges: {interior_edges}, Boundary edges: {boundary_edges}")
+                        print(
+                            f"Overlap enabled: {interior_count}/{total_local} interior atoms ({100*interior_count/total_local:.1f}%)"
+                        )
+                        print(
+                            f"  Interior edges: {interior_edges}, Boundary edges: {boundary_edges}"
+                        )
                     self._logged_overlap_stats = True
-        
+
         # Compute correct local count for exchange calls
         _local_count_for_exchange = self.num_local
 
@@ -458,29 +489,42 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                     if isinstance(wigner, dict):
                         local_wigner = {}
                         for k, v in wigner.items():
-                            if isinstance(v, torch.Tensor) and v.shape[0] == graph_dict["edge_index"].shape[1]:
-                                 local_wigner[k] = v[local_dest_mask]
+                            if (
+                                isinstance(v, torch.Tensor)
+                                and v.shape[0] == graph_dict["edge_index"].shape[1]
+                            ):
+                                local_wigner[k] = v[local_dest_mask]
                             else:
-                                 local_wigner[k] = v
+                                local_wigner[k] = v
                     elif isinstance(wigner, torch.Tensor):
-                         local_wigner = wigner[local_dest_mask]
+                        local_wigner = wigner[local_dest_mask]
 
                     local_wigner_inv = wigner_inv
                     if wigner_inv is not None:
-                         if isinstance(wigner_inv, dict):
-                             assert False, "wigner_inv should be torch.Tensor"
-                             local_wigner_inv = {}
-                             for k, v in wigner_inv.items():
-                                if isinstance(v, torch.Tensor) and v.shape[0] == graph_dict["edge_index"].shape[1]:
-                                     local_wigner_inv[k] = v[local_dest_mask]
+                        if isinstance(wigner_inv, dict):
+                            assert False, "wigner_inv should be torch.Tensor"
+                            local_wigner_inv = {}
+                            for k, v in wigner_inv.items():
+                                if (
+                                    isinstance(v, torch.Tensor)
+                                    and v.shape[0] == graph_dict["edge_index"].shape[1]
+                                ):
+                                    local_wigner_inv[k] = v[local_dest_mask]
                                 else:
-                                     local_wigner_inv[k] = v
-                         elif isinstance(wigner_inv, torch.Tensor):
-                             local_wigner_inv = wigner_inv[local_dest_mask]
+                                    local_wigner_inv[k] = v
+                        elif isinstance(wigner_inv, torch.Tensor):
+                            local_wigner_inv = wigner_inv[local_dest_mask]
 
-                    local_edge_envelope = edge_envelope[local_dest_mask] if edge_envelope is not None else None
+                    local_edge_envelope = (
+                        edge_envelope[local_dest_mask]
+                        if edge_envelope is not None
+                        else None
+                    )
                     local_wigner_inv_envelope = local_wigner_inv * local_edge_envelope
-                    local_x_edge_per_layer = [x_edge_per_layer[i][local_dest_mask] for i in range(self.num_layers)]
+                    local_x_edge_per_layer = [
+                        x_edge_per_layer[i][local_dest_mask]
+                        for i in range(self.num_layers)
+                    ]
 
             # Now run the block with updated ghost features
             if self.profiler:
@@ -492,7 +536,9 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                     local_edge_index,
                     local_wigner,
                     local_wigner_inv_envelope,
-                    total_atoms_across_gp_ranks=data_dict["atomic_numbers_full"].shape[0],
+                    total_atoms_across_gp_ranks=data_dict["atomic_numbers_full"].shape[
+                        0
+                    ],
                     sys_node_embedding=sys_node_embedding,
                     node_offset=data_dict["gp_node_offset"],
                 )
@@ -512,7 +558,9 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             if self._feature_exchangers:
                 exchanger = self._feature_exchangers[i]
                 n_local = _local_count_for_exchange
-                orig_shape = x_message.shape  # [n_atoms, sph_feature_size, sphere_channels]
+                orig_shape = (
+                    x_message.shape
+                )  # [n_atoms, sph_feature_size, sphere_channels]
                 feat_dim = orig_shape[1] * orig_shape[2]
                 x_local_flat = x_message[:n_local].reshape(n_local, feat_dim)
 
@@ -526,7 +574,7 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                 self.profiler.stop(f"feature_exchange_{i}")
         # Final layer norm
         x_message = self.norm(x_message)
-        
+
         out = {
             "node_embedding": x_message,
             "batch": data_dict["batch"],
@@ -534,9 +582,11 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         return out
 
     def merge_MOLE_model(self, data):
-        if self.num_experts == 0: # NOTE: if composition changes after the first time this is called, the model will give bad outputs
+        if (
+            self.num_experts == 0
+        ):  # NOTE: if composition changes after the first time this is called, the model will give bad outputs
             return self
-            
+
         # Extract num_local for distributed composition calculation
         if "num_local" in data:
             nl = data["num_local"]
@@ -544,7 +594,7 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                 self.num_local = int(nl.item())
             else:
                 self.num_local = int(nl)
-                
+
         csd_mixed_emb = self.csd_embedding(
             charge=data["charge"],
             spin=data["spin"],
@@ -573,22 +623,27 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         # We must disable experts in the new instance so it matches the merged (dense) weights.
         new_kwargs = self.parent_kwargs.copy()
         new_kwargs["num_experts"] = 0
-        new_kwargs["use_composition_embedding"] = False # Merged model doesn't use this routing embedding
-        
+        new_kwargs["use_composition_embedding"] = (
+            False  # Merged model doesn't use this routing embedding
+        )
+
         new_model = DistributedESCNMDBackbone(**new_kwargs)
         new_model.load_state_dict(self.state_dict())
-        
+
         # Preserve distributed components
         new_model._feature_exchangers = self._feature_exchangers
         new_model._distributed_state = self._distributed_state
-        new_model.enable_overlap = getattr(self, 'enable_overlap', False)
-        new_model.differentiable_exchange = getattr(self, 'differentiable_exchange', False)
-        new_model.interior_mask = getattr(self, 'interior_mask', None)
+        new_model.enable_overlap = getattr(self, "enable_overlap", False)
+        new_model.differentiable_exchange = getattr(
+            self, "differentiable_exchange", False
+        )
+        new_model.interior_mask = getattr(self, "interior_mask", None)
         if hasattr(self, "num_local"):
-             new_model.num_local = self.num_local
-        
+            new_model.num_local = self.num_local
+
         new_model.eval()
         return new_model
+
 
 class MaskedHeadWrapper(nn.Module):
     def __init__(self, original_head):
@@ -602,7 +657,7 @@ class MaskedHeadWrapper(nn.Module):
             if name == "original_head":
                 raise
             return getattr(self.original_head, name)
-        
+
     @conditional_grad(torch.enable_grad())
     def forward(
         self, data: AtomicData, emb: dict[str, torch.Tensor]
@@ -615,11 +670,11 @@ class MaskedHeadWrapper(nn.Module):
         if "num_local" in data:
             outputs = {}
             num_local = int(data["num_local"])
-            
+
             # Re-extract the L=0 scalar embedding directly (shape: [N, C])
             # emb["node_embedding"] is [N, (lmax+1)^2, C]. Index 0 is exactly L=0.
             scalar_embedding = emb["node_embedding"][:num_local, 0, :]
-            
+
             # Recompute the per-atom energies manually using the head's block
             node_energies = self.original_head.energy_block(scalar_embedding).view(-1)
             # Sum ONLY the local atoms
@@ -634,12 +689,15 @@ class MaskedHeadWrapper(nn.Module):
 
             if data.pos.requires_grad:
                 # Calculate gradient of masked energy w.r.t all positions (local + ghost)
-                correct_forces = -1 * torch.autograd.grad(
-                    local_energy,
-                    data.pos, 
-                    # create_graph=self.training, # Retain graph if training
-                    # retain_graph=True
-                )[0]
+                correct_forces = (
+                    -1
+                    * torch.autograd.grad(
+                        local_energy,
+                        data.pos,
+                        # create_graph=self.training, # Retain graph if training
+                        # retain_graph=True
+                    )[0]
+                )
                 outputs[forces_key] = correct_forces
         else:
             outputs = self.original_head(data, emb)
@@ -648,19 +706,22 @@ class MaskedHeadWrapper(nn.Module):
                 outputs[forces_key] = outputs[forces_key]
         return outputs
 
+
 class UMAModel(DynamisModel):
     def __init__(
         self,
         model_name: str,
         dataset: str,
         global_rank: int = None,
-        inference_settings: InferenceSettings | str = "default", #"turbo",
+        inference_settings: InferenceSettings | str = "default",  # "turbo",
         overrides: dict | None = None,
         device: str | torch.device | None = None,
         exchanger: Exchanger | type[Exchanger] | None = None,
     ):
         if isinstance(device, torch.device):
-            self.device = device.type # make sure this is a str because fairchem needs str (with no ordinal)
+            self.device = (
+                device.type
+            )  # make sure this is a str because fairchem needs str (with no ordinal)
         else:
             self.device = device
         self.global_rank = global_rank
@@ -672,9 +733,13 @@ class UMAModel(DynamisModel):
             overrides["backbone"] = {"model": "distributed_escnmd_backbone"}
         else:
             overrides["backbone"]["model"] = "distributed_escnmd_backbone"
-        self.predictor = pretrained_mlip.get_predict_unit(model_name, inference_settings, overrides, self.device)
+        self.predictor = pretrained_mlip.get_predict_unit(
+            model_name, inference_settings, overrides, self.device
+        )
         self.main_model = self.predictor.model.module
-        self.main_model.output_heads["energyandforcehead"].head = MaskedHeadWrapper(self.main_model.output_heads["energyandforcehead"].head)
+        self.main_model.output_heads["energyandforcehead"].head = MaskedHeadWrapper(
+            self.main_model.output_heads["energyandforcehead"].head
+        )
 
         self.num_layers = self.main_model.backbone.num_layers
 
@@ -696,9 +761,7 @@ class UMAModel(DynamisModel):
 
         self.position_exchanger = make_exchanger()
         self.atom_type_exchanger = make_exchanger()
-        self.feature_exchangers = [
-            make_exchanger() for _ in range(self.num_layers + 1)
-        ]
+        self.feature_exchangers = [make_exchanger() for _ in range(self.num_layers + 1)]
 
     def initialize_buffers(
         self,
@@ -713,10 +776,15 @@ class UMAModel(DynamisModel):
             feature_dim=1, partition_info=partition_info, device=device
         )
 
-        total_feature_dim = self.main_model.backbone.sph_feature_size * self.main_model.backbone.sphere_channels
+        total_feature_dim = (
+            self.main_model.backbone.sph_feature_size
+            * self.main_model.backbone.sphere_channels
+        )
         for feature_exchanger in self.feature_exchangers:
             feature_exchanger.setup_exchanger(
-                feature_dim=total_feature_dim, partition_info=partition_info, device=device
+                feature_dim=total_feature_dim,
+                partition_info=partition_info,
+                device=device,
             )
 
         self.main_model.backbone._feature_exchangers = self.feature_exchangers
@@ -745,7 +813,9 @@ class UMAModel(DynamisModel):
 
         dtype = self.predictor.inference_settings.base_precision_dtype
         if not self.predictor._warned_upcast:
-            self.predictor._warned_upcast = warn_if_upcasting(data_device.pos.dtype, dtype)
+            self.predictor._warned_upcast = warn_if_upcasting(
+                data_device.pos.dtype, dtype
+            )
         for key, val in data_device:
             if torch.is_tensor(val) and val.is_floating_point():
                 data_device[key] = val.to(dtype)
@@ -765,7 +835,9 @@ class UMAModel(DynamisModel):
             else nullcontext()
         )
         tf32_context = (
-            tf32_context_manager() if self.predictor.inference_settings.tf32 else nullcontext()
+            tf32_context_manager()
+            if self.predictor.inference_settings.tf32
+            else nullcontext()
         )
 
         with inference_context, tf32_context:
@@ -786,17 +858,21 @@ class UMAModel(DynamisModel):
                     output[task_name][task.property]
                 )
             else:
-                pred_output[task_name] = task.normalizer.rmsd * output[task_name][task.property]
+                pred_output[task_name] = (
+                    task.normalizer.rmsd * output[task_name][task.property]
+                )
             if self.predictor.assert_on_nans:
-                assert (
-                    torch.isfinite(pred_output[task_name]).all()
-                ), f"NaNs/Infs found in prediction for task {task_name}.{task.property}"
+                assert torch.isfinite(
+                    pred_output[task_name]
+                ).all(), f"NaNs/Infs found in prediction for task {task_name}.{task.property}"
             if undo_refs and task.element_references is not None:
                 pred_output[task_name] = task.element_references.undo_refs(
                     data, pred_output[task_name]
                 )
-                ghost_z = data["atomic_numbers_full"][data["num_local"]:]
-                ghost_refs_energy = task.element_references.element_references[ghost_z].sum()
+                ghost_z = data["atomic_numbers_full"][data["num_local"] :]
+                ghost_refs_energy = task.element_references.element_references[
+                    ghost_z
+                ].sum()
                 pred_output[task_name] = pred_output[task_name] - ghost_refs_energy
         return pred_output
 
@@ -821,9 +897,15 @@ class UMAModel(DynamisModel):
             local_mol_info.atom_positions, distributed_state, self.position_exchanger
         )
 
-        atom_types = FeaturePushToExchange.apply(
-            local_mol_info.atom_types.float().unsqueeze(-1), distributed_state, self.atom_type_exchanger
-        ).squeeze(-1).long()
+        atom_types = (
+            FeaturePushToExchange.apply(
+                local_mol_info.atom_types.float().unsqueeze(-1),
+                distributed_state,
+                self.atom_type_exchanger,
+            )
+            .squeeze(-1)
+            .long()
+        )
 
         num_global = global_mol_info.num_atoms
         num_atoms = positions.shape[0]
@@ -849,7 +931,7 @@ class UMAModel(DynamisModel):
 
         batch = torch.zeros(num_local, dtype=torch.long, device=device)
         datasets = self.dataset
-        num_systems = int(batch.max().item()) + 1 
+        num_systems = int(batch.max().item()) + 1
         if charge is None:
             charge = torch.zeros(num_systems, dtype=torch.long, device=device)
         if spin is None:
@@ -866,8 +948,8 @@ class UMAModel(DynamisModel):
             torch.tensor([edge_index.shape[1]], dtype=torch.long, device=device),
             charge,
             spin,
-            torch.zeros(num_atoms, dtype=torch.long, device=device), # fixed
-            torch.zeros(num_atoms, dtype=torch.long, device=device), # tags
+            torch.zeros(num_atoms, dtype=torch.long, device=device),  # fixed
+            torch.zeros(num_atoms, dtype=torch.long, device=device),  # tags
             # batch=batch_full,
             dataset=datasets,
         )

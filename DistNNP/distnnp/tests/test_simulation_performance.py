@@ -12,9 +12,8 @@ Run via:
 import torch
 import pytest
 
-
 # Run 20 times and make perf bounds 1.5x std dev of the mean.
-# The data is noisy and it shows that it can fail 
+# The data is noisy and it shows that it can fail
 # sometimes when nothing is necessarily wrong.
 
 # Euler    per_step:  Mean = 16.661 ms,  Std Dev = 4.125 ms,  Bound = 22.849 ms
@@ -25,9 +24,9 @@ import pytest
 # Langevin N100:      Mean = 2.012 s,  Std Dev = 0.113 s,  Bound = 2.181 s
 
 PERF_BOUNDS = {
-    "euler":    {"per_step_ms": 22.849, "N100_total_s": 2.073},
-    "verlet":   {"per_step_ms": 23.567, "N100_total_s": 2.115},
-    "langevin": {"per_step_ms": 29.329,  "N100_total_s": 2.181},
+    "euler": {"per_step_ms": 22.849, "N100_total_s": 2.073},
+    "verlet": {"per_step_ms": 23.567, "N100_total_s": 2.115},
+    "langevin": {"per_step_ms": 29.329, "N100_total_s": 2.181},
 }
 
 

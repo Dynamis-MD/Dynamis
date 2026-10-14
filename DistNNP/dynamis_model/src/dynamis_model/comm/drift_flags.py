@@ -21,6 +21,7 @@ here, so nothing changes unless a caller (the Simulator's drift watchdog) enable
 Models do not need to know about it: their exchangers pick the flags up on their next
 push.
 """
+
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -29,9 +30,15 @@ import torch
 
 @dataclass
 class DriftFlags:
-    local: torch.Tensor    # int32 [1]: this rank's flag word, written by the caller on device
-    global_: torch.Tensor  # int32 [1]: bitwise OR over all ranks, rewritten after every push
-    n_wired: int = 0       # exchangers that have picked these flags up (0 => none carry them)
+    local: (
+        torch.Tensor
+    )  # int32 [1]: this rank's flag word, written by the caller on device
+    global_: (
+        torch.Tensor
+    )  # int32 [1]: bitwise OR over all ranks, rewritten after every push
+    n_wired: int = (
+        0  # exchangers that have picked these flags up (0 => none carry them)
+    )
 
 
 _REGISTRY: Dict[torch.device, DriftFlags] = {}

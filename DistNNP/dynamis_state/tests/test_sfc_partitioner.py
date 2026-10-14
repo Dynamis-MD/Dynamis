@@ -96,9 +96,9 @@ class TestSFCPartitioner:
         expected = N / W
         for r in range(W):
             count = (info.partition_id == r).sum().item()
-            assert abs(count - expected) / expected < 0.20, (
-                f"Rank {r}: {count} atoms, expected ~{expected}"
-            )
+            assert (
+                abs(count - expected) / expected < 0.20
+            ), f"Rank {r}: {count} atoms, expected ~{expected}"
 
     def test_weighted_balances_edge_cost(self, device, curve_type):
         """With skewed edge_counts, weighted mode should balance total cost per partition."""
@@ -106,7 +106,7 @@ class TestSFCPartitioner:
         W = 2
         state = _make_global_state(N, device)
         weights = torch.ones(N, dtype=torch.long, device=device)
-        weights[:N // 2] = 10
+        weights[: N // 2] = 10
         state.edge_counts = weights
 
         env = _make_env(rank=0, world_size=W)
@@ -117,9 +117,9 @@ class TestSFCPartitioner:
             mask = info.partition_id == r
             cost = weights[mask].float().sum().item()
             ratio = cost / total
-            assert 0.20 < ratio < 0.80, (
-                f"Rank {r}: cost ratio {ratio:.2f}, expected ~0.50"
-            )
+            assert (
+                0.20 < ratio < 0.80
+            ), f"Rank {r}: cost ratio {ratio:.2f}, expected ~0.50"
 
     def test_unweighted_default(self, device, curve_type):
         """No edge_counts set → runs without error (unweighted mode)."""
@@ -148,7 +148,9 @@ class TestSFCPartitioner:
         labels_b = info.partition_id[50:]
         majority_a = labels_a.mode().values.item()
         majority_b = labels_b.mode().values.item()
-        assert majority_a != majority_b, "Two separated clusters should get different partitions"
+        assert (
+            majority_a != majority_b
+        ), "Two separated clusters should get different partitions"
         assert (labels_a == majority_a).sum().item() >= 40
         assert (labels_b == majority_b).sum().item() >= 40
 
@@ -211,7 +213,9 @@ class TestSFCPartitioner:
 
         assert (info.partition_id == 0).all()
         assert info.partition_indices.shape == (N,)
-        assert torch.equal(info.partition_indices.sort()[0], torch.arange(N, device=device))
+        assert torch.equal(
+            info.partition_indices.sort()[0], torch.arange(N, device=device)
+        )
 
     def test_more_workers_than_atoms(self, device, curve_type):
         """W > N: some partitions must be empty, no crash."""
@@ -239,7 +243,7 @@ class TestSFCCUDAProperties:
 
     @pytest.fixture(params=[SFCCurveType.Morton, SFCCurveType.Hilbert])
     def curve_type(self, request):
-        return request.value if hasattr(request, 'value') else request.param
+        return request.value if hasattr(request, "value") else request.param
 
     def test_determinism(self, curve_type):
         """Same input must produce identical partition_id across 10 runs."""
@@ -280,12 +284,12 @@ class TestSFCCUDAProperties:
         for r in range(W):
             cpu_count = (cpu_labels == r).sum().item()
             cuda_count = (cuda_labels == r).sum().item()
-            assert abs(cpu_count - expected) / expected < 0.25, (
-                f"CPU rank {r}: {cpu_count} atoms, expected ~{expected}"
-            )
-            assert abs(cuda_count - expected) / expected < 0.25, (
-                f"CUDA rank {r}: {cuda_count} atoms, expected ~{expected}"
-            )
+            assert (
+                abs(cpu_count - expected) / expected < 0.25
+            ), f"CPU rank {r}: {cpu_count} atoms, expected ~{expected}"
+            assert (
+                abs(cuda_count - expected) / expected < 0.25
+            ), f"CUDA rank {r}: {cuda_count} atoms, expected ~{expected}"
 
     def test_weighted_cpu_cuda_balance_consistency(self, curve_type):
         """Weighted CPU and CUDA paths produce similarly balanced partitions."""
@@ -315,9 +319,9 @@ class TestSFCCUDAProperties:
             for r in range(W):
                 cost = weights[labels == r].float().sum().item()
                 ratio = cost / total_cost
-                assert 0.10 < ratio < 0.45, (
-                    f"{path_name} rank {r}: cost ratio {ratio:.2f}, expected ~0.25"
-                )
+                assert (
+                    0.10 < ratio < 0.45
+                ), f"{path_name} rank {r}: cost ratio {ratio:.2f}, expected ~0.25"
 
 
 @requires_cuda
@@ -432,9 +436,9 @@ class TestSFCHaloMaps:
 
         for i in range(world_size):
             for j in range(world_size):
-                assert all_send[i, j].item() == all_recv[j, i].item(), (
-                    f"send[{i},{j}]={all_send[i,j]} != recv[{j},{i}]={all_recv[j,i]}"
-                )
+                assert (
+                    all_send[i, j].item() == all_recv[j, i].item()
+                ), f"send[{i},{j}]={all_send[i,j]} != recv[{j},{i}]={all_recv[j,i]}"
 
     def test_send_local_indices_valid(self, curve_type):
         """send_local_indices must be valid indices into local partition."""

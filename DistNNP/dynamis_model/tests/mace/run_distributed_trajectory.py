@@ -49,7 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--path", required=True)
     parser.add_argument("--model", default="medium-mpa-0")
     parser.add_argument("--head-name", default="")
-    parser.add_argument("--model-family", default="mp", choices=["mp", "off", "omol", "polar"])
+    parser.add_argument(
+        "--model-family", default="mp", choices=["mp", "off", "omol", "polar"]
+    )
     parser.add_argument(
         "--enable-cueq",
         action="store_true",
@@ -110,10 +112,19 @@ def main() -> None:
         if dist_env.global_rank == 0:
             merged = []
             for step in range(len(local_payload)):
-                rank_local_energies = [float(gathered[rank][step][0]) for rank in range(dist_env.world_size)]
-                vids = np.concatenate([gathered[rank][step][1] for rank in range(dist_env.world_size)])
-                pos = np.concatenate([gathered[rank][step][2] for rank in range(dist_env.world_size)])
-                vel = np.concatenate([gathered[rank][step][3] for rank in range(dist_env.world_size)])
+                rank_local_energies = [
+                    float(gathered[rank][step][0])
+                    for rank in range(dist_env.world_size)
+                ]
+                vids = np.concatenate(
+                    [gathered[rank][step][1] for rank in range(dist_env.world_size)]
+                )
+                pos = np.concatenate(
+                    [gathered[rank][step][2] for rank in range(dist_env.world_size)]
+                )
+                vel = np.concatenate(
+                    [gathered[rank][step][3] for rank in range(dist_env.world_size)]
+                )
                 order = np.argsort(vids)
                 frame = {
                     "energy": float(sum(rank_local_energies)),
@@ -140,7 +151,9 @@ def main() -> None:
                 "frames": merged,
             }
             torch.save(artifact, dist_dump)
-            print(f"Wrote merged {len(merged)}-step distributed trajectory to {dist_dump}")
+            print(
+                f"Wrote merged {len(merged)}-step distributed trajectory to {dist_dump}"
+            )
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()

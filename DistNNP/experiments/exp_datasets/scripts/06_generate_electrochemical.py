@@ -26,18 +26,28 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 OUT_DIR = SCRIPT_DIR / ".." / "electrochemical"
 
 SYSTEMS = {
-    "12k": dict(nx=20, ny=20, nz=4, water_height=40.0,
-                out="pt_water_12k_density.xyz",
-                desc="Pt 20×20×4 + 40 Å water (~14k atoms)"),
-    "17k": dict(nx=24, ny=24, nz=4, water_height=40.0,
-                out="pt_water_17k_density.xyz",
-                desc="Pt 24×24×4 + 40 Å water (~21k atoms)"),
+    "12k": dict(
+        nx=20,
+        ny=20,
+        nz=4,
+        water_height=40.0,
+        out="pt_water_12k_density.xyz",
+        desc="Pt 20×20×4 + 40 Å water (~14k atoms)",
+    ),
+    "17k": dict(
+        nx=24,
+        ny=24,
+        nz=4,
+        water_height=40.0,
+        out="pt_water_17k_density.xyz",
+        desc="Pt 24×24×4 + 40 Å water (~21k atoms)",
+    ),
 }
 
-LATTICE_A = 3.92       # Pt FCC lattice constant (Å)
-BUFFER_Z = 2.0         # Gap above/below slab before water starts (Å)
+LATTICE_A = 3.92  # Pt FCC lattice constant (Å)
+BUFFER_Z = 2.0  # Gap above/below slab before water starts (Å)
 WATER_SPACING = 3.103  # Grid spacing → ~0.0334 mol/Å³ liquid density
-PT_O_MIN_DIST = 2.8    # Minimum Pt–O distance (Å)
+PT_O_MIN_DIST = 2.8  # Minimum Pt–O distance (Å)
 SEED = 42
 
 
@@ -72,8 +82,10 @@ def generate_pt_water(nx, ny, nz, water_height, out_path, dry_run=False):
     ly = np.linalg.norm(cell[1])
     surface_area = np.linalg.norm(np.cross(cell[0], cell[1]))
 
-    print(f"  Slab: {n_pt} atoms, thickness {slab_thick:.1f} Å, "
-          f"surface {lx:.1f}×{ly:.1f} Å²={surface_area:.0f} Å²")
+    print(
+        f"  Slab: {n_pt} atoms, thickness {slab_thick:.1f} Å, "
+        f"surface {lx:.1f}×{ly:.1f} Å²={surface_area:.0f} Å²"
+    )
     print(f"  Water region: z = {water_z_start:.1f} – {water_z_end:.1f} Å")
 
     if dry_run:
@@ -107,12 +119,16 @@ def generate_pt_water(nx, ny, nz, water_height, out_path, dry_run=False):
     # H positions with random orientations
     bond_len = 0.9572
     half_angle = 104.52 / 2 * np.pi / 180
-    h1_local = np.array([bond_len * np.sin(half_angle), bond_len * np.cos(half_angle), 0.0])
-    h2_local = np.array([-bond_len * np.sin(half_angle), bond_len * np.cos(half_angle), 0.0])
+    h1_local = np.array(
+        [bond_len * np.sin(half_angle), bond_len * np.cos(half_angle), 0.0]
+    )
+    h2_local = np.array(
+        [-bond_len * np.sin(half_angle), bond_len * np.cos(half_angle), 0.0]
+    )
 
     phi = rng.uniform(0, 2 * np.pi, n_mol)
     cos_theta = rng.uniform(-1, 1, n_mol)
-    sin_theta = np.sqrt(1 - cos_theta ** 2)
+    sin_theta = np.sqrt(1 - cos_theta**2)
     psi = rng.uniform(0, 2 * np.pi, n_mol)
 
     h1_all = np.zeros_like(o_positions)
@@ -121,11 +137,13 @@ def generate_pt_water(nx, ny, nz, water_height, out_path, dry_run=False):
         cp, sp = np.cos(phi[i]), np.sin(phi[i])
         ct, st = cos_theta[i], sin_theta[i]
         cps, sps = np.cos(psi[i]), np.sin(psi[i])
-        R = np.array([
-            [cp * ct * cps - sp * sps, -cp * ct * sps - sp * cps, cp * st],
-            [sp * ct * cps + cp * sps, -sp * ct * sps + cp * cps, sp * st],
-            [-st * cps,                 st * sps,                  ct],
-        ])
+        R = np.array(
+            [
+                [cp * ct * cps - sp * sps, -cp * ct * sps - sp * cps, cp * st],
+                [sp * ct * cps + cp * sps, -sp * ct * sps + cp * cps, sp * st],
+                [-st * cps, st * sps, ct],
+            ]
+        )
         h1_all[i] = o_positions[i] + R @ h1_local
         h2_all[i] = o_positions[i] + R @ h2_local
 
@@ -152,9 +170,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate Pt(111) slab + water electrochemical systems"
     )
-    parser.add_argument("--systems", nargs="*", default=None,
-                        choices=list(SYSTEMS.keys()),
-                        help="Systems to generate (default: all)")
+    parser.add_argument(
+        "--systems",
+        nargs="*",
+        default=None,
+        choices=list(SYSTEMS.keys()),
+        help="Systems to generate (default: all)",
+    )
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--out-dir", type=Path, default=OUT_DIR)
     parser.add_argument("--overwrite", action="store_true")
@@ -175,12 +197,15 @@ def main():
 
         if out_path.exists() and not args.overwrite and not args.dry_run:
             from ase.io import read
+
             n = len(read(str(out_path)))
             print(f"  SKIP (exists): {out_path.name} ({n} atoms)")
             continue
 
         generate_pt_water(
-            nx=cfg["nx"], ny=cfg["ny"], nz=cfg["nz"],
+            nx=cfg["nx"],
+            ny=cfg["ny"],
+            nz=cfg["nz"],
             water_height=cfg["water_height"],
             out_path=out_path,
             dry_run=args.dry_run,

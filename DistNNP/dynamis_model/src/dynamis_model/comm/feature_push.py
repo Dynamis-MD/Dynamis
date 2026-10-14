@@ -3,7 +3,13 @@ import torch
 # Uncomment when the communication engine is implemented
 # from dynamis_model.dynamis_model_impl import feature_push
 
-from dynamis_state import DynamisState, PartitionMessagePassingInfo, Timer, TimerClass, Where
+from dynamis_state import (
+    DynamisState,
+    PartitionMessagePassingInfo,
+    Timer,
+    TimerClass,
+    Where,
+)
 from torch.autograd import Function
 from dynamis_model.comm.exchanger import Exchanger
 from typing import Tuple
@@ -75,8 +81,12 @@ class FeaturePushToExchange(Function):
         # Runs on the autograd worker thread, which has no open region of its own —
         # parent_id (captured in forward()) supplies the link to model_forward.
         t = Timer()
-        t.start("halo_exchange", TimerClass.Comm, Where.Device,
-                parent_id=getattr(ctx, "_timing_parent_span", 0))
+        t.start(
+            "halo_exchange",
+            TimerClass.Comm,
+            Where.Device,
+            parent_id=getattr(ctx, "_timing_parent_span", 0),
+        )
         recevied_features_grad = exchanger.feature_push_backward(
             grad_output, input_feature_shape, state.local_partition_info
         )

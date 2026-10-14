@@ -13,10 +13,10 @@ import torch.distributed as dist
 from typing import Union, Literal, Optional
 
 # Bits of the per-rank drift word (see SimState.write_local_drift_flag).
-DRIFT_TRIP = 1    # rebuild the halo before the next step
+DRIFT_TRIP = 1  # rebuild the halo before the next step
 DRIFT_BREACH = 2  # this step's graph was built past the displacement guarantee.
-                  # Debug only: never expected with the bit-0 rule; kept as a cheap
-                  # check for future debugging (e.g. a new integrator or a larger dt).
+# Debug only: never expected with the bit-0 rule; kept as a cheap
+# check for future debugging (e.g. a new integrator or a larger dt).
 
 ABSTRACT_PARTITIONERS = Union[
     SFCPartitioner, SimpleSpatialPartitioner, KDTreePartitioner
@@ -225,15 +225,17 @@ class SimState:
             ids = [order[starts[r] : starts[r + 1]] for r in range(self.world_size)]
             # Local arrays follow partition_indices; build_halo_maps indexes local atoms
             # in ascending-ID order. Both must agree for the send lists to be right.
-            assert torch.equal(ids[self.global_rank], info.partition_indices), (
-                "partition_indices is not in ascending global-ID order"
-            )
+            assert torch.equal(
+                ids[self.global_rank], info.partition_indices
+            ), "partition_indices is not in ascending global-ID order"
             m = max(counts)
             buf = local_positions.new_zeros((m, 3))
             buf[: counts[self.global_rank]] = local_positions
             gathered = local_positions.new_empty((self.world_size * m, 3))
             dist.all_gather_into_tensor(gathered, buf)
-            full = local_positions.new_empty((global_mol_info.atom_positions.shape[0], 3))
+            full = local_positions.new_empty(
+                (global_mol_info.atom_positions.shape[0], 3)
+            )
             for r in range(self.world_size):
                 full[ids[r]] = gathered[r * m : r * m + counts[r]]
             global_mol_info.atom_positions = full
@@ -282,7 +284,9 @@ class SimState:
             return
         vel = info.atom_velocities.detach()
         disp = (cur - ref).norm(dim=1)
-        reach = disp + dt * (vel.norm(dim=1) + (vel - self._prev_velocities).norm(dim=1))
+        reach = disp + dt * (
+            vel.norm(dim=1) + (vel - self._prev_velocities).norm(dim=1)
+        )
         word = (reach.max() >= threshold).to(torch.int32) * DRIFT_TRIP
         word += (disp.max() > threshold).to(torch.int32) * DRIFT_BREACH
         flag.copy_(word)

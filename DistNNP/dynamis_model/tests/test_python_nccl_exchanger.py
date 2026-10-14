@@ -7,6 +7,7 @@ Usage:
     torchrun --nproc_per_node=2 run_distributed_trajectory.py \\
         --path <temp dir path>
 """
+
 import argparse
 
 import torch
@@ -69,9 +70,7 @@ def main():
     local_frames = run_md_loop(sim, config)
     # pack into plain tensors/lists so all_gather_object doesn't need to pickle
     # anything GPU-resident
-    local_payload = [
-        (f["energy"], f["vid"], f["pos"], f["vel"]) for f in local_frames
-    ]
+    local_payload = [(f["energy"], f["vid"], f["pos"], f["vel"]) for f in local_frames]
 
     dist.barrier()
     gathered = [None] * dist_env.world_size
@@ -83,9 +82,15 @@ def main():
             total_energy = sum(gathered[r][step][0] for r in range(dist_env.world_size))
             import numpy as np
 
-            vids = np.concatenate([gathered[r][step][1] for r in range(dist_env.world_size)])
-            pos = np.concatenate([gathered[r][step][2] for r in range(dist_env.world_size)])
-            vel = np.concatenate([gathered[r][step][3] for r in range(dist_env.world_size)])
+            vids = np.concatenate(
+                [gathered[r][step][1] for r in range(dist_env.world_size)]
+            )
+            pos = np.concatenate(
+                [gathered[r][step][2] for r in range(dist_env.world_size)]
+            )
+            vel = np.concatenate(
+                [gathered[r][step][3] for r in range(dist_env.world_size)]
+            )
             order = np.argsort(vids)
             merged.append(
                 {

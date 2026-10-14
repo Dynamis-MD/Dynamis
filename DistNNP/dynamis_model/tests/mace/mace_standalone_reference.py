@@ -93,19 +93,33 @@ BUILTIN_SYSTEMS = {
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--builtin-system", choices=BUILTIN_SYSTEMS, default="natural_chain12")
-    parser.add_argument("--xyz-path", type=Path, help="XYZ/extxyz input; overrides --builtin-system.")
-    parser.add_argument("--model-family", choices=["mp", "off", "omol", "polar"], default="mp")
+    parser.add_argument(
+        "--builtin-system", choices=BUILTIN_SYSTEMS, default="natural_chain12"
+    )
+    parser.add_argument(
+        "--xyz-path", type=Path, help="XYZ/extxyz input; overrides --builtin-system."
+    )
+    parser.add_argument(
+        "--model-family", choices=["mp", "off", "omol", "polar"], default="mp"
+    )
     parser.add_argument("--model", default="medium-mpa-0")
-    parser.add_argument("--head-name", default="", help="Optional explicit MACE head name for metadata validation.")
+    parser.add_argument(
+        "--head-name",
+        default="",
+        help="Optional explicit MACE head name for metadata validation.",
+    )
     parser.add_argument(
         "--enable-cueq",
         action="store_true",
         help="Enable cuEquivariance for both the public calculator and raw-core reference paths.",
     )
     parser.add_argument("--ghost-cutoff-buffer", type=float, default=0.5)
-    parser.add_argument("--output", type=Path, required=True, help="Reference artifact path.")
-    parser.add_argument("--benchmark", action="store_true", help="Record standalone timing stats.")
+    parser.add_argument(
+        "--output", type=Path, required=True, help="Reference artifact path."
+    )
+    parser.add_argument(
+        "--benchmark", action="store_true", help="Record standalone timing stats."
+    )
     parser.add_argument("--benchmark-warmup", type=int, default=3)
     parser.add_argument("--benchmark-iterations", type=int, default=10)
     parser.add_argument("--benchmark-samples", type=int, default=5)
@@ -151,21 +165,27 @@ def load_xyz(path: Path) -> Dict[str, Any]:
         raise ValueError(f"XYZ first line must be an atom count: {path}") from exc
     atom_lines = [line for line in lines[2:] if line.strip()]
     if len(atom_lines) != num_atoms:
-        raise ValueError(f"XYZ declares {num_atoms} atoms but contains {len(atom_lines)} rows.")
+        raise ValueError(
+            f"XYZ declares {num_atoms} atoms but contains {len(atom_lines)} rows."
+        )
 
     atomic_numbers: List[int] = []
     positions: List[List[float]] = []
     for row_index, line in enumerate(atom_lines, start=3):
         fields = line.split()
         if len(fields) < 4:
-            raise ValueError(f"XYZ atom row {row_index} needs symbol and x/y/z coordinates.")
+            raise ValueError(
+                f"XYZ atom row {row_index} needs symbol and x/y/z coordinates."
+            )
         token = fields[0]
         if token.isdigit():
             atomic_number = int(token)
         elif token in ELEMENT_TO_Z:
             atomic_number = ELEMENT_TO_Z[token]
         else:
-            raise ValueError(f"Unsupported element symbol {token!r} on XYZ row {row_index}.")
+            raise ValueError(
+                f"Unsupported element symbol {token!r} on XYZ row {row_index}."
+            )
         atomic_numbers.append(atomic_number)
         positions.append([float(fields[1]), float(fields[2]), float(fields[3])])
 
@@ -200,7 +220,11 @@ def load_xyz(path: Path) -> Dict[str, Any]:
 
 
 def load_raw_structure(args: argparse.Namespace) -> Dict[str, Any]:
-    return load_xyz(args.xyz_path) if args.xyz_path else BUILTIN_SYSTEMS[args.builtin_system]()
+    return (
+        load_xyz(args.xyz_path)
+        if args.xyz_path
+        else BUILTIN_SYSTEMS[args.builtin_system]()
+    )
 
 
 def raw_to_atoms(raw: Dict[str, Any]) -> Atoms:
@@ -213,7 +237,9 @@ def raw_to_atoms(raw: Dict[str, Any]) -> Atoms:
     )
 
 
-def load_mace_calculator(model_family: str, model_name: str, device: str, enable_cueq: bool = False):
+def load_mace_calculator(
+    model_family: str, model_name: str, device: str, enable_cueq: bool = False
+):
     _require_standalone_mace()
     loaders = {"mp": mace_mp, "off": mace_off, "omol": mace_omol, "polar": mace_polar}
     if model_family not in loaders:
@@ -228,14 +254,20 @@ def load_mace_calculator(model_family: str, model_name: str, device: str, enable
 
 def evaluate_with_calculator(calculator, atoms: Atoms) -> Dict[str, Any]:
     _require_standalone_mace()
-    calculator.calculate(atoms, properties=["energy", "forces"], system_changes=all_changes)
+    calculator.calculate(
+        atoms, properties=["energy", "forces"], system_changes=all_changes
+    )
     return {
         "energy": float(calculator.results["energy"]),
-        "forces": torch.as_tensor(calculator.results["forces"], dtype=COMPUTE_DTYPE).cpu(),
+        "forces": torch.as_tensor(
+            calculator.results["forces"], dtype=COMPUTE_DTYPE
+        ).cpu(),
     }
 
 
-def _align_batch_dtype(batch_dict: Dict[str, torch.Tensor], model: torch.nn.Module) -> Dict[str, torch.Tensor]:
+def _align_batch_dtype(
+    batch_dict: Dict[str, torch.Tensor], model: torch.nn.Module
+) -> Dict[str, torch.Tensor]:
     model_dtype = next(model.parameters()).dtype
     aligned: Dict[str, torch.Tensor] = {}
     for key, value in batch_dict.items():
@@ -267,7 +299,9 @@ def build_core_model_batch(
         head=resolved_head,
     )
     model_heads = list(getattr(model, "heads", []))
-    z_table = AtomicNumberTable([int(value) for value in model.atomic_numbers.detach().cpu().tolist()])
+    z_table = AtomicNumberTable(
+        [int(value) for value in model.atomic_numbers.detach().cpu().tolist()]
+    )
     atomic_data = AtomicData.from_config(
         config=config,
         z_table=z_table,
@@ -286,7 +320,9 @@ def evaluate_with_core_model(
     device: torch.device,
     head_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    batch, edge_count = build_core_model_batch(raw, model, cutoff, device, head_name=head_name)
+    batch, edge_count = build_core_model_batch(
+        raw, model, cutoff, device, head_name=head_name
+    )
     out = model(
         batch,
         training=False,
@@ -336,7 +372,9 @@ def _timing_statistics(seconds_per_step: List[float], num_atoms: int) -> Dict[st
         "min_ms_per_step": ordered[0] * 1.0e3,
         "p95_ms_per_step": ordered[p95_index] * 1.0e3,
         "stdev_ms_per_step": stdev * 1.0e3,
-        "coefficient_of_variation_percent": 0.0 if mean == 0.0 else 100.0 * stdev / mean,
+        "coefficient_of_variation_percent": (
+            0.0 if mean == 0.0 else 100.0 * stdev / mean
+        ),
         "atoms_per_second": 0.0 if median == 0.0 else num_atoms / median,
     }
 
@@ -350,7 +388,9 @@ def benchmark_step_loop(
     num_atoms: int,
 ) -> Dict[str, Any]:
     if warmup < 0 or iterations <= 0 or samples <= 0:
-        raise ValueError("Benchmark warmup must be nonnegative; iterations and samples must be positive.")
+        raise ValueError(
+            "Benchmark warmup must be nonnegative; iterations and samples must be positive."
+        )
     for _ in range(warmup):
         step_fn()
     _synchronize(device)
@@ -405,7 +445,9 @@ def reference_artifact_metadata(
         "head_name": head_name,
         "enable_cueq": args.enable_cueq,
         "cutoff": cutoff,
-        "signature": _reference_signature(raw, args.model_family, args.model, head_name, args.enable_cueq),
+        "signature": _reference_signature(
+            raw, args.model_family, args.model, head_name, args.enable_cueq
+        ),
     }
 
 
@@ -417,15 +459,19 @@ def generate_reference_artifact(
 ) -> Dict[str, Any]:
     _require_standalone_mace()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    raw_model = load_raw_mace_model(
-        args.model_family,
-        args.model,
-        str(device),
-        enable_cueq=args.enable_cueq,
-    ).to(
-        device=device,
-        dtype=COMPUTE_DTYPE,
-    ).eval()
+    raw_model = (
+        load_raw_mace_model(
+            args.model_family,
+            args.model,
+            str(device),
+            enable_cueq=args.enable_cueq,
+        )
+        .to(
+            device=device,
+            dtype=COMPUTE_DTYPE,
+        )
+        .eval()
+    )
     head_name = resolve_model_head_name(raw_model, args.head_name or None)
     cutoff = float(raw_model.r_max.detach().cpu())
     calculator = load_mace_calculator(
@@ -437,9 +483,15 @@ def generate_reference_artifact(
     atoms = raw_to_atoms(raw)
 
     calculator_reference = evaluate_with_calculator(calculator, atoms)
-    core_model_reference = evaluate_with_core_model(raw, raw_model, cutoff, device, head_name=head_name)
-    calc_core_energy_delta = calculator_reference["energy"] - core_model_reference["energy"]
-    calc_core_force_delta = calculator_reference["forces"] - core_model_reference["forces"]
+    core_model_reference = evaluate_with_core_model(
+        raw, raw_model, cutoff, device, head_name=head_name
+    )
+    calc_core_energy_delta = (
+        calculator_reference["energy"] - core_model_reference["energy"]
+    )
+    calc_core_force_delta = (
+        calculator_reference["forces"] - core_model_reference["forces"]
+    )
 
     calculator_benchmark = None
     core_model_benchmark = None
@@ -449,7 +501,11 @@ def generate_reference_artifact(
                 "single-GPU standalone MACE calculator path; includes MACE internal graph construction, "
                 "calculator evaluation, energy extraction, and force extraction; excludes input parsing and model loading"
             ),
-            "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else str(device),
+            "device_name": (
+                torch.cuda.get_device_name(device)
+                if device.type == "cuda"
+                else str(device)
+            ),
             "warmup_steps": args.benchmark_warmup,
             "iterations_per_sample": args.benchmark_iterations,
             "num_samples": args.benchmark_samples,
@@ -469,13 +525,19 @@ def generate_reference_artifact(
                 "AtomicData.from_config graph construction, Batch.from_data_list packaging, and raw model forward "
                 "with force computation; excludes ASE calculator result packaging, host-side output extraction, and model loading"
             ),
-            "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else str(device),
+            "device_name": (
+                torch.cuda.get_device_name(device)
+                if device.type == "cuda"
+                else str(device)
+            ),
             "warmup_steps": args.benchmark_warmup,
             "iterations_per_sample": args.benchmark_iterations,
             "num_samples": args.benchmark_samples,
             "timing_method": "perf_counter with device synchronization",
             "timings": benchmark_step_loop(
-                lambda: run_core_model_forward(raw, raw_model, cutoff, device, head_name=head_name),
+                lambda: run_core_model_forward(
+                    raw, raw_model, cutoff, device, head_name=head_name
+                ),
                 device,
                 args.benchmark_warmup,
                 args.benchmark_iterations,
@@ -493,8 +555,12 @@ def generate_reference_artifact(
             "core_model_forces": core_model_reference["forces"],
             "core_model_edge_count": core_model_reference["edge_count"],
             "calculator_minus_core_model_energy": calc_core_energy_delta,
-            "calculator_minus_core_model_force_mae": float(calc_core_force_delta.abs().mean()),
-            "calculator_minus_core_model_force_max_abs": float(calc_core_force_delta.abs().max()),
+            "calculator_minus_core_model_force_mae": float(
+                calc_core_force_delta.abs().mean()
+            ),
+            "calculator_minus_core_model_force_max_abs": float(
+                calc_core_force_delta.abs().max()
+            ),
         },
         "calculator_benchmark": calculator_benchmark,
         "core_model_benchmark": core_model_benchmark,
@@ -519,7 +585,9 @@ def print_summary(artifact: Dict[str, Any]) -> None:
     print(f"artifact_version: {artifact['metadata']['artifact_version']}")
     print(f"calculator_energy: {artifact['reference']['calculator_energy']}")
     print(f"core_model_energy: {artifact['reference']['core_model_energy']}")
-    print(f"calculator_minus_core_model_energy: {artifact['reference']['calculator_minus_core_model_energy']}")
+    print(
+        f"calculator_minus_core_model_energy: {artifact['reference']['calculator_minus_core_model_energy']}"
+    )
     print(
         "calculator_minus_core_model_force_mae: "
         f"{artifact['reference']['calculator_minus_core_model_force_mae']}"
@@ -542,11 +610,15 @@ def print_summary(artifact: Dict[str, Any]) -> None:
 def main() -> None:
     args = build_parser().parse_args()
     raw = load_raw_structure(args)
-    artifact = generate_reference_artifact(raw, args, args.output, benchmark=args.benchmark)
+    artifact = generate_reference_artifact(
+        raw, args, args.output, benchmark=args.benchmark
+    )
     print_summary(artifact)
     if args.output_json:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
-        args.output_json.write_text(json.dumps(artifact, indent=2, default=str), encoding="utf-8")
+        args.output_json.write_text(
+            json.dumps(artifact, indent=2, default=str), encoding="utf-8"
+        )
 
 
 if __name__ == "__main__":

@@ -13,8 +13,14 @@ import torch
 
 # Directly load radius_graph_pbc module to avoid baseline's __init__.py import chain
 _RGB_PBC_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "baseline",
-    "local_fairchem", "graph", "radius_graph_pbc.py"
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "..",
+    "baseline",
+    "local_fairchem",
+    "graph",
+    "radius_graph_pbc.py",
 )
 _spec = importlib.util.spec_from_file_location("_radius_graph_pbc_ref", _RGB_PBC_PATH)
 _mod = importlib.util.module_from_spec(_spec)
@@ -24,8 +30,8 @@ radius_graph_pbc_v2 = _mod.radius_graph_pbc_v2
 # Import the CUDA implementation
 import dynamis_state.dynamis_state_impl as _impl
 
-
 # ===== Helpers =====
+
 
 class FakeData:
     """Minimal data object matching the interface expected by radius_graph_pbc_v2."""
@@ -57,7 +63,13 @@ def sort_edges(edge_index, cell_offsets):
     # Build composite key with sufficient spacing for each field
     # Each cell shift component is in [-3, 3], offset to [0, 6], needs 3 bits
     # tgt/src can be up to ~10K, needs 14 bits
-    key = (src << 40) | (tgt << 26) | ((cs[:, 0] + 4) << 6) | ((cs[:, 1] + 4) << 3) | (cs[:, 2] + 4)
+    key = (
+        (src << 40)
+        | (tgt << 26)
+        | ((cs[:, 0] + 4) << 6)
+        | ((cs[:, 1] + 4) << 3)
+        | (cs[:, 2] + 4)
+    )
     _, sort_idx = torch.sort(key)
 
     return edge_index[:, sort_idx], cell_offsets[sort_idx]
@@ -69,9 +81,9 @@ def compare_results(cuda_ei, cuda_co, ref_ei, ref_co, atol=1e-4):
     cuda_ei_s, cuda_co_s = sort_edges(cuda_ei.cpu(), cuda_co.cpu())
     ref_ei_s, ref_co_s = sort_edges(ref_ei.cpu(), ref_co.cpu())
 
-    assert cuda_ei_s.shape == ref_ei_s.shape, (
-        f"Edge count mismatch: CUDA={cuda_ei_s.shape[1]}, ref={ref_ei_s.shape[1]}"
-    )
+    assert (
+        cuda_ei_s.shape == ref_ei_s.shape
+    ), f"Edge count mismatch: CUDA={cuda_ei_s.shape[1]}, ref={ref_ei_s.shape[1]}"
     assert torch.equal(cuda_ei_s, ref_ei_s), "Edge indices mismatch"
     assert torch.allclose(cuda_co_s, ref_co_s, atol=atol), "Cell offsets mismatch"
 
@@ -87,6 +99,7 @@ def make_cubic_system(n_atoms, box_size, device="cuda"):
 
 
 # ===== Tests =====
+
 
 @pytest.fixture
 def device():
@@ -106,14 +119,16 @@ class TestCubicCell:
         max_neighbors = 50
 
         # Reference
-        ref_ei, ref_co, ref_nn = radius_graph_pbc_v2(
-            data, radius, max_neighbors
-        )
+        ref_ei, ref_co, ref_nn = radius_graph_pbc_v2(data, radius, max_neighbors)
 
         # CUDA
         cuda_ei, cuda_co, cuda_nn = _impl.radius_graph_pbc(
-            data.pos, data.cell[0], torch.tensor([True, True, True]),
-            radius, max_neighbors, False
+            data.pos,
+            data.cell[0],
+            torch.tensor([True, True, True]),
+            radius,
+            max_neighbors,
+            False,
         )
 
         compare_results(cuda_ei, cuda_co, ref_ei, ref_co)
@@ -127,8 +142,12 @@ class TestCubicCell:
 
         ref_ei, ref_co, _ = radius_graph_pbc_v2(data, radius, max_neighbors)
         cuda_ei, cuda_co, _ = _impl.radius_graph_pbc(
-            data.pos, data.cell[0], torch.tensor([True, True, True]),
-            radius, max_neighbors, False
+            data.pos,
+            data.cell[0],
+            torch.tensor([True, True, True]),
+            radius,
+            max_neighbors,
+            False,
         )
 
         compare_results(cuda_ei, cuda_co, ref_ei, ref_co)
@@ -144,8 +163,12 @@ class TestCubicCell:
 
         ref_ei, ref_co, _ = radius_graph_pbc_v2(data, radius, max_neighbors)
         cuda_ei, cuda_co, _ = _impl.radius_graph_pbc(
-            data.pos, data.cell[0], torch.tensor([True, True, True]),
-            radius, max_neighbors, False
+            data.pos,
+            data.cell[0],
+            torch.tensor([True, True, True]),
+            radius,
+            max_neighbors,
+            False,
         )
 
         compare_results(cuda_ei, cuda_co, ref_ei, ref_co)
@@ -159,11 +182,9 @@ class TestTriclinicCell:
         torch.manual_seed(99)
         n = 20
         # Triclinic cell: sheared box
-        cell = torch.tensor([
-            [15.0, 0.0, 0.0],
-            [3.0, 14.0, 0.0],
-            [1.0, 2.0, 13.0]
-        ], device=device).unsqueeze(0)
+        cell = torch.tensor(
+            [[15.0, 0.0, 0.0], [3.0, 14.0, 0.0], [1.0, 2.0, 13.0]], device=device
+        ).unsqueeze(0)
 
         # Generate positions within the cell using fractional coords
         frac = torch.rand(n, 3, device=device)
@@ -178,8 +199,12 @@ class TestTriclinicCell:
 
         ref_ei, ref_co, _ = radius_graph_pbc_v2(data, radius, max_neighbors)
         cuda_ei, cuda_co, _ = _impl.radius_graph_pbc(
-            data.pos, data.cell[0], torch.tensor([True, True, True]),
-            radius, max_neighbors, False
+            data.pos,
+            data.cell[0],
+            torch.tensor([True, True, True]),
+            radius,
+            max_neighbors,
+            False,
         )
 
         compare_results(cuda_ei, cuda_co, ref_ei, ref_co)
@@ -203,8 +228,7 @@ class TestPartialPBC:
             data, radius, max_neighbors, pbc=pbc_flags
         )
         cuda_ei, cuda_co, _ = _impl.radius_graph_pbc(
-            data.pos, data.cell[0], pbc_flags,
-            radius, max_neighbors, False
+            data.pos, data.cell[0], pbc_flags, radius, max_neighbors, False
         )
 
         compare_results(cuda_ei, cuda_co, ref_ei, ref_co)
@@ -224,8 +248,7 @@ class TestPartialPBC:
             data, radius, max_neighbors, pbc=pbc_flags
         )
         cuda_ei, cuda_co, _ = _impl.radius_graph_pbc(
-            data.pos, data.cell[0], pbc_flags,
-            radius, max_neighbors, False
+            data.pos, data.cell[0], pbc_flags, radius, max_neighbors, False
         )
 
         compare_results(cuda_ei, cuda_co, ref_ei, ref_co)
@@ -261,7 +284,7 @@ class TestEdgeCases:
         assert torch.all(ei[0] == 0)
         assert torch.all(ei[1] == 0)
         # Cell shifts should never be (0,0,0) since that's the self-image
-        zero_shifts = (co.abs().sum(dim=1) == 0)
+        zero_shifts = co.abs().sum(dim=1) == 0
         assert not torch.any(zero_shifts)
 
     def test_single_atom_no_pbc(self, device):
@@ -292,8 +315,12 @@ class TestSelectiveReplication:
         # We can't directly access source count, but we can verify correctness
         # and check that it works (the performance benefit is the fewer sources)
         cuda_ei, cuda_co, _ = _impl.radius_graph_pbc(
-            data.pos, data.cell[0], torch.tensor([True, True, True]),
-            radius, 1000, False
+            data.pos,
+            data.cell[0],
+            torch.tensor([True, True, True]),
+            radius,
+            1000,
+            False,
         )
 
         # Just verify it produces valid results
@@ -317,12 +344,9 @@ class TestMaxNeighbors:
         data = make_cubic_system(20, 10.0, device)
         radius = 4.0
 
-        ref_ei, ref_co, _ = radius_graph_pbc_v2(
-            data, radius, 0  # no limit
-        )
+        ref_ei, ref_co, _ = radius_graph_pbc_v2(data, radius, 0)  # no limit
         cuda_ei, cuda_co, _ = _impl.radius_graph_pbc(
-            data.pos, data.cell[0], torch.tensor([True, True, True]),
-            radius, 0, False
+            data.pos, data.cell[0], torch.tensor([True, True, True]), radius, 0, False
         )
 
         compare_results(cuda_ei, cuda_co, ref_ei, ref_co)
@@ -340,8 +364,12 @@ class TestLargeSystem:
 
         ref_ei, ref_co, _ = radius_graph_pbc_v2(data, radius, max_neighbors)
         cuda_ei, cuda_co, _ = _impl.radius_graph_pbc(
-            data.pos, data.cell[0], torch.tensor([True, True, True]),
-            radius, max_neighbors, False
+            data.pos,
+            data.cell[0],
+            torch.tensor([True, True, True]),
+            radius,
+            max_neighbors,
+            False,
         )
 
         compare_results(cuda_ei, cuda_co, ref_ei, ref_co)
@@ -360,8 +388,6 @@ class TestPythonWrapper:
         max_neighbors = 100
 
         ref_ei, ref_co, _ = radius_graph_pbc_v2(data, radius, max_neighbors)
-        cuda_ei, cuda_co, _ = radius_graph_pbc_cuda(
-            data, radius, max_neighbors
-        )
+        cuda_ei, cuda_co, _ = radius_graph_pbc_cuda(data, radius, max_neighbors)
 
         compare_results(cuda_ei, cuda_co, ref_ei, ref_co)

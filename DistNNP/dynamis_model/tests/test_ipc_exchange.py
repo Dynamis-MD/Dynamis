@@ -25,25 +25,38 @@ def _worker(rank, world_size, result_dict):
     device = torch.device(f"cuda:{rank}")
 
     # Init process group for IPC handle exchange via broadcast
-    dist.init_process_group("nccl", init_method="tcp://127.0.0.1:29500",
-                            rank=rank, world_size=world_size)
+    dist.init_process_group(
+        "nccl", init_method="tcp://127.0.0.1:29500", rank=rank, world_size=world_size
+    )
 
     # --- Test parameters ---
     N_local = [50, 60]  # rank 0 has 50 atoms, rank 1 has 60
-    F = 16              # feature dimension
+    F = 16  # feature dimension
     torch.manual_seed(42 + rank)
 
     # --- Build CSR halo maps ---
     # Rank 0 sends atoms [0,2,4,6,8] to rank 1
     # Rank 1 sends atoms [1,3,5,7,9,11] to rank 0
     if rank == 0:
-        send_local_indices = torch.tensor([0, 2, 4, 6, 8], dtype=torch.int64, device=device)
-        send_offsets = torch.tensor([0, 0, 5], dtype=torch.int64, device=device)  # nothing to self, 5 to rank 1
-        recv_offsets = torch.tensor([0, 0, 6], dtype=torch.int64, device=device)  # nothing from self, 6 from rank 1
+        send_local_indices = torch.tensor(
+            [0, 2, 4, 6, 8], dtype=torch.int64, device=device
+        )
+        send_offsets = torch.tensor(
+            [0, 0, 5], dtype=torch.int64, device=device
+        )  # nothing to self, 5 to rank 1
+        recv_offsets = torch.tensor(
+            [0, 0, 6], dtype=torch.int64, device=device
+        )  # nothing from self, 6 from rank 1
     else:
-        send_local_indices = torch.tensor([1, 3, 5, 7, 9, 11], dtype=torch.int64, device=device)
-        send_offsets = torch.tensor([0, 6, 6], dtype=torch.int64, device=device)  # 6 to rank 0, nothing to self
-        recv_offsets = torch.tensor([0, 5, 5], dtype=torch.int64, device=device)  # 5 from rank 0, nothing from self
+        send_local_indices = torch.tensor(
+            [1, 3, 5, 7, 9, 11], dtype=torch.int64, device=device
+        )
+        send_offsets = torch.tensor(
+            [0, 6, 6], dtype=torch.int64, device=device
+        )  # 6 to rank 0, nothing to self
+        recv_offsets = torch.tensor(
+            [0, 5, 5], dtype=torch.int64, device=device
+        )  # 5 from rank 0, nothing from self
 
     n_local = N_local[rank]
     total_send = send_offsets[-1].item()
@@ -63,8 +76,14 @@ def _worker(rank, world_size, result_dict):
     x_handle_tensor = torch.tensor(x_handle, dtype=torch.uint8, device=device)
     grad_handle_tensor = torch.tensor(grad_handle, dtype=torch.uint8, device=device)
 
-    all_x_handles_tensor = [torch.zeros(handle_size, dtype=torch.uint8, device=device) for _ in range(world_size)]
-    all_grad_handles_tensor = [torch.zeros(handle_size, dtype=torch.uint8, device=device) for _ in range(world_size)]
+    all_x_handles_tensor = [
+        torch.zeros(handle_size, dtype=torch.uint8, device=device)
+        for _ in range(world_size)
+    ]
+    all_grad_handles_tensor = [
+        torch.zeros(handle_size, dtype=torch.uint8, device=device)
+        for _ in range(world_size)
+    ]
 
     dist.all_gather(all_x_handles_tensor, x_handle_tensor)
     dist.all_gather(all_grad_handles_tensor, grad_handle_tensor)
@@ -73,27 +92,45 @@ def _worker(rank, world_size, result_dict):
     all_grad_handles = [t.cpu().tolist() for t in all_grad_handles_tensor]
 
     # Gather recv_offsets and num_local from all ranks
-    all_recv_offsets_list = [torch.zeros(world_size + 1, dtype=torch.int64, device=device) for _ in range(world_size)]
+    all_recv_offsets_list = [
+        torch.zeros(world_size + 1, dtype=torch.int64, device=device)
+        for _ in range(world_size)
+    ]
     dist.all_gather(all_recv_offsets_list, recv_offsets)
     all_recv_offsets = torch.stack(all_recv_offsets_list)  # [W, W+1]
 
-    all_num_local_list = [torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)]
-    dist.all_gather(all_num_local_list, torch.tensor([n_local], dtype=torch.int64, device=device))
+    all_num_local_list = [
+        torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)
+    ]
+    dist.all_gather(
+        all_num_local_list, torch.tensor([n_local], dtype=torch.int64, device=device)
+    )
     all_num_local = torch.cat(all_num_local_list)  # [W]
 
     # --- Setup IPC ---
     exchanger.setup_ipc(
-        x_buffer, grad_recv_buffer,
-        all_x_handles, all_grad_handles,
-        send_offsets, send_local_indices, recv_offsets,
-        all_recv_offsets, all_num_local,
-        n_local, F, rank, world_size,
+        x_buffer,
+        grad_recv_buffer,
+        all_x_handles,
+        all_grad_handles,
+        send_offsets,
+        send_local_indices,
+        recv_offsets,
+        all_recv_offsets,
+        all_num_local,
+        n_local,
+        F,
+        rank,
+        world_size,
     )
 
     # Setup push-sync counter
     sync_handle = exchanger.create_and_export_sync_handle()
     sync_handle_tensor = torch.tensor(sync_handle, dtype=torch.uint8, device=device)
-    all_sync_handles_tensor = [torch.zeros(len(sync_handle), dtype=torch.uint8, device=device) for _ in range(world_size)]
+    all_sync_handles_tensor = [
+        torch.zeros(len(sync_handle), dtype=torch.uint8, device=device)
+        for _ in range(world_size)
+    ]
     dist.all_gather(all_sync_handles_tensor, sync_handle_tensor)
     all_sync_handles = [t.cpu().tolist() for t in all_sync_handles_tensor]
     exchanger.setup_sync(all_sync_handles)
@@ -107,6 +144,7 @@ def _worker(rank, world_size, result_dict):
     # --- Forward push ---
     # Create a dummy partition_info (not used by IPC path, but required by interface)
     from dynamis_state import PartitionMessagePassingInfo
+
     dummy_info = PartitionMessagePassingInfo()
 
     output = exchanger.feature_push_forward(local_features, dummy_info)
@@ -115,8 +153,10 @@ def _worker(rank, world_size, result_dict):
 
     # --- Verify forward ---
     # output should be [n_local + total_recv, F]
-    assert output.shape == (n_local + total_recv, F), \
-        f"Rank {rank}: expected shape {(n_local + total_recv, F)}, got {output.shape}"
+    assert output.shape == (
+        n_local + total_recv,
+        F,
+    ), f"Rank {rank}: expected shape {(n_local + total_recv, F)}, got {output.shape}"
 
     # Local region should match local_features
     local_ok = torch.allclose(output[:n_local], local_features)
@@ -138,7 +178,9 @@ def _worker(rank, world_size, result_dict):
 
     # --- Test backward ---
     # Create gradient at output (all ones for simplicity)
-    grad_output = torch.ones(n_local + total_recv, F, dtype=torch.float32, device=device)
+    grad_output = torch.ones(
+        n_local + total_recv, F, dtype=torch.float32, device=device
+    )
 
     grad_input = exchanger.feature_push_backward(
         grad_output,
@@ -149,8 +191,10 @@ def _worker(rank, world_size, result_dict):
     torch.cuda.synchronize()
 
     # grad_input should be [n_local, F]
-    assert grad_input.shape == (n_local, F), \
-        f"Rank {rank}: grad_input shape expected {(n_local, F)}, got {grad_input.shape}"
+    assert grad_input.shape == (
+        n_local,
+        F,
+    ), f"Rank {rank}: grad_input shape expected {(n_local, F)}, got {grad_input.shape}"
 
     # Direct gradient is 1.0 for all local atoms.
     # Atoms that were sent also receive gradient 1.0 from the peer.

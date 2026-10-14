@@ -34,7 +34,7 @@ def check_mass_shape(mass, pos):
 def check_shapes_match(*args):
     """
     Check that input tensors have compatible shapes.
-    
+
     Raises:
         ValueError: If the tensor shapes are not compatible.
     """

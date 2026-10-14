@@ -103,6 +103,8 @@ def radius_graph_pbc_cuda(
             device = data.pos.device
             edge_index = torch.empty(2, 0, dtype=torch.long, device=device)
             cell_offsets = torch.empty(0, 3, dtype=torch.float, device=device)
-            num_neighbors_image = torch.zeros(batch_size, dtype=torch.long, device=device)
+            num_neighbors_image = torch.zeros(
+                batch_size, dtype=torch.long, device=device
+            )
 
         return edge_index, cell_offsets, num_neighbors_image

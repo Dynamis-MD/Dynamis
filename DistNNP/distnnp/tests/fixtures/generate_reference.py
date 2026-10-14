@@ -46,7 +46,9 @@ SNAPSHOT_STEPS = [1, 5, 10, 15, 20]
 OUTPUT_DIR = Path(__file__).parent
 
 
-def _make_global_state(num_atoms: int, seed: int, device: torch.device) -> MolecularInfo:
+def _make_global_state(
+    num_atoms: int, seed: int, device: torch.device
+) -> MolecularInfo:
     """
     Build a MolecularInfo with random positions/velocities in an 8x8x8 box,
     using a fixed seed so every rank gets the same initial universe.
@@ -79,6 +81,7 @@ def _make_env(rank: int, world_size: int, local_rank: int) -> DistEnvironment:
     env.num_nodes = world_size // gpus_per_node
     env.local_rank = local_rank
     return env
+
 
 def _build_simulator(molecular_info, env, integrator, device):
     epsilon = torch.ones(100, dtype=torch.float32, device=device)
@@ -140,15 +143,22 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
             torch.manual_seed(1000 + run)
             molecular_info = _make_global_state(16, 100, device)
             integrator = Langevin(dt=1e-3, gamma=1.0, kT=0.6)
-            simulator, lj_model = _build_simulator(molecular_info, env, integrator, device)
+            simulator, lj_model = _build_simulator(
+                molecular_info, env, integrator, device
+            )
 
             ke_acc, pe_acc = [], []
             for step in range(1, N_STEPS + 1):
                 energy, _ = simulator.step(integrator.dt)
                 if step > N_EQUIL:
                     local = simulator.state.local_state
-                    local_masses = TORCH_MASSES.to(local.atom_positions.device)[local.atom_types.reshape(-1)]
-                    ke = 0.5 * (local_masses.unsqueeze(1) * local.atom_velocities ** 2).sum()
+                    local_masses = TORCH_MASSES.to(local.atom_positions.device)[
+                        local.atom_types.reshape(-1)
+                    ]
+                    ke = (
+                        0.5
+                        * (local_masses.unsqueeze(1) * local.atom_velocities**2).sum()
+                    )
                     ke_acc.append(ke.item())
                     pe_acc.append(energy.item())
             ke_per_run.append(sum(ke_acc) / len(ke_acc))
@@ -178,8 +188,8 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
             if step in SNAPSHOT_STEPS:
                 snapshots[step] = {
                     "positions": simulator.state.pos.clone(),
-                    "forces":    forces.clone(),
-                    "energy":    energy.clone(),
+                    "forces": forces.clone(),
+                    "energy": energy.clone(),
                 }
 
         torch.save(snapshots, OUTPUT_DIR / f"lj_reference_{integrator_name}.pt")
@@ -204,6 +214,7 @@ def main():
     generate_reference("langevin", device)
 
     dist.destroy_process_group()
+
 
 if __name__ == "__main__":
     main()

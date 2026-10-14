@@ -12,8 +12,7 @@ import torch
 import torch.distributed as dist
 
 
-def benchmark_a2a(send_splits, recv_splits, feature_dim, device,
-                  warmup=20, iters=200):
+def benchmark_a2a(send_splits, recv_splits, feature_dim, device, warmup=20, iters=200):
     """Time all_to_all_single with given splits."""
     total_send = sum(send_splits)
     total_recv = sum(recv_splits)
@@ -23,9 +22,12 @@ def benchmark_a2a(send_splits, recv_splits, feature_dim, device,
 
     # Warmup
     for _ in range(warmup):
-        dist.all_to_all_single(recv_tensor, send_tensor,
-                               output_split_sizes=recv_splits,
-                               input_split_sizes=send_splits)
+        dist.all_to_all_single(
+            recv_tensor,
+            send_tensor,
+            output_split_sizes=recv_splits,
+            input_split_sizes=send_splits,
+        )
 
     torch.cuda.synchronize()
     dist.barrier()
@@ -35,9 +37,12 @@ def benchmark_a2a(send_splits, recv_splits, feature_dim, device,
 
     for i in range(iters):
         start_events[i].record()
-        dist.all_to_all_single(recv_tensor, send_tensor,
-                               output_split_sizes=recv_splits,
-                               input_split_sizes=send_splits)
+        dist.all_to_all_single(
+            recv_tensor,
+            send_tensor,
+            output_split_sizes=recv_splits,
+            input_split_sizes=send_splits,
+        )
         end_events[i].record()
 
     torch.cuda.synchronize()
@@ -68,8 +73,10 @@ def main():
         print(f"  world_size={world_size}, feature_dim={F}, atoms_per_peer={atoms}")
         print(f"  bytes_per_active_peer = {atoms * F * 4 / 1024:.1f} KB")
         print(f"{'='*70}")
-        print(f"\n  {'Active peers':<15} {'Sparsity':>10} {'Avg ms':>10} {'Min ms':>10}"
-              f" {'Data KB':>10} {'BW GB/s':>10}")
+        print(
+            f"\n  {'Active peers':<15} {'Sparsity':>10} {'Avg ms':>10} {'Min ms':>10}"
+            f" {'Data KB':>10} {'BW GB/s':>10}"
+        )
         print(f"  {'-'*65}")
 
     # Test different sparsity levels
@@ -97,8 +104,10 @@ def main():
         bw = data_kb * 1024 / (avg * 1e-3) / 1e9 if avg > 0 and data_kb > 0 else 0
 
         if rank == 0:
-            print(f"  {num_active:<15} {sparsity:>9.0%} {avg:>10.3f} {mn:>10.3f}"
-                  f" {data_kb:>10.1f} {bw:>10.2f}")
+            print(
+                f"  {num_active:<15} {sparsity:>9.0%} {avg:>10.3f} {mn:>10.3f}"
+                f" {data_kb:>10.1f} {bw:>10.2f}"
+            )
 
     # Also test with uniform vs non-uniform splits
     if rank == 0:

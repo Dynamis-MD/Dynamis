@@ -41,13 +41,14 @@ constexpr size_t kDeviceReapThreshold = 64;
 // Thread-local so two genuinely parallel regions on different threads never
 // become each other's parent by accident; see ParentSpan for the opt-out.
 // Ids start at 1 so 0 can mean "root" without a separate flag.
-std::atomic<uint64_t> g_next_span_id { 1 };
+std::atomic<uint64_t> g_next_span_id{ 1 };
 
 // Not a strict stack: overlapping regions are legal (`a.start; b.start; a.stop;
 // b.stop`), so removal searches for the id instead of assuming it's on top.
 thread_local std::vector<uint64_t> g_open_spans;
 
-Span open_span() {
+Span open_span()
+{
     Span s;
     s.id = g_next_span_id.fetch_add(1, std::memory_order_relaxed);
     s.parent = g_open_spans.empty() ? 0 : g_open_spans.back();
@@ -55,7 +56,8 @@ Span open_span() {
     return s;
 }
 
-void close_span(uint64_t id) {
+void close_span(uint64_t id)
+{
     for (size_t i = g_open_spans.size(); i-- > 0;) {
         if (g_open_spans[i] == id) {
             g_open_spans.erase(g_open_spans.begin() + static_cast<std::ptrdiff_t>(i));
@@ -66,13 +68,14 @@ void close_span(uint64_t id) {
 
 // close() runs from ~TimingRegistry() (implicitly noexcept), so failures are
 // reported, not thrown; stderr is guaranteed to exist at static destruction.
-void report_failure(const char* what, const char* detail) {
-    std::fprintf(stderr, "dynamis_state timing: %s: %s\n", what,
-                 detail ? detail : "unknown error");
+void report_failure(const char *what, const char *detail)
+{
+    std::fprintf(stderr, "dynamis_state timing: %s: %s\n", what, detail ? detail : "unknown error");
     std::fflush(stderr);
 }
 
-std::string bytes_to_hex(const std::string& bytes) {
+std::string bytes_to_hex(const std::string &bytes)
+{
     static const char hex[] = "0123456789abcdef";
     std::string out;
     out.reserve(bytes.size() * 2);
@@ -86,41 +89,61 @@ std::string bytes_to_hex(const std::string& bytes) {
 // Escape a string for inclusion in a JSON string literal. Keys reach us from Python
 // as arbitrary std::string; an unescaped '"' or newline would corrupt the whole
 // file's parse, not just one record.
-void append_json_escaped(std::string& out, const std::string& s) {
+void append_json_escaped(std::string &out, const std::string &s)
+{
     for (unsigned char c : s) {
         switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b";  break;
-            case '\f': out += "\\f";  break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (c < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                } else {
-                    out += static_cast<char>(c);
-                }
+        case '"':
+            out += "\\\"";
+            break;
+        case '\\':
+            out += "\\\\";
+            break;
+        case '\b':
+            out += "\\b";
+            break;
+        case '\f':
+            out += "\\f";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
+        default:
+            if (c < 0x20) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                out += buf;
+            } else {
+                out += static_cast<char>(c);
+            }
         }
     }
 }
 
-void append_i64(std::string& out, int64_t v) {
+void append_i64(std::string &out, int64_t v)
+{
     char buf[24];
     int n = std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
-    if (n > 0) out.append(buf, static_cast<size_t>(n));
+    if (n > 0)
+        out.append(buf, static_cast<size_t>(n));
 }
 
-void append_u64(std::string& out, uint64_t v) {
+void append_u64(std::string &out, uint64_t v)
+{
     char buf[24];
     int n = std::snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(v));
-    if (n > 0) out.append(buf, static_cast<size_t>(n));
+    if (n > 0)
+        out.append(buf, static_cast<size_t>(n));
 }
 
-std::string utc_now() {
+std::string utc_now()
+{
     std::time_t t = std::time(nullptr);
     std::tm tm{};
     gmtime_r(&t, &tm);
@@ -129,18 +152,25 @@ std::string utc_now() {
     return buf;
 }
 
-const char* timer_class_str(TimerClass cls) {
+const char *timer_class_str(TimerClass cls)
+{
     switch (cls) {
-        case TimerClass::Compute: return "compute";
-        case TimerClass::Comm:    return "comm";
-        case TimerClass::Wait:    return "wait";
-        case TimerClass::Other:   return "other";
-        case TimerClass::Total:   return "total";
+    case TimerClass::Compute:
+        return "compute";
+    case TimerClass::Comm:
+        return "comm";
+    case TimerClass::Wait:
+        return "wait";
+    case TimerClass::Other:
+        return "other";
+    case TimerClass::Total:
+        return "total";
     }
     return "other";
 }
 
-const char* where_str(Where where) {
+const char *where_str(Where where)
+{
     // Where::Both never reaches a record: it is expanded into one host and one
     // device record at Timer::stop().
     return where == Where::Device ? "device" : "host";
@@ -149,10 +179,10 @@ const char* where_str(Where where) {
 // A record. `t_start_ns` and `time_ns` are nullable: a failed CUDA call must not
 // fabricate a plausible-looking 0, so the record is emitted with a null time and an
 // `error` field naming the failure instead.
-void append_record(std::string& out, uint64_t step, const std::string& key,
-                   TimerClass cls, Where where, Span span,
-                   const int64_t* t_start_ns, const int64_t* time_ns,
-                   const char* err) {
+void append_record(std::string &out, uint64_t step, const std::string &key, TimerClass cls,
+                   Where where, Span span, const int64_t *t_start_ns, const int64_t *time_ns,
+                   const char *err)
+{
     out += "{\"type\":\"rec\",\"step\":";
     append_u64(out, step);
     out += ",\"key\":\"";
@@ -166,11 +196,20 @@ void append_record(std::string& out, uint64_t step, const std::string& key,
     out += "\",\"id\":";
     append_u64(out, span.id);
     out += ",\"parent_id\":";
-    if (span.parent) append_u64(out, span.parent); else out += "null";
+    if (span.parent)
+        append_u64(out, span.parent);
+    else
+        out += "null";
     out += ",\"t_start_ns\":";
-    if (t_start_ns) append_i64(out, *t_start_ns); else out += "null";
+    if (t_start_ns)
+        append_i64(out, *t_start_ns);
+    else
+        out += "null";
     out += ",\"time_ns\":";
-    if (time_ns) append_i64(out, *time_ns); else out += "null";
+    if (time_ns)
+        append_i64(out, *time_ns);
+    else
+        out += "null";
     if (err) {
         out += ",\"error\":\"";
         append_json_escaped(out, err);
@@ -181,16 +220,23 @@ void append_record(std::string& out, uint64_t step, const std::string& key,
 
 // mkdir -p, tolerating a directory that already exists. All ranks on a node race to
 // create a shared output_dir; the losers must not die on EEXIST.
-void mkdir_p(const std::string& path) {
-    if (path.empty()) return;
+void mkdir_p(const std::string &path)
+{
+    if (path.empty())
+        return;
     std::string acc;
     size_t i = 0;
-    if (path[0] == '/') { acc = "/"; i = 1; }
+    if (path[0] == '/') {
+        acc = "/";
+        i = 1;
+    }
     while (i <= path.size()) {
         size_t j = path.find('/', i);
-        if (j == std::string::npos) j = path.size();
+        if (j == std::string::npos)
+            j = path.size();
         if (j > i) {
-            if (!acc.empty() && acc.back() != '/') acc += '/';
+            if (!acc.empty() && acc.back() != '/')
+                acc += '/';
             acc.append(path, i, j - i);
             if (::mkdir(acc.c_str(), 0755) != 0 && errno != EEXIST)
                 throw std::runtime_error("timing: failed to create output dir '" + acc +
@@ -202,15 +248,17 @@ void mkdir_p(const std::string& path) {
 
 // Is there a usable CUDA device in this process? Called before anything that would
 // throw or abort on a CPU-only build/box.
-bool cuda_present() {
+bool cuda_present()
+{
     int count = 0;
     return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
 }
 
-cudaStream_t current_stream(int device_index) {
+cudaStream_t current_stream(int device_index)
+{
     return device_index < 0
-        ? c10::cuda::getCurrentCUDAStream().stream()
-        : c10::cuda::getCurrentCUDAStream(static_cast<c10::DeviceIndex>(device_index)).stream();
+            ? c10::cuda::getCurrentCUDAStream().stream()
+            : c10::cuda::getCurrentCUDAStream(static_cast<c10::DeviceIndex>(device_index)).stream();
 }
 
 } // namespace
@@ -219,25 +267,29 @@ cudaStream_t current_stream(int device_index) {
 // TimingRegistry
 // ---------------------------------------------------------------------------
 
-TimingRegistry& TimingRegistry::instance() {
+TimingRegistry &TimingRegistry::instance()
+{
     static TimingRegistry reg;
     return reg;
 }
 
-TimingRegistry::~TimingRegistry() {
+TimingRegistry::~TimingRegistry()
+{
     // Safety net: lands buffered records even if the run never reached close().
     close();
 }
 
-int64_t TimingRegistry::now_ns() {
+int64_t TimingRegistry::now_ns()
+{
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
 }
 
 void TimingRegistry::init(uint32_t rank_, uint32_t local_rank_, uint32_t world_size_,
-                          const std::string& run_id_, int32_t device_id_,
-                          const std::string& output_dir_) {
+                          const std::string &run_id_, int32_t device_id_,
+                          const std::string &output_dir_)
+{
     // Held for the whole of init(): close_io_locked() and reanchor_timebase() both
     // rebuild `ref_event`, and io_mu keeps a concurrent flush()/close() out of that.
     std::lock_guard<std::mutex> io(io_mu);
@@ -306,7 +358,8 @@ void TimingRegistry::init(uint32_t rank_, uint32_t local_rank_, uint32_t world_s
         pool_device = -1;
         if (cuda_present()) {
             int dev = -1;
-            if (cudaGetDevice(&dev) == cudaSuccess) pool_device = dev;
+            if (cudaGetDevice(&dev) == cudaSuccess)
+                pool_device = dev;
         }
         initialized = true;
     }
@@ -315,47 +368,55 @@ void TimingRegistry::init(uint32_t rank_, uint32_t local_rank_, uint32_t world_s
     reanchor_timebase();
 }
 
-void TimingRegistry::set_level(Level lvl) {
+void TimingRegistry::set_level(Level lvl)
+{
     level.store(lvl, std::memory_order_relaxed);
 }
 
-bool TimingRegistry::enabled() const {
+bool TimingRegistry::enabled() const
+{
     return level.load(std::memory_order_relaxed) != Level::Off;
 }
 
-void TimingRegistry::set_step(uint64_t s) {
+void TimingRegistry::set_step(uint64_t s)
+{
     step.store(s, std::memory_order_relaxed);
 }
 
-uint64_t TimingRegistry::current_step() const {
+uint64_t TimingRegistry::current_step() const
+{
     return step.load(std::memory_order_relaxed);
 }
 
-void TimingRegistry::note_key_locked(const std::string& key) {
-    if (call_order_seen.insert(key).second) call_order.push_back(key);
+void TimingRegistry::note_key_locked(const std::string &key)
+{
+    if (call_order_seen.insert(key).second)
+        call_order.push_back(key);
 }
 
-void TimingRegistry::append(const std::string& key, TimerClass cls, Where where,
-                            int64_t t_start_ns, int64_t time_ns, uint64_t rec_step,
-                            Span span) {
+void TimingRegistry::append(const std::string &key, TimerClass cls, Where where, int64_t t_start_ns,
+                            int64_t time_ns, uint64_t rec_step, Span span)
+{
     std::lock_guard<std::mutex> lk(mu);
-    if (!enabled() || !initialized || fd < 0) return;
+    if (!enabled() || !initialized || fd < 0)
+        return;
     note_key_locked(key);
-    append_record(out_buf, rec_step, key, cls, where, span, &t_start_ns, &time_ns,
-                  nullptr);
+    append_record(out_buf, rec_step, key, cls, where, span, &t_start_ns, &time_ns, nullptr);
 }
 
-void TimingRegistry::append_error(const std::string& key, TimerClass cls, Where where,
-                                  uint64_t rec_step, Span span, const char* err) {
+void TimingRegistry::append_error(const std::string &key, TimerClass cls, Where where,
+                                  uint64_t rec_step, Span span, const char *err)
+{
     std::lock_guard<std::mutex> lk(mu);
-    if (!enabled() || !initialized || fd < 0) return;
+    if (!enabled() || !initialized || fd < 0)
+        return;
     note_key_locked(key);
     append_record(out_buf, rec_step, key, cls, where, span, nullptr, nullptr, err);
 }
 
-void TimingRegistry::append_device(const std::string& key, TimerClass cls,
-                                   cudaEvent_t ev_start, cudaEvent_t ev_stop,
-                                   uint64_t rec_step, Span span) {
+void TimingRegistry::append_device(const std::string &key, TimerClass cls, cudaEvent_t ev_start,
+                                   cudaEvent_t ev_stop, uint64_t rec_step, Span span)
+{
     std::lock_guard<std::mutex> lk(mu);
     if (!enabled() || !initialized || fd < 0) {
         // Timing was disabled (or the registry closed) between start() and stop();
@@ -365,8 +426,9 @@ void TimingRegistry::append_device(const std::string& key, TimerClass cls,
         return;
     }
     note_key_locked(key);
-    device_records.push_back({key, cls, rec_step, span, ev_start, ev_stop});
-    if (device_records.size() >= kDeviceReapThreshold) reap_device_records_locked();
+    device_records.push_back({ key, cls, rec_step, span, ev_start, ev_stop });
+    if (device_records.size() >= kDeviceReapThreshold)
+        reap_device_records_locked();
 }
 
 // The run holds everything until close(), so what could grow unbounded is the CUDA
@@ -377,10 +439,11 @@ void TimingRegistry::append_device(const std::string& key, TimerClass cls,
 //
 // Emitted in completion order, not start order: every record carries its own step
 // and t_start_ns, and post-processing sorts on those.
-void TimingRegistry::reap_device_records_locked() {
+void TimingRegistry::reap_device_records_locked()
+{
     size_t keep = 0;
     for (size_t i = 0; i < device_records.size(); ++i) {
-        PendingDeviceRecord& rec = device_records[i];
+        PendingDeviceRecord &rec = device_records[i];
         // Any error other than "still in flight" is left for flush(), which blocks
         // and reports the failure rather than guessing at it from a query.
         if (cudaEventQuery(rec.ev_stop) != cudaSuccess) {
@@ -396,9 +459,10 @@ void TimingRegistry::reap_device_records_locked() {
 
 // `err`, when non-null, is the failure the caller hit while waiting on ev_stop; the
 // record is still emitted, carrying the error instead of a fabricated duration.
-void TimingRegistry::format_device_record(std::string& out, const PendingDeviceRecord& rec,
+void TimingRegistry::format_device_record(std::string &out, const PendingDeviceRecord &rec,
                                           cudaEvent_t ref, int64_t ref_ns, bool ref_ok,
-                                          const char* err) {
+                                          const char *err)
+{
     int64_t t_start_ns = 0;
     int64_t time_ns = 0;
     bool have_start = false;
@@ -419,7 +483,7 @@ void TimingRegistry::format_device_record(std::string& out, const PendingDeviceR
         float offset_ms = 0.0f;
         if (cudaEventElapsedTime(&offset_ms, ref, rec.ev_start) == cudaSuccess) {
             t_start_ns = ref_ns +
-                static_cast<int64_t>(std::llround(static_cast<double>(offset_ms) * 1e6));
+                    static_cast<int64_t>(std::llround(static_cast<double>(offset_ms) * 1e6));
             have_start = true;
         }
         // A failure here costs only the timeline position, not the duration —
@@ -427,9 +491,7 @@ void TimingRegistry::format_device_record(std::string& out, const PendingDeviceR
     }
 
     append_record(out, rec.step, rec.key, rec.cls, Where::Device, rec.span,
-                  have_start ? &t_start_ns : nullptr,
-                  have_time ? &time_ns : nullptr,
-                  err);
+                  have_start ? &t_start_ns : nullptr, have_time ? &time_ns : nullptr, err);
 }
 
 // ---------------------------------------------------------------------------
@@ -439,9 +501,11 @@ void TimingRegistry::format_device_record(std::string& out, const PendingDeviceR
 // Assumes one CUDA device per process (one rank per GPU); a stray cross-device
 // timer falls back to create/destroy rather than getting a wrong-device event.
 
-cudaEvent_t TimingRegistry::acquire_event() {
+cudaEvent_t TimingRegistry::acquire_event()
+{
     int dev = -1;
-    if (cudaGetDevice(&dev) != cudaSuccess) dev = -1;
+    if (cudaGetDevice(&dev) != cudaSuccess)
+        dev = -1;
     {
         std::lock_guard<std::mutex> lk(mu);
         if (dev >= 0 && dev == pool_device && !event_pool.empty()) {
@@ -453,12 +517,15 @@ cudaEvent_t TimingRegistry::acquire_event() {
     cudaEvent_t ev = nullptr;
     // cudaEventDefault keeps timing enabled; cudaEventDisableTiming would silently
     // make cudaEventElapsedTime fail.
-    if (cudaEventCreateWithFlags(&ev, cudaEventDefault) != cudaSuccess) return nullptr;
+    if (cudaEventCreateWithFlags(&ev, cudaEventDefault) != cudaSuccess)
+        return nullptr;
     return ev;
 }
 
-void TimingRegistry::release_event_locked(cudaEvent_t ev) {
-    if (!ev) return;
+void TimingRegistry::release_event_locked(cudaEvent_t ev)
+{
+    if (!ev)
+        return;
     if (pool_device >= 0 && event_pool.size() < kMaxPooledEvents) {
         event_pool.push_back(ev);
     } else {
@@ -466,13 +533,16 @@ void TimingRegistry::release_event_locked(cudaEvent_t ev) {
     }
 }
 
-void TimingRegistry::release_event(cudaEvent_t ev) {
+void TimingRegistry::release_event(cudaEvent_t ev)
+{
     std::lock_guard<std::mutex> lk(mu);
     release_event_locked(ev);
 }
 
-void TimingRegistry::drain_event_pool_locked() {
-    for (cudaEvent_t ev : event_pool) cudaEventDestroy(ev);
+void TimingRegistry::drain_event_pool_locked()
+{
+    for (cudaEvent_t ev : event_pool)
+        cudaEventDestroy(ev);
     event_pool.clear();
 }
 
@@ -489,7 +559,8 @@ void TimingRegistry::drain_event_pool_locked() {
 // t_start_ns drifts (~70us/hr, ~0.4ms after an hour) the longer a run goes without
 // a flush; durations (time_ns) are unaffected since start/stop events are always
 // close together. flush() at a quiescent point re-anchors and resets the drift.
-void TimingRegistry::retire_ref_event_locked() {
+void TimingRegistry::retire_ref_event_locked()
+{
     if (ref_event) {
         cudaEventDestroy(ref_event);
         ref_event = nullptr;
@@ -502,7 +573,8 @@ void TimingRegistry::retire_ref_event_locked() {
 // Built on a local handle, published in one assignment under `mu`: the autograd
 // thread reads ref_event holding only `mu` and must never see a half-built event.
 // io_mu (held by every caller) keeps this from racing a concurrent flush() reader.
-void TimingRegistry::reanchor_timebase() {
+void TimingRegistry::reanchor_timebase()
+{
     if (!cuda_present()) {
         std::lock_guard<std::mutex> lk(mu);
         retire_ref_event_locked();
@@ -539,26 +611,32 @@ void TimingRegistry::reanchor_timebase() {
 // Flush / close
 // ---------------------------------------------------------------------------
 
-void TimingRegistry::write_buffer_locked(const std::string& buf) {
-    if (fd < 0 || buf.empty()) return;
-    const char* p = buf.data();
+void TimingRegistry::write_buffer_locked(const std::string &buf)
+{
+    if (fd < 0 || buf.empty())
+        return;
+    const char *p = buf.data();
     size_t remaining = buf.size();
     while (remaining > 0) {
         ssize_t n = ::write(fd, p, remaining);
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             throw std::runtime_error("timing write failed: " + std::string(std::strerror(errno)));
         }
-        if (n == 0) throw std::runtime_error("timing write failed: write(2) returned 0");
+        if (n == 0)
+            throw std::runtime_error("timing write failed: write(2) returned 0");
         p += n;
         remaining -= static_cast<size_t>(n);
     }
 }
 
-void TimingRegistry::append_call_order_locked(std::string& out) const {
+void TimingRegistry::append_call_order_locked(std::string &out) const
+{
     out += "{\"type\":\"call_order\",\"order\":[";
     for (size_t i = 0; i < call_order.size(); ++i) {
-        if (i > 0) out += ",";
+        if (i > 0)
+            out += ",";
         out += "\"";
         append_json_escaped(out, call_order[i]);
         out += "\"";
@@ -566,13 +644,15 @@ void TimingRegistry::append_call_order_locked(std::string& out) const {
     out += "]}\n";
 }
 
-void TimingRegistry::flush() {
+void TimingRegistry::flush()
+{
     std::lock_guard<std::mutex> io(io_mu);
     flush_io_locked(/*reanchor=*/true);
 }
 
 // Requires io_mu; must NOT be called with mu held.
-void TimingRegistry::flush_io_locked(bool reanchor) {
+void TimingRegistry::flush_io_locked(bool reanchor)
+{
     std::vector<PendingDeviceRecord> pending;
     std::string hostbuf;
     cudaEvent_t ref = nullptr;
@@ -581,7 +661,8 @@ void TimingRegistry::flush_io_locked(bool reanchor) {
 
     {
         std::lock_guard<std::mutex> lk(mu);
-        if (!initialized || fd < 0) return;
+        if (!initialized || fd < 0)
+            return;
         pending.swap(device_records);
         hostbuf.swap(out_buf);
         out_buf.reserve(kBufReserve);
@@ -598,7 +679,7 @@ void TimingRegistry::flush_io_locked(bool reanchor) {
     std::vector<cudaEvent_t> recycled;
     recycled.reserve(pending.size() * 2);
 
-    for (auto& rec : pending) {
+    for (auto &rec : pending) {
         // Unlike the reap path this waits: flush() is the last chance to read these,
         // so a record still in flight must be blocked on rather than skipped.
         cudaError_t e = cudaEventSynchronize(rec.ev_stop);
@@ -612,7 +693,8 @@ void TimingRegistry::flush_io_locked(bool reanchor) {
     {
         std::lock_guard<std::mutex> lk(mu);
         if (fd < 0) {
-            for (cudaEvent_t ev : recycled) cudaEventDestroy(ev);
+            for (cudaEvent_t ev : recycled)
+                cudaEventDestroy(ev);
             return;
         }
         std::string buf;
@@ -623,19 +705,22 @@ void TimingRegistry::flush_io_locked(bool reanchor) {
         // leaves a complete call_order line — the last one in the file wins.
         append_call_order_locked(buf);
         write_buffer_locked(buf);
-        for (cudaEvent_t ev : recycled) release_event_locked(ev);
+        for (cudaEvent_t ev : recycled)
+            release_event_locked(ev);
     }
 
-    if (reanchor) reanchor_timebase();
+    if (reanchor)
+        reanchor_timebase();
 }
 
 // Reached from ~TimingRegistry() (implicitly noexcept) — nothing here may escape.
 // A failed write is ordinary (a full disk) and must not turn exit into an abort.
-void TimingRegistry::close() {
+void TimingRegistry::close()
+{
     try {
         std::lock_guard<std::mutex> io(io_mu);
         close_io_locked();
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         report_failure("close", e.what());
     } catch (...) {
         report_failure("close", nullptr);
@@ -643,17 +728,19 @@ void TimingRegistry::close() {
 }
 
 // Requires io_mu; must NOT be called with mu held.
-void TimingRegistry::close_io_locked() {
+void TimingRegistry::close_io_locked()
+{
     {
         std::lock_guard<std::mutex> lk(mu);
-        if (!initialized && fd < 0) return;
+        if (!initialized && fd < 0)
+            return;
     }
 
     // A write failure must not stop the fd from being closed or the pending events
     // from being destroyed below, so the drain is contained rather than propagated.
     try {
         flush_io_locked(/*reanchor=*/false);
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         report_failure("flush during close", e.what());
     } catch (...) {
         report_failure("flush during close", nullptr);
@@ -663,14 +750,15 @@ void TimingRegistry::close_io_locked() {
     close_locked();
 }
 
-void TimingRegistry::close_locked() noexcept {
+void TimingRegistry::close_locked() noexcept
+{
     if (fd >= 0) {
         std::string buf;
         buf.swap(out_buf);
         if (!buf.empty()) {
             try {
                 write_buffer_locked(buf);
-            } catch (const std::exception& e) {
+            } catch (const std::exception &e) {
                 report_failure("final write", e.what());
             } catch (...) {
                 report_failure("final write", nullptr);
@@ -681,7 +769,7 @@ void TimingRegistry::close_locked() noexcept {
     }
     // Anything appended between flush() and here was never read; destroy the events
     // rather than leaking them.
-    for (auto& rec : device_records) {
+    for (auto &rec : device_records) {
         cudaEventDestroy(rec.ev_start);
         cudaEventDestroy(rec.ev_stop);
     }
@@ -695,11 +783,14 @@ void TimingRegistry::close_locked() noexcept {
 // Timer
 // ---------------------------------------------------------------------------
 
-Timer::~Timer() {
+Timer::~Timer()
+{
     // start() without a matching stop(): the events were never transferred to the
     // registry, so hand them back here rather than leaking CUDA resources.
-    if (ev_start) TimingRegistry::instance().release_event(ev_start);
-    if (ev_stop)  TimingRegistry::instance().release_event(ev_stop);
+    if (ev_start)
+        TimingRegistry::instance().release_event(ev_start);
+    if (ev_stop)
+        TimingRegistry::instance().release_event(ev_stop);
     ev_start = nullptr;
     ev_stop = nullptr;
 
@@ -711,21 +802,24 @@ Timer::~Timer() {
     }
 }
 
-uint64_t Timer::current_span_id() {
+uint64_t Timer::current_span_id()
+{
     return g_open_spans.empty() ? 0 : g_open_spans.back();
 }
 
-void Timer::begin(std::string_view key_, TimerClass cls_, Where where_,
-                  cudaStream_t stream_, ParentSpan parent) {
-    TimingRegistry& reg = TimingRegistry::instance();
-    if (!reg.enabled()) return;
+void Timer::begin(std::string_view key_, TimerClass cls_, Where where_, cudaStream_t stream_,
+                  ParentSpan parent)
+{
+    TimingRegistry &reg = TimingRegistry::instance();
+    if (!reg.enabled())
+        return;
 
     if (running) {
         // A missing stop() otherwise yields a plausible-looking wrong number and
         // silently leaks the previous event pair — a call-site bug, so hard error.
-        throw std::logic_error(
-            "dynamis_state::Timer: start(\"" + std::string(key_) +
-            "\") called while \"" + key + "\" is still running — a stop() is missing");
+        throw std::logic_error("dynamis_state::Timer: start(\"" + std::string(key_) +
+                               "\") called while \"" + key +
+                               "\" is still running — a stop() is missing");
     }
 
     key = key_;
@@ -736,32 +830,37 @@ void Timer::begin(std::string_view key_, TimerClass cls_, Where where_,
     // Opened before the work runs, so anything launched on this thread nests
     // underneath it; an explicit parent only redirects the upward link.
     span = open_span();
-    if (parent.id) span.parent = parent.id;
+    if (parent.id)
+        span.parent = parent.id;
     running = true;
 
     if (where == Where::Device || where == Where::Both) {
         ev_start = reg.acquire_event();
         ev_stop = reg.acquire_event();
-        if (ev_start) cudaEventRecord(ev_start, stream);
+        if (ev_start)
+            cudaEventRecord(ev_start, stream);
     }
     // Taken last so the host span starts as close to the work as possible.
-    if (where == Where::Host || where == Where::Both) t0_ns = TimingRegistry::now_ns();
+    if (where == Where::Host || where == Where::Both)
+        t0_ns = TimingRegistry::now_ns();
 }
 
-void Timer::start(std::string_view key_, TimerClass cls_, Where where_,
-                  cudaStream_t stream_) {
+void Timer::start(std::string_view key_, TimerClass cls_, Where where_, cudaStream_t stream_)
+{
     begin(key_, cls_, where_, stream_, ParentSpan{});
 }
 
-void Timer::start(std::string_view key_, TimerClass cls_, Where where_) {
+void Timer::start(std::string_view key_, TimerClass cls_, Where where_)
+{
     start(key_, cls_, where_, ParentSpan{});
 }
 
-void Timer::start(std::string_view key_, TimerClass cls_, Where where_,
-                  ParentSpan parent) {
+void Timer::start(std::string_view key_, TimerClass cls_, Where where_, ParentSpan parent)
+{
     // Level check before the stream lookup: that ordering is why the lookup lives
     // here instead of the caller's argument list, keeping Level::Off a single load.
-    if (!TimingRegistry::instance().enabled()) return;
+    if (!TimingRegistry::instance().enabled())
+        return;
 
     cudaStream_t s = nullptr;
     if (where_ == Where::Device || where_ == Where::Both) {
@@ -775,14 +874,16 @@ void Timer::start(std::string_view key_, TimerClass cls_, Where where_,
     begin(key_, cls_, where_, s, parent);
 }
 
-void Timer::stop() {
-    if (!running) return;
+void Timer::stop()
+{
+    if (!running)
+        return;
     running = false;
     // Closed before appending: the region is over, so a later region on this thread
     // is its sibling, not its child.
     close_span(span.id);
 
-    TimingRegistry& reg = TimingRegistry::instance();
+    TimingRegistry &reg = TimingRegistry::instance();
 
     if (where == Where::Device || where == Where::Both) {
         if (ev_start && ev_stop) {
@@ -791,15 +892,13 @@ void Timer::stop() {
                 // Ownership of the pair transfers to the registry for a deferred read.
                 reg.append_device(key, cls, ev_start, ev_stop, step, span);
             } else {
-                reg.append_error(key, cls, Where::Device, step, span,
-                                 cudaGetErrorName(e));
+                reg.append_error(key, cls, Where::Device, step, span, cudaGetErrorName(e));
                 reg.release_event(ev_start);
                 reg.release_event(ev_stop);
             }
         } else {
             // Event creation failed — say so rather than dropping the region silently.
-            reg.append_error(key, cls, Where::Device, step, span,
-                             "cudaEventCreate failed");
+            reg.append_error(key, cls, Where::Device, step, span, "cudaEventCreate failed");
             reg.release_event(ev_start);
             reg.release_event(ev_stop);
         }
