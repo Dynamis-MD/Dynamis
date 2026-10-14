@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "Dynamis"
+type: software
+authors:
+  - family-names: "Chiu"
+    given-names: "Kenneth"
+  - family-names: "Qin"
+    given-names: "Huanyi"
+  - family-names: "Zaman"
+    given-names: "Shehtab"
+doi: "10.5281/zenodo.23377445"
+license: MIT
+repository-code: "https://github.com/dynamis-md/Dynamis"
