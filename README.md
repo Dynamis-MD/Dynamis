@@ -86,7 +86,7 @@ Please cite the software release:
 ```bibtex
 @software{dynamis,
   author    = {Chiu, Kenneth and Zaman, Shehtab and Qin, Huanyi and
-               Smolenski, Obadiah and Kostiukov, Preston and Cramer, Robin and
+               Smolenski, Obadiah and Kostioukov, Preston and Cramer, Robin and
                Malhotra, Hiten and Saravanan Indira, Jayakaran},
   title     = {Dynamis},
   year      = {2026},
