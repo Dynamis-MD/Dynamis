@@ -43,6 +43,7 @@ runs that have zero distributed code involved. If your chosen Phase-2
 schedule doesn't comfortably exceed that self-comparison at every step, it
 will produce false failures no matter what the distributed code does.
 """
+
 import os
 import socket
 
@@ -103,8 +104,7 @@ def _generate_positions(
     seed: int,
     max_attempts_per_atom: int = 200,
 ) -> np.ndarray:
-    """Rejection-sample positions under periodic minimum-image distance.
-    """
+    """Rejection-sample positions under periodic minimum-image distance."""
     rng = np.random.default_rng(seed)
     positions = np.empty((n_atoms, 3))
     for i in range(n_atoms):
@@ -146,7 +146,10 @@ def ensure_test_structure(
 
     positions = _generate_positions(n_atoms, SIDE_LENGTH_ANGSTROM, min_distance, seed)
     atoms = Atoms(
-        ELEMENT_SYMBOL * n_atoms, positions=positions, cell=[SIDE_LENGTH_ANGSTROM] * 3, pbc=True
+        ELEMENT_SYMBOL * n_atoms,
+        positions=positions,
+        cell=[SIDE_LENGTH_ANGSTROM] * 3,
+        pbc=True,
     )
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     write(path, atoms)
@@ -285,7 +288,9 @@ def energy_oscillation_std(traj) -> float:
     return float(np.std(residual))
 
 
-def compute_rdf(positions: np.ndarray, cell_length: float, r_max=RDF_R_MAX, n_bins=RDF_N_BINS):
+def compute_rdf(
+    positions: np.ndarray, cell_length: float, r_max=RDF_R_MAX, n_bins=RDF_N_BINS
+):
     """g(r) under periodic minimum-image convention, cubic cell."""
     n = positions.shape[0]
     diffs = positions[:, None, :] - positions[None, :, :]
@@ -340,20 +345,22 @@ def build_comparison_report(ref_traj, dist_traj) -> list:
 
         vid_match = bool(np.array_equal(ref_frame["vid"], dist_frame["vid"]))
 
-        rows.append({
-            "step": step,
-            "is_rebalance_step": step % REBALANCE_INTERVAL == 0,
-            "vid_match": vid_match,
-            "ref_energy": ref_frame["energy"],
-            "dist_energy": dist_frame["energy"],
-            "energy_diff": dist_frame["energy"] - ref_frame["energy"],
-            "pos_rmsd": rmsd(dist_frame["pos"], ref_frame["pos"]),
-            "vel_rmsd": rmsd(dist_frame["vel"], ref_frame["vel"]),
-            "pos_max_abs": float(pos_per_atom[pos_max_idx]),
-            "pos_max_atom_vid": int(ref_frame["vid"][pos_max_idx]),
-            "vel_max_abs": float(vel_per_atom[vel_max_idx]),
-            "vel_max_atom_vid": int(ref_frame["vid"][vel_max_idx]),
-        })
+        rows.append(
+            {
+                "step": step,
+                "is_rebalance_step": step % REBALANCE_INTERVAL == 0,
+                "vid_match": vid_match,
+                "ref_energy": ref_frame["energy"],
+                "dist_energy": dist_frame["energy"],
+                "energy_diff": dist_frame["energy"] - ref_frame["energy"],
+                "pos_rmsd": rmsd(dist_frame["pos"], ref_frame["pos"]),
+                "vel_rmsd": rmsd(dist_frame["vel"], ref_frame["vel"]),
+                "pos_max_abs": float(pos_per_atom[pos_max_idx]),
+                "pos_max_atom_vid": int(ref_frame["vid"][pos_max_idx]),
+                "vel_max_abs": float(vel_per_atom[vel_max_idx]),
+                "vel_max_atom_vid": int(ref_frame["vid"][vel_max_idx]),
+            }
+        )
     return rows
 
 
@@ -367,6 +374,7 @@ def write_comparison_report_csv(rows: list, path: str) -> None:
         writer.writerows(rows)
     print(f"Wrote full {len(rows)}-step comparison report to {path}")
 
+
 def compare_trajectories(ref_traj, dist_traj, report_path=None):
     """Raises AssertionError on the first violated check.
 
@@ -377,9 +385,9 @@ def compare_trajectories(ref_traj, dist_traj, report_path=None):
     if report_path is not None:
         rows = build_comparison_report(ref_traj, dist_traj)
         write_comparison_report_csv(rows, report_path)
-    assert len(dist_traj) == len(ref_traj) == N_STEPS, (
-        f"frame count mismatch: ref={len(ref_traj)} dist={len(dist_traj)} expected={N_STEPS}"
-    )
+    assert (
+        len(dist_traj) == len(ref_traj) == N_STEPS
+    ), f"frame count mismatch: ref={len(ref_traj)} dist={len(dist_traj)} expected={N_STEPS}"
 
     # Vertex ID sets must match exactly at every step, regardless of phase.
     # This is a structural check (redistribute_atoms / vertex tracking), not
@@ -395,15 +403,23 @@ def compare_trajectories(ref_traj, dist_traj, report_path=None):
         ref_frame, dist_frame = ref_traj[step], dist_traj[step]
 
         np.testing.assert_allclose(
-            dist_frame["pos"], ref_frame["pos"], atol=POS_VEL_TOL, rtol=0,
+            dist_frame["pos"],
+            ref_frame["pos"],
+            atol=POS_VEL_TOL,
+            rtol=0,
             err_msg=f"[phase 1] positions diverged beyond schedule at step {step}",
         )
         np.testing.assert_allclose(
-            dist_frame["vel"], ref_frame["vel"], atol=POS_VEL_TOL, rtol=0,
+            dist_frame["vel"],
+            ref_frame["vel"],
+            atol=POS_VEL_TOL,
+            rtol=0,
             err_msg=f"[phase 1] velocities diverged beyond schedule at step {step}",
         )
         np.testing.assert_allclose(
-            dist_frame["energy"], ref_frame["energy"], rtol=ENERGY_RTOL,
+            dist_frame["energy"],
+            ref_frame["energy"],
+            rtol=ENERGY_RTOL,
             err_msg=f"[phase 1] total energy diverged beyond {ENERGY_RTOL} relative at step {step}",
         )
 
@@ -434,7 +450,9 @@ def compare_trajectories(ref_traj, dist_traj, report_path=None):
     dist_slope = energy_drift_slope(dist_traj)
     ref_std = energy_oscillation_std(ref_traj)
     dist_std = energy_oscillation_std(dist_traj)
-    slope_bound = max(ENERGY_DRIFT_MARGIN * abs(ref_slope), ENERGY_SLOPE_FLOOR_EV_PER_STEP)
+    slope_bound = max(
+        ENERGY_DRIFT_MARGIN * abs(ref_slope), ENERGY_SLOPE_FLOOR_EV_PER_STEP
+    )
     std_bound = max(ENERGY_DRIFT_MARGIN * ref_std, ENERGY_STD_FLOOR_EV)
     print(
         f"[phase 2] energy drift slope: reference={ref_slope:.3e} eV/step, "
@@ -460,7 +478,9 @@ def compare_trajectories(ref_traj, dist_traj, report_path=None):
     r, g_ref = averaged_rdf(ref_traj, RDF_LAST_K_FRAMES, SIDE_LENGTH_ANGSTROM)
     _, g_dist = averaged_rdf(dist_traj, RDF_LAST_K_FRAMES, SIDE_LENGTH_ANGSTROM)
     rdf_diff = float(np.mean(np.abs(g_ref - g_dist)))
-    print(f"[phase 2] RDF mean abs difference (last {RDF_LAST_K_FRAMES} frames): {rdf_diff:.4f}")
+    print(
+        f"[phase 2] RDF mean abs difference (last {RDF_LAST_K_FRAMES} frames): {rdf_diff:.4f}"
+    )
     assert rdf_diff <= RDF_TOL, (
         f"[phase 2] RDF mean abs difference {rdf_diff:.4f} exceeds loose sanity threshold "
         f"{RDF_TOL} — structural statistics diverged more than expected even accounting for chaos."
@@ -471,7 +491,10 @@ def compare_trajectories(ref_traj, dist_traj, report_path=None):
 # Calibration helper — NOT part of the pass/fail test, run manually first
 # ---------------------------------------------------------------------------
 
-def reference_vs_reference_check(structure_path: str, output_dir_a: str, output_dir_b: str):
+
+def reference_vs_reference_check(
+    structure_path: str, output_dir_a: str, output_dir_b: str
+):
     """Runs the world_size=1 reference twice and reports RMSD-of-difference
     per step between two runs that share zero distributed code. Use this to
     sanity-check that _pos_rmsd_tolerance() / _vel_rmsd_tolerance() above
@@ -507,7 +530,9 @@ def reference_vs_reference_check(structure_path: str, output_dir_a: str, output_
     traj_b = _one_run(output_dir_b)
     diffs = rmsd_between_trajectories(traj_a, traj_b)
 
-    print(f"{'step':>4}  {'pos_rmsd':>12}  {'pos_tol':>12}  {'vel_rmsd':>12}  {'vel_tol':>12}")
+    print(
+        f"{'step':>4}  {'pos_rmsd':>12}  {'pos_tol':>12}  {'vel_rmsd':>12}  {'vel_tol':>12}"
+    )
     for step in range(N_STEPS):
         if step <= EARLY_PHASE_STEPS:
             pos_tol = POS_VEL_TOL
@@ -515,7 +540,11 @@ def reference_vs_reference_check(structure_path: str, output_dir_a: str, output_
         else:
             pos_tol = _pos_rmsd_tolerance(step)
             vel_tol = _vel_rmsd_tolerance(step)
-        flag = "  <-- EXCEEDS TOLERANCE" if diffs["pos"][step] > pos_tol or diffs["vel"][step] > vel_tol else ""
+        flag = (
+            "  <-- EXCEEDS TOLERANCE"
+            if diffs["pos"][step] > pos_tol or diffs["vel"][step] > vel_tol
+            else ""
+        )
         print(
             f"{step:>4}  {diffs['pos'][step]:>12.6f}  {pos_tol:>12.6f}  "
             f"{diffs['vel'][step]:>12.6f}  {vel_tol:>12.6f}{flag}"

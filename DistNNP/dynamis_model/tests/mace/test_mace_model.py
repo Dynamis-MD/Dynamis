@@ -109,19 +109,35 @@ def build_parser() -> argparse.ArgumentParser:
         "run-distributed",
         help="Run distributed MACEModel and compare against a detached standalone reference artifact.",
     )
-    distributed_parser.add_argument("--builtin-system", choices=BUILTIN_SYSTEMS, default="natural_chain12")
-    distributed_parser.add_argument("--xyz-path", type=Path, help="XYZ/extxyz input; overrides --builtin-system.")
-    distributed_parser.add_argument("--model-family", choices=["mp", "off", "omol", "polar"], default="mp")
+    distributed_parser.add_argument(
+        "--builtin-system", choices=BUILTIN_SYSTEMS, default="natural_chain12"
+    )
+    distributed_parser.add_argument(
+        "--xyz-path", type=Path, help="XYZ/extxyz input; overrides --builtin-system."
+    )
+    distributed_parser.add_argument(
+        "--model-family", choices=["mp", "off", "omol", "polar"], default="mp"
+    )
     distributed_parser.add_argument("--model", default="medium-mpa-0")
-    distributed_parser.add_argument("--head-name", default="", help="Optional explicit MACE head name.")
+    distributed_parser.add_argument(
+        "--head-name", default="", help="Optional explicit MACE head name."
+    )
     distributed_parser.add_argument(
         "--enable-cueq",
         action="store_true",
         help="Request cuEquivariance conversion when loading the distributed raw MACE model.",
     )
     distributed_parser.add_argument("--ghost-cutoff-buffer", type=float, default=0.5)
-    distributed_parser.add_argument("--reference-artifact", type=Path, help="Detached standalone reference artifact.")
-    distributed_parser.add_argument("--benchmark", action="store_true", help="Time only the distributed adapter loop.")
+    distributed_parser.add_argument(
+        "--reference-artifact",
+        type=Path,
+        help="Detached standalone reference artifact.",
+    )
+    distributed_parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Time only the distributed adapter loop.",
+    )
     distributed_parser.add_argument("--benchmark-warmup", type=int, default=3)
     distributed_parser.add_argument("--benchmark-iterations", type=int, default=10)
     distributed_parser.add_argument("--benchmark-samples", type=int, default=5)
@@ -175,21 +191,27 @@ def load_xyz(path: Path) -> Dict[str, Any]:
         raise ValueError(f"XYZ first line must be an atom count: {path}") from exc
     atom_lines = [line for line in lines[2:] if line.strip()]
     if len(atom_lines) != num_atoms:
-        raise ValueError(f"XYZ declares {num_atoms} atoms but contains {len(atom_lines)} rows.")
+        raise ValueError(
+            f"XYZ declares {num_atoms} atoms but contains {len(atom_lines)} rows."
+        )
 
     atomic_numbers: List[int] = []
     positions: List[List[float]] = []
     for row_index, line in enumerate(atom_lines, start=3):
         fields = line.split()
         if len(fields) < 4:
-            raise ValueError(f"XYZ atom row {row_index} needs symbol and x/y/z coordinates.")
+            raise ValueError(
+                f"XYZ atom row {row_index} needs symbol and x/y/z coordinates."
+            )
         token = fields[0]
         if token.isdigit():
             atomic_number = int(token)
         elif token in ELEMENT_TO_Z:
             atomic_number = ELEMENT_TO_Z[token]
         else:
-            raise ValueError(f"Unsupported element symbol {token!r} on XYZ row {row_index}.")
+            raise ValueError(
+                f"Unsupported element symbol {token!r} on XYZ row {row_index}."
+            )
         atomic_numbers.append(atomic_number)
         positions.append([float(fields[1]), float(fields[2]), float(fields[3])])
 
@@ -224,7 +246,11 @@ def load_xyz(path: Path) -> Dict[str, Any]:
 
 
 def load_raw_structure(args: argparse.Namespace) -> Dict[str, Any]:
-    return load_xyz(args.xyz_path) if args.xyz_path else BUILTIN_SYSTEMS[args.builtin_system]()
+    return (
+        load_xyz(args.xyz_path)
+        if args.xyz_path
+        else BUILTIN_SYSTEMS[args.builtin_system]()
+    )
 
 
 def _assign_if_present(obj: object, name: str, value: torch.Tensor) -> None:
@@ -247,8 +273,14 @@ def build_state(
     global_mol.atom_types = numbers
     global_mol.atom_velocities = torch.zeros_like(positions)
     _assign_if_present(global_mol, "atom_forces", torch.zeros_like(positions))
-    _assign_if_present(global_mol, "atom_vertex_numbers", torch.arange(positions.shape[0], device=device))
-    _assign_if_present(global_mol, "atom_masses", TORCH_ATOMIC_MASSES.to(device)[numbers].float())
+    _assign_if_present(
+        global_mol,
+        "atom_vertex_numbers",
+        torch.arange(positions.shape[0], device=device),
+    )
+    _assign_if_present(
+        global_mol, "atom_masses", TORCH_ATOMIC_MASSES.to(device)[numbers].float()
+    )
 
     sim = SimulationConfig()
     sim.cutoff = cutoff
@@ -265,9 +297,15 @@ def build_state(
     local_mol.atom_positions = positions.index_select(0, local_indices)
     local_mol.atom_types = numbers.index_select(0, local_indices)
     local_mol.atom_velocities = torch.zeros_like(local_mol.atom_positions)
-    _assign_if_present(local_mol, "atom_forces", torch.zeros_like(local_mol.atom_positions))
+    _assign_if_present(
+        local_mol, "atom_forces", torch.zeros_like(local_mol.atom_positions)
+    )
     _assign_if_present(local_mol, "atom_vertex_numbers", local_indices)
-    _assign_if_present(local_mol, "atom_masses", TORCH_ATOMIC_MASSES.to(device)[local_mol.atom_types].float())
+    _assign_if_present(
+        local_mol,
+        "atom_masses",
+        TORCH_ATOMIC_MASSES.to(device)[local_mol.atom_types].float(),
+    )
 
     state = DynamisState()
     state.dist_env = torch_env.dist_env
@@ -345,7 +383,11 @@ def _synchronize(device: torch.device) -> None:
 
 
 def _critical_path_seconds(local_seconds: float, device: torch.device) -> float:
-    reduce_device = device if dist.is_initialized() and dist.get_backend() == "nccl" else torch.device("cpu")
+    reduce_device = (
+        device
+        if dist.is_initialized() and dist.get_backend() == "nccl"
+        else torch.device("cpu")
+    )
     elapsed = torch.tensor(local_seconds, dtype=torch.float64, device=reduce_device)
     if dist.is_initialized():
         dist.all_reduce(elapsed, op=dist.ReduceOp.MAX)
@@ -365,7 +407,9 @@ def _timing_statistics(seconds_per_step: List[float], num_atoms: int) -> Dict[st
         "min_ms_per_step": ordered[0] * 1.0e3,
         "p95_ms_per_step": ordered[p95_index] * 1.0e3,
         "stdev_ms_per_step": stdev * 1.0e3,
-        "coefficient_of_variation_percent": 0.0 if mean == 0.0 else 100.0 * stdev / mean,
+        "coefficient_of_variation_percent": (
+            0.0 if mean == 0.0 else 100.0 * stdev / mean
+        ),
         "atoms_per_second": 0.0 if median == 0.0 else num_atoms / median,
     }
 
@@ -402,7 +446,9 @@ def load_and_validate_reference_artifact(
     artifact = torch.load(artifact_path, map_location="cpu", weights_only=False)
     metadata = artifact.get("metadata", {})
     expected_head = args.head_name or resolve_model_head_name(
-        load_raw_mace_model(args.model_family, args.model, "cpu").to(dtype=COMPUTE_DTYPE).eval(),
+        load_raw_mace_model(args.model_family, args.model, "cpu")
+        .to(dtype=COMPUTE_DTYPE)
+        .eval(),
         args.head_name or None,
     )
     expected_signature = _reference_signature(
@@ -418,7 +464,9 @@ def load_and_validate_reference_artifact(
             f"got {metadata.get('artifact_version')!r}."
         )
     if metadata.get("signature") != expected_signature:
-        raise ValueError("Reference artifact is stale or incompatible with the requested system/model.")
+        raise ValueError(
+            "Reference artifact is stale or incompatible with the requested system/model."
+        )
     reference = artifact.get("reference", {})
     required_reference_keys = {
         "calculator_energy",
@@ -426,14 +474,17 @@ def load_and_validate_reference_artifact(
         "core_model_energy",
         "core_model_forces",
     }
-    missing_reference_keys = sorted(required_reference_keys.difference(reference.keys()))
+    missing_reference_keys = sorted(
+        required_reference_keys.difference(reference.keys())
+    )
     if missing_reference_keys:
         raise ValueError(
             "Reference artifact is missing required monolithic reference keys: "
             + ", ".join(missing_reference_keys)
         )
     if require_standalone_benchmark and (
-        artifact.get("calculator_benchmark") is None or artifact.get("core_model_benchmark") is None
+        artifact.get("calculator_benchmark") is None
+        or artifact.get("core_model_benchmark") is None
     ):
         raise ValueError(
             "Benchmark mode requires a reference artifact generated with both calculator and core-model timing stats."
@@ -464,19 +515,27 @@ def prepare_distributed(args: argparse.Namespace) -> PreparedExperiment:
         raise ImportError("ASE is required to decode element symbols from XYZ inputs.")
     torch_env = TorchDistEnv(is_distributed=True)
     if dist.get_world_size() < 2:
-        raise RuntimeError("The distributed MACEModel test requires at least two ranks.")
+        raise RuntimeError(
+            "The distributed MACEModel test requires at least two ranks."
+        )
     device = torch_env.device
     raw = load_raw_structure(args)
-    model = load_raw_mace_model(
-        args.model_family,
-        args.model,
-        str(device),
-        enable_cueq=args.enable_cueq,
-    ).to(device=device).eval()
+    model = (
+        load_raw_mace_model(
+            args.model_family,
+            args.model,
+            str(device),
+            enable_cueq=args.enable_cueq,
+        )
+        .to(device=device)
+        .eval()
+    )
     cutoff = float(model.r_max.detach().cpu())
     state, sim = build_state(raw, cutoff, args.ghost_cutoff_buffer, torch_env)
     adapter = MACEModel(model, head_name=args.head_name or None)
-    adapter.initialize_buffers(state.local_partition_info, device, dist.get_world_size())
+    adapter.initialize_buffers(
+        state.local_partition_info, device, dist.get_world_size()
+    )
     return PreparedExperiment(
         raw=raw,
         sim=sim,
@@ -507,12 +566,16 @@ def assemble_forces(records: List[Dict[str, Any]], num_atoms: int) -> torch.Tens
     return forces
 
 
-def run_distributed_adapter_step(prepared: PreparedExperiment) -> Tuple[float, torch.Tensor, List[Dict[str, Any]]]:
+def run_distributed_adapter_step(
+    prepared: PreparedExperiment,
+) -> Tuple[float, torch.Tensor, List[Dict[str, Any]]]:
     try:
         energy, forces = prepared.adapter(prepared.state)
         record = {
             "rank": dist.get_rank(),
-            "local_global_indices": prepared.state.local_partition_info.partition_indices.long().cpu().tolist(),
+            "local_global_indices": prepared.state.local_partition_info.partition_indices.long()
+            .cpu()
+            .tolist(),
             "owned_local_energy": float(energy.cpu()),
             "owned_local_forces": forces.detach().cpu().tolist(),
         }
@@ -564,8 +627,14 @@ def benchmark_distributed(
     prepared: PreparedExperiment,
     args: argparse.Namespace,
 ) -> Optional[Dict[str, Any]]:
-    if args.benchmark_warmup < 0 or args.benchmark_iterations <= 0 or args.benchmark_samples <= 0:
-        raise ValueError("Benchmark warmup must be nonnegative; iterations and samples must be positive.")
+    if (
+        args.benchmark_warmup < 0
+        or args.benchmark_iterations <= 0
+        or args.benchmark_samples <= 0
+    ):
+        raise ValueError(
+            "Benchmark warmup must be nonnegative; iterations and samples must be positive."
+        )
 
     device = prepared.device
     adapter = prepared.adapter
@@ -606,7 +675,9 @@ def benchmark_distributed(
         stage_start = time.perf_counter()
         view = adapter._build_structural_view(state)
         _synchronize(device)
-        stage_samples["structural_view_with_position_exchange"].append(time.perf_counter() - stage_start)
+        stage_samples["structural_view_with_position_exchange"].append(
+            time.perf_counter() - stage_start
+        )
 
         stage_start = time.perf_counter()
         graph = adapter._build_owned_graph(view, state)
@@ -619,12 +690,16 @@ def benchmark_distributed(
             outputs = adapter.runtime(graph.batch_dict)
             owned_energy = outputs["owned_local_energy"] * EV_TO_MD
             _synchronize(device)
-            stage_samples["mace_forward_with_feature_exchange"].append(time.perf_counter() - stage_start)
+            stage_samples["mace_forward_with_feature_exchange"].append(
+                time.perf_counter() - stage_start
+            )
 
             stage_start = time.perf_counter()
             adapter._recover_forces(owned_energy, view)
             _synchronize(device)
-            stage_samples["force_recovery_with_backward_exchange"].append(time.perf_counter() - stage_start)
+            stage_samples["force_recovery_with_backward_exchange"].append(
+                time.perf_counter() - stage_start
+            )
         finally:
             adapter.runtime.end_forward()
 
@@ -640,8 +715,12 @@ def benchmark_distributed(
     element_size = torch.empty((), dtype=COMPUTE_DTYPE).element_size()
     total_send = int(adapter.partition_validation["total_send"])
     total_recv = int(adapter.partition_validation["total_recv"])
-    forward_send_bytes = total_send * feature_width * element_size * feature_exchange_count
-    forward_recv_bytes = total_recv * feature_width * element_size * feature_exchange_count
+    forward_send_bytes = (
+        total_send * feature_width * element_size * feature_exchange_count
+    )
+    forward_recv_bytes = (
+        total_recv * feature_width * element_size * feature_exchange_count
+    )
     backward_send_bytes = forward_recv_bytes
     backward_recv_bytes = forward_send_bytes
     position_width = 3
@@ -661,7 +740,9 @@ def benchmark_distributed(
     profiled_total_ms = stage_timings["total_profiled_step"]["median_ms_per_step"]
     for name, timing in stage_timings.items():
         timing["fraction_of_profiled_total"] = (
-            1.0 if name == "total_profiled_step" else timing["median_ms_per_step"] / profiled_total_ms
+            1.0
+            if name == "total_profiled_step"
+            else timing["median_ms_per_step"] / profiled_total_ms
         )
     local_stage_profile = {
         "rank": dist.get_rank(),
@@ -674,12 +755,18 @@ def benchmark_distributed(
             "owned_atoms": owned_atoms,
             "received_halo_atoms": halo_atoms,
             "total_local_plus_halo_atoms": total_atoms,
-            "halo_to_owned_ratio": 0.0 if owned_atoms == 0 else halo_atoms / owned_atoms,
+            "halo_to_owned_ratio": (
+                0.0 if owned_atoms == 0 else halo_atoms / owned_atoms
+            ),
             "pre_filter_graph_edges": pre_filter_edges,
             "owned_destination_edges": owned_edges,
-            "owned_to_pre_filter_edge_ratio": 0.0 if pre_filter_edges == 0 else owned_edges / pre_filter_edges,
+            "owned_to_pre_filter_edge_ratio": (
+                0.0 if pre_filter_edges == 0 else owned_edges / pre_filter_edges
+            ),
             "send_rows_per_peer": adapter.partition_validation["send_counts_by_peer"],
-            "receive_rows_per_peer": adapter.partition_validation["recv_counts_by_peer"],
+            "receive_rows_per_peer": adapter.partition_validation[
+                "recv_counts_by_peer"
+            ],
             "feature_width": feature_width,
             "feature_exchanges_per_forward": feature_exchange_count,
             "feature_element_size_bytes": element_size,
@@ -688,7 +775,10 @@ def benchmark_distributed(
             "backward_feature_send_bytes": backward_send_bytes,
             "backward_feature_receive_bytes": backward_recv_bytes,
             "total_feature_traffic_bytes": (
-                forward_send_bytes + forward_recv_bytes + backward_send_bytes + backward_recv_bytes
+                forward_send_bytes
+                + forward_recv_bytes
+                + backward_send_bytes
+                + backward_recv_bytes
             ),
             "position_width": position_width,
             "forward_position_send_bytes": position_forward_send_bytes,
@@ -708,7 +798,9 @@ def benchmark_distributed(
             _synchronize(device)
             start = time.perf_counter()
             init_adapter = MACEModel(base_model, head_name=args.head_name or None)
-            init_adapter.initialize_buffers(state.local_partition_info, device, dist.get_world_size())
+            init_adapter.initialize_buffers(
+                state.local_partition_info, device, dist.get_world_size()
+            )
             _synchronize(device)
             local_seconds = time.perf_counter() - start
             init_samples.append(_critical_path_seconds(local_seconds, device))
@@ -717,21 +809,27 @@ def benchmark_distributed(
 
     if dist.get_rank() != 0:
         return None
-    distributed_stats = _timing_statistics(distributed_samples, len(raw["atomic_numbers"]))
+    distributed_stats = _timing_statistics(
+        distributed_samples, len(raw["atomic_numbers"])
+    )
     benchmark = {
         "scope": (
             "steady-state distributed MACEModel energy+forces; includes position exchange, "
             "owned-graph build, runtime feature exchange, and force recovery; excludes standalone "
             "reference generation, explicit parity reconstruction, and parity comparison"
         ),
-        "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else str(device),
+        "device_name": (
+            torch.cuda.get_device_name(device) if device.type == "cuda" else str(device)
+        ),
         "timing_method": "perf_counter with device synchronization; distributed samples use slowest rank",
         "world_size": dist.get_world_size(),
         "warmup_steps": args.benchmark_warmup,
         "iterations_per_sample": args.benchmark_iterations,
         "num_samples": args.benchmark_samples,
         "distributed": distributed_stats,
-        "per_rank_stage_profiles": [profile for profile in stage_profiles if profile is not None],
+        "per_rank_stage_profiles": [
+            profile for profile in stage_profiles if profile is not None
+        ],
     }
     if init_stats is not None:
         benchmark["distributed_initialize_buffers"] = init_stats
@@ -778,9 +876,7 @@ def build_summary(
         rtol=args.rtol,
     )
     classification = (
-        "parity_ok"
-        if energy_close and force_close
-        else "post_graph_model_mismatch"
+        "parity_ok" if energy_close and force_close else "post_graph_model_mismatch"
     )
     explicit_energy_abs = abs(distributed_energy - explicit_energy)
     calculator_energy_abs = abs(distributed_energy - calculator_energy)
@@ -790,7 +886,9 @@ def build_summary(
     core_model_force_delta = distributed_forces - core_model_forces
     summary = {
         "system": prepared.raw["name"],
-        "source_path": prepared.raw.get("source_path", f"builtin://{prepared.raw['name']}"),
+        "source_path": prepared.raw.get(
+            "source_path", f"builtin://{prepared.raw['name']}"
+        ),
         "num_atoms": num_atoms,
         "model": prepared.model_id,
         "reference_artifact": artifact["metadata"],
@@ -802,8 +900,10 @@ def build_summary(
             "calculator_mace_energy": calculator_energy,
             "core_model_mace_energy": core_model_energy,
             "distributed_minus_explicit_energy": distributed_energy - explicit_energy,
-            "distributed_minus_calculator_energy": distributed_energy - calculator_energy,
-            "distributed_minus_core_model_energy": distributed_energy - core_model_energy,
+            "distributed_minus_calculator_energy": distributed_energy
+            - calculator_energy,
+            "distributed_minus_core_model_energy": distributed_energy
+            - core_model_energy,
             "explicit_energy_abs_error": explicit_energy_abs,
             "calculator_energy_abs_error": calculator_energy_abs,
             "core_model_energy_abs_error": core_model_energy_abs,
@@ -819,18 +919,23 @@ def build_summary(
             "explicit_energy_close": bool(energy_close),
             "explicit_forces_close": bool(force_close),
             "explicit_edge_count": int(explicit_reference["edge_count"]),
-            "core_model_edge_count": int(artifact["reference"]["core_model_edge_count"]),
+            "core_model_edge_count": int(
+                artifact["reference"]["core_model_edge_count"]
+            ),
             # Reference-vs-reference diagnostics, scaled so the whole parity
             # block is reported in one unit system.
             "calculator_minus_core_model_energy": float(
                 artifact["reference"]["calculator_minus_core_model_energy"]
-            ) * EV_TO_MD,
+            )
+            * EV_TO_MD,
             "calculator_minus_core_model_force_mae": float(
                 artifact["reference"]["calculator_minus_core_model_force_mae"]
-            ) * EV_TO_MD,
+            )
+            * EV_TO_MD,
             "calculator_minus_core_model_force_max_abs": float(
                 artifact["reference"]["calculator_minus_core_model_force_max_abs"]
-            ) * EV_TO_MD,
+            )
+            * EV_TO_MD,
         },
         "ranks": records,
     }
@@ -839,8 +944,14 @@ def build_summary(
         core_model_benchmark = artifact["core_model_benchmark"]
         calculator_stats = calculator_benchmark["timings"]
         core_model_stats = core_model_benchmark["timings"]
-        calculator_speedup = calculator_stats["median_ms_per_step"] / benchmark["distributed"]["median_ms_per_step"]
-        core_model_speedup = core_model_stats["median_ms_per_step"] / benchmark["distributed"]["median_ms_per_step"]
+        calculator_speedup = (
+            calculator_stats["median_ms_per_step"]
+            / benchmark["distributed"]["median_ms_per_step"]
+        )
+        core_model_speedup = (
+            core_model_stats["median_ms_per_step"]
+            / benchmark["distributed"]["median_ms_per_step"]
+        )
         benchmark["calculator_baseline"] = {
             "scope": calculator_benchmark["scope"],
             "timings": calculator_stats,
@@ -885,7 +996,9 @@ def print_summary(summary: Dict[str, Any]) -> None:
         print(f"warmup_steps: {benchmark['warmup_steps']}")
         print(f"iterations_per_sample: {benchmark['iterations_per_sample']}")
         print(f"num_samples: {benchmark['num_samples']}")
-        print(f"distributed_median_ms_per_step: {benchmark['distributed']['median_ms_per_step']}")
+        print(
+            f"distributed_median_ms_per_step: {benchmark['distributed']['median_ms_per_step']}"
+        )
         print("\nPer-rank stage diagnostics:")
         for profile in benchmark["per_rank_stage_profiles"]:
             workload = profile["workload"]
@@ -913,13 +1026,25 @@ def print_summary(summary: Dict[str, Any]) -> None:
                     f"fraction={timing['fraction_of_profiled_total']}"
                 )
         print(f"calculator_scope: {benchmark['calculator_baseline']['scope']}")
-        print(f"calculator_median_ms_per_step: {benchmark['calculator_baseline']['timings']['median_ms_per_step']}")
-        print(f"speedup_calculator_over_distributed: {benchmark['calculator_baseline']['speedup_over_distributed']}")
-        print(f"calculator_parallel_efficiency: {benchmark['calculator_baseline']['parallel_efficiency']}")
+        print(
+            f"calculator_median_ms_per_step: {benchmark['calculator_baseline']['timings']['median_ms_per_step']}"
+        )
+        print(
+            f"speedup_calculator_over_distributed: {benchmark['calculator_baseline']['speedup_over_distributed']}"
+        )
+        print(
+            f"calculator_parallel_efficiency: {benchmark['calculator_baseline']['parallel_efficiency']}"
+        )
         print(f"core_model_scope: {benchmark['core_model_baseline']['scope']}")
-        print(f"core_model_median_ms_per_step: {benchmark['core_model_baseline']['timings']['median_ms_per_step']}")
-        print(f"speedup_core_model_over_distributed: {benchmark['core_model_baseline']['speedup_over_distributed']}")
-        print(f"core_model_parallel_efficiency: {benchmark['core_model_baseline']['parallel_efficiency']}")
+        print(
+            f"core_model_median_ms_per_step: {benchmark['core_model_baseline']['timings']['median_ms_per_step']}"
+        )
+        print(
+            f"speedup_core_model_over_distributed: {benchmark['core_model_baseline']['speedup_over_distributed']}"
+        )
+        print(
+            f"core_model_parallel_efficiency: {benchmark['core_model_baseline']['parallel_efficiency']}"
+        )
         if "distributed_initialize_buffers" in benchmark:
             print(
                 "distributed_initialize_buffers_median_ms: "
@@ -941,13 +1066,17 @@ def run_distributed(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
     if dist.get_rank() != 0:
         return None
     explicit_reference = build_explicit_global_reference(prepared, args)
-    summary = build_summary(prepared, records, explicit_reference, artifact, args, benchmark=benchmark)
+    summary = build_summary(
+        prepared, records, explicit_reference, artifact, args, benchmark=benchmark
+    )
     print_summary(summary)
     if args.output_json:
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         args.output_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     if args.strict_parity:
-        assert summary["mismatch_classification"] == "parity_ok", summary["mismatch_classification"]
+        assert summary["mismatch_classification"] == "parity_ok", summary[
+            "mismatch_classification"
+        ]
     return summary
 
 

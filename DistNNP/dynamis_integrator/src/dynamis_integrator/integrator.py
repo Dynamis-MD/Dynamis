@@ -38,7 +38,9 @@ class DistNNPIntegrator(ABC):
         cls.step = _timed_integrator_step(step)
 
     @abstractmethod
-    def step(self, state: DistNNPState, *args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+    def step(
+        self, state: DistNNPState, *args, **kwargs
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Update positions and velocities based on the specific integration method.
 
@@ -49,7 +51,9 @@ class DistNNPIntegrator(ABC):
         """
         raise NotImplementedError("Subclasses must implement the step method.")
 
-    def _compute_force(self, dist_state: DistNNPState, model) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _compute_force(
+        self, dist_state: DistNNPState, model
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Evaluate the potential model on the current state and return energy and forces.
 

@@ -22,7 +22,9 @@ input_file = args.input_file
 
 if not os.path.exists(input_file):
     print(f"Error: The file '{input_file}' does not exist.")
-    import sys; sys.exit(1)
+    import sys
+
+    sys.exit(1)
 
 base, ext = os.path.splitext(os.path.basename(input_file))
 output_file = f"{base}.mp4"
@@ -55,11 +57,13 @@ if args.max_frames is not None:
 
 print(f"Starting render of {end_frame + 1} frames...")
 
-vp.render_anim(filename=output_file,
-               size=(1920, 1080),
-               fps=30,
-               range=(0, end_frame),
-               background=(1.0, 1.0, 1.0),
-               renderer=OpenGLRenderer())
+vp.render_anim(
+    filename=output_file,
+    size=(1920, 1080),
+    fps=30,
+    range=(0, end_frame),
+    background=(1.0, 1.0, 1.0),
+    renderer=OpenGLRenderer(),
+)
 
 print("Rendering complete!")

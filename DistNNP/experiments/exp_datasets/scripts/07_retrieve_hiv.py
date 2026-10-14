@@ -39,8 +39,8 @@ FULL_NAME = "3j3q_capsid.xyz"
 # scripts/checksums.txt (byte-for-byte, given a fixed full capsid).
 SHELL_CORNER = (297.0, 216.0, 184.0)
 SUBSETS = {
-    "sub150": ("3j3q_capsid_sub150.xyz", 150.0),   # ~33.2 k atoms
-    "sub350": ("3j3q_capsid_sub350.xyz", 350.0),   # ~175 k atoms
+    "sub150": ("3j3q_capsid_sub150.xyz", 150.0),  # ~33.2 k atoms
+    "sub350": ("3j3q_capsid_sub350.xyz", 350.0),  # ~175 k atoms
 }
 
 
@@ -70,7 +70,9 @@ def download_and_convert(out_path: Path):
             elif line.startswith("_atom_site."):
                 in_atom_site = True
                 columns.append(line)
-            elif in_atom_site and (line.startswith("ATOM") or line.startswith("HETATM")):
+            elif in_atom_site and (
+                line.startswith("ATOM") or line.startswith("HETATM")
+            ):
                 if sym_idx == -1:
                     sym_idx = columns.index("_atom_site.type_symbol")
                     x_idx = columns.index("_atom_site.Cartn_x")
@@ -95,7 +97,7 @@ def cut_subset(full_path: Path, out_path: Path, corner, side: float):
     [corner, corner + side) on every axis. Deterministic (a pure coordinate
     filter over the file order), so byte-reproducible from a fixed full xyz.
     """
-    (cx, cy, cz) = corner
+    cx, cy, cz = corner
     kept = []
     with open(full_path) as f:
         f.readline()  # atom count
@@ -105,7 +107,11 @@ def cut_subset(full_path: Path, out_path: Path, corner, side: float):
             if len(p) < 4:
                 continue
             x, y, z = float(p[1]), float(p[2]), float(p[3])
-            if (cx <= x < cx + side) and (cy <= y < cy + side) and (cz <= z < cz + side):
+            if (
+                (cx <= x < cx + side)
+                and (cy <= y < cy + side)
+                and (cz <= z < cz + side)
+            ):
                 kept.append(line if line.endswith("\n") else line + "\n")
     with open(out_path, "w") as out_f:
         out_f.write(f"{len(kept)}\n")
@@ -117,10 +123,16 @@ def cut_subset(full_path: Path, out_path: Path, corner, side: float):
 def main():
     ap = argparse.ArgumentParser(description="Retrieve HIV-1 capsid (3J3Q) + subsets")
     ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
-    ap.add_argument("--subsets", action="store_true",
-                    help="Also cut the sub150 / sub350 shell cubes")
-    ap.add_argument("--subsets-only", action="store_true",
-                    help="Only cut subsets from an existing full xyz (no download)")
+    ap.add_argument(
+        "--subsets",
+        action="store_true",
+        help="Also cut the sub150 / sub350 shell cubes",
+    )
+    ap.add_argument(
+        "--subsets-only",
+        action="store_true",
+        help="Only cut subsets from an existing full xyz (no download)",
+    )
     ap.add_argument("--overwrite", action="store_true")
     args = ap.parse_args()
 

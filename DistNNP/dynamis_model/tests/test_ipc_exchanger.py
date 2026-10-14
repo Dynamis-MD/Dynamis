@@ -36,8 +36,17 @@ def _make_sim_config(cutoff: float, device: torch.device) -> SimulationConfig:
     return cfg
 
 
-def _mp_worker(rank, world_size, num_atoms, feature_dim, cutoff,
-               shared_positions, results_dict, handles_dict, barrier):
+def _mp_worker(
+    rank,
+    world_size,
+    num_atoms,
+    feature_dim,
+    cutoff,
+    shared_positions,
+    results_dict,
+    handles_dict,
+    barrier,
+):
     """Multi-process worker for IPC exchange test."""
     torch.cuda.set_device(rank)
     device = torch.device(f"cuda:{rank}")
@@ -64,8 +73,12 @@ def _mp_worker(rank, world_size, num_atoms, feature_dim, cutoff,
     total_recv = ro[-1].item()
 
     # Allocate persistent buffers via raw cudaMalloc (required for IPC)
-    x_buffer = IPCExchanger.allocate_ipc_buffer(num_local + total_recv, feature_dim, rank)
-    grad_recv_buffer = IPCExchanger.allocate_ipc_buffer(max(total_send, 1), feature_dim, rank)
+    x_buffer = IPCExchanger.allocate_ipc_buffer(
+        num_local + total_recv, feature_dim, rank
+    )
+    grad_recv_buffer = IPCExchanger.allocate_ipc_buffer(
+        max(total_send, 1), feature_dim, rank
+    )
 
     # Fill local features: global_atom_id * 0.01 + feat_idx * 0.001
     global_ids = info.partition_indices.to(device)
@@ -99,16 +112,23 @@ def _mp_worker(rank, world_size, num_atoms, feature_dim, cutoff,
         all_nl.append(handles_dict[r]["num_local"])
 
     all_recv_offsets = torch.tensor(all_ro, dtype=torch.long)  # [W, W+1]
-    all_num_local = torch.tensor(all_nl, dtype=torch.long)     # [W]
+    all_num_local = torch.tensor(all_nl, dtype=torch.long)  # [W]
 
     # Setup exchanger
     exchanger.setup(
-        x_buffer, grad_recv_buffer,
-        all_x_handles, all_grad_handles,
-        info.send_offsets, info.send_local_indices,
+        x_buffer,
+        grad_recv_buffer,
+        all_x_handles,
+        all_grad_handles,
+        info.send_offsets,
+        info.send_local_indices,
         info.recv_offsets,
-        all_recv_offsets, all_num_local,
-        num_local, feature_dim, rank, world_size,
+        all_recv_offsets,
+        all_num_local,
+        num_local,
+        feature_dim,
+        rank,
+        world_size,
     )
 
     # Forward push
@@ -153,9 +173,7 @@ def _mp_worker(rank, world_size, num_atoms, feature_dim, cutoff,
             actual = ghost_data[:, f]
             max_err = (actual - expected).abs().max().item()
             if max_err > 1e-5:
-                errors.append(
-                    f"Rank {rank}: ghost feature {f} max error = {max_err}"
-                )
+                errors.append(f"Rank {rank}: ghost feature {f} max error = {max_err}")
 
     exchanger.teardown()
 
@@ -216,8 +234,17 @@ class TestIPCExchanger:
         for rank in range(world_size):
             proc = mp.Process(
                 target=_mp_worker,
-                args=(rank, world_size, num_atoms, feature_dim, cutoff,
-                      shared_positions, results_dict, handles_dict, barrier),
+                args=(
+                    rank,
+                    world_size,
+                    num_atoms,
+                    feature_dim,
+                    cutoff,
+                    shared_positions,
+                    results_dict,
+                    handles_dict,
+                    barrier,
+                ),
             )
             proc.start()
             processes.append(proc)
@@ -229,11 +256,11 @@ class TestIPCExchanger:
         for rank in range(world_size):
             assert rank in results_dict, f"Rank {rank} did not report results"
             res = results_dict[rank]
-            assert len(res["errors"]) == 0, (
-                f"Rank {rank} errors: {res['errors']}"
+            assert len(res["errors"]) == 0, f"Rank {rank} errors: {res['errors']}"
+            print(
+                f"  Rank {rank}: local={res['num_local']}, "
+                f"send={res['total_send']}, recv={res['total_recv']}"
             )
-            print(f"  Rank {rank}: local={res['num_local']}, "
-                  f"send={res['total_send']}, recv={res['total_recv']}")
 
     def test_forward_push_larger_system(self):
         """Test with more atoms and larger feature dim."""
@@ -255,8 +282,17 @@ class TestIPCExchanger:
         for rank in range(world_size):
             proc = mp.Process(
                 target=_mp_worker,
-                args=(rank, world_size, num_atoms, feature_dim, cutoff,
-                      shared_positions, results_dict, handles_dict, barrier),
+                args=(
+                    rank,
+                    world_size,
+                    num_atoms,
+                    feature_dim,
+                    cutoff,
+                    shared_positions,
+                    results_dict,
+                    handles_dict,
+                    barrier,
+                ),
             )
             proc.start()
             processes.append(proc)
@@ -267,6 +303,4 @@ class TestIPCExchanger:
         for rank in range(world_size):
             assert rank in results_dict, f"Rank {rank} did not report results"
             res = results_dict[rank]
-            assert len(res["errors"]) == 0, (
-                f"Rank {rank} errors: {res['errors']}"
-            )
+            assert len(res["errors"]) == 0, f"Rank {rank} errors: {res['errors']}"

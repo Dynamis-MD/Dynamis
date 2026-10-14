@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.distributed as dist
 import torch.distributed.nn.functional as dist_nn
 from dynamis_model.potential import DynamisModel
+
 try:
     from orb_models.forcefield import pretrained
     from orb_models.common.atoms.batch.graph_batch import AtomGraphs
@@ -33,34 +34,42 @@ _EV_PER_A_TO_AMU_A_PER_FS2 = EV_PER_A_TO_AMU_A_PER_FS2
 
 # orb conservative_inf_omat/mpa only set has_stress = true.
 
+
 class ORBModel(DynamisModel, nn.Module):
     def __init__(
         self,
-        model_name: Literal["orb_v3_conservative_inf_omat", "orb_v3_conservative_inf_map", "orb_v3_conservative_20_omat", "orb_v3_conservative_20_mpa"],
+        model_name: Literal[
+            "orb_v3_conservative_inf_omat",
+            "orb_v3_conservative_inf_map",
+            "orb_v3_conservative_20_omat",
+            "orb_v3_conservative_20_mpa",
+        ],
         # todo: v3 omol and direct
-        precision: Literal["float32-high","float32-highest", "float64"],
+        precision: Literal["float32-high", "float32-highest", "float64"],
         device: Literal["cuda", "cpu"] | None = None,
-        **kwargs
+        **kwargs,
     ):
         nn.Module.__init__(self)
         DynamisModel.__init__(self)
-        
+
         self.device = device
-        
+
         # Let the ORB factory build the model, heads, and load weights
         factory_function = getattr(pretrained, model_name)
-        self.orbff, adapter = factory_function( # atoms_adapter is only used for attributes
-            compile=False, 
-            device=device,
-            precision=precision
+        self.orbff, adapter = (
+            factory_function(  # atoms_adapter is only used for attributes
+                compile=False, device=device, precision=precision
+            )
         )
-        self.orbff.eval() # Freeze weights for inference
-        
+        self.orbff.eval()  # Freeze weights for inference
+
         self.num_mp_steps = self.orbff.model.num_message_passing_steps
         self.hidden_dim = self.orbff.model.gnn_stacks[0].latent_dim
 
-        self.model_radius = adapter.radius                        # default 6.0
-        self.model_max_num_neighbors = adapter.max_num_neighbors  # 120 for the inf family, 20 otherwise
+        self.model_radius = adapter.radius  # default 6.0
+        self.model_max_num_neighbors = (
+            adapter.max_num_neighbors
+        )  # 120 for the inf family, 20 otherwise
 
         self._feature_exchanger = GPUDirectExchanger()
         self._atom_type_exchanger = GPUDirectExchanger()
@@ -87,11 +96,22 @@ class ORBModel(DynamisModel, nn.Module):
         # Per-layer latent exchange: dim=hidden_dim (256, uniform across layers)
         for latent_exchanger in self._latent_exchangers:
             latent_exchanger.setup_exchanger(
-                feature_dim=self.hidden_dim, partition_info=partition_info, device=device
+                feature_dim=self.hidden_dim,
+                partition_info=partition_info,
+                device=device,
             )
-        
-    def _make_atomgraph(self, atom_types, n_atoms, senders, receivers,
-                               displacement_vectors, cell, cutoff, device):
+
+    def _make_atomgraph(
+        self,
+        atom_types,
+        n_atoms,
+        senders,
+        receivers,
+        displacement_vectors,
+        cell,
+        cutoff,
+        device,
+    ):
         return AtomGraphs(
             senders=senders,
             receivers=receivers,
@@ -114,34 +134,41 @@ class ORBModel(DynamisModel, nn.Module):
             fix_atoms=None,
             tags=None,
             radius=cutoff,
-            max_num_neighbors=torch.tensor([self.model_max_num_neighbors], device=device),
+            max_num_neighbors=torch.tensor(
+                [self.model_max_num_neighbors], device=device
+            ),
             half_supercell=False,
         )
-        
+
     def __call__(self, distributed_state: DynamisState, *args, **kwargs):
-        
+
         prev_local_positions = distributed_state.local_molecular_info.atom_positions
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
         local_atom_types = distributed_state.local_molecular_info.atom_types
         n_local_atoms = local_positions.shape[0]
-        
 
         positions = FeaturePushToExchange.apply(
             local_positions, distributed_state, self._feature_exchanger
         )
-        atom_types = FeaturePushToExchange.apply(
-            local_atom_types.float().unsqueeze(-1),
-            distributed_state,
-            self._atom_type_exchanger,
-        ).squeeze(-1).long()
+        atom_types = (
+            FeaturePushToExchange.apply(
+                local_atom_types.float().unsqueeze(-1),
+                distributed_state,
+                self._atom_type_exchanger,
+            )
+            .squeeze(-1)
+            .long()
+        )
 
         n_atoms = positions.shape[0]
         sim_config = distributed_state.sim_config
-        
+
         # Detached from autograd, graph topology is not differentiable
         with torch.no_grad():
             edge_index, cell_offsets, _ = radius_graph_pbc_cuda(
-                data=type("Data", (object,),
+                data=type(
+                    "Data",
+                    (object,),
                     {
                         "pos": positions.detach(),
                         "cell": sim_config.cell.unsqueeze(0),  # Shape [1, 3, 3]
@@ -158,16 +185,19 @@ class ORBModel(DynamisModel, nn.Module):
             _dbg_edge_index_full = edge_index
             _dbg_cell_offsets_full = cell_offsets
 
-
-        def _displacement(ei, co): # lattice-vector → Cartesian conversion
+        def _displacement(ei, co):  # lattice-vector → Cartesian conversion
             shifts = torch.mm(
                 co.to(positions.dtype), sim_config.cell.squeeze(0).to(positions.dtype)
             )
             return positions[ei[1]] - positions[ei[0]] - shifts
-        
+
         #  Orb's AttentionInteractionNetwork does segment_sum over senders and receivers, so message passing is effectively undirected
-        mp_mask = (edge_index[0] < n_local_atoms) | (edge_index[1] < n_local_atoms) # is this edge's sender local or edge's receiver local
-        mp_edge_index = edge_index[:, mp_mask] # drops any edge connecting atoms in my halo but not local
+        mp_mask = (edge_index[0] < n_local_atoms) | (
+            edge_index[1] < n_local_atoms
+        )  # is this edge's sender local or edge's receiver local
+        mp_edge_index = edge_index[
+            :, mp_mask
+        ]  # drops any edge connecting atoms in my halo but not local
         senders = mp_edge_index[0]
         receivers = mp_edge_index[1]
         displacement_vectors = _displacement(mp_edge_index, cell_offsets[mp_mask])
@@ -176,23 +206,28 @@ class ORBModel(DynamisModel, nn.Module):
         recv_local_mask = edge_index[1] < n_local_atoms
         zbl_edge_index = edge_index[:, recv_local_mask]
         zbl_displacement = _displacement(zbl_edge_index, cell_offsets[recv_local_mask])
-        
+
         # Build AtomGraphs.
-        # featurize_nodes for orb_v3 (use_embedding=True) calls atom_emb(batch) which looks up "atomic_numbers" from node_features. 
-        # featurize_edges reads "vectors" from edge_features. 
+        # featurize_nodes for orb_v3 (use_embedding=True) calls atom_emb(batch) which looks up "atomic_numbers" from node_features.
+        # featurize_edges reads "vectors" from edge_features.
 
         atomgraph = self._make_atomgraph(
-            atom_types, n_atoms, senders, receivers,
-            displacement_vectors, sim_config.cell, sim_config.cutoff, self.device,
+            atom_types,
+            n_atoms,
+            senders,
+            receivers,
+            displacement_vectors,
+            sim_config.cell,
+            sim_config.cutoff,
+            self.device,
         )
-        
-        
-        gns = self.orbff.model
-        
-        edge_features = gns.featurize_edges(atomgraph) # [n_edges, edge_feat_dim]
 
-        node_features = gns.featurize_nodes(atomgraph) # [n_atoms, node_feat_dim]
-        
+        gns = self.orbff.model
+
+        edge_features = gns.featurize_edges(atomgraph)  # [n_edges, edge_feat_dim]
+
+        node_features = gns.featurize_nodes(atomgraph)  # [n_atoms, node_feat_dim]
+
         if gns.conditioner is not None:
             cond_nodes, cond_edges = gns.conditioner(atomgraph)
         else:
@@ -201,18 +236,19 @@ class ORBModel(DynamisModel, nn.Module):
 
         # initial Encoder Pass
         nodes, edges = gns._encoder(node_features, edge_features)
-        
-        # calculate cutoffs for attention masking, with deafult to 6A
-        edge_cutoff = get_cutoff(displacement_vectors.norm(dim=-1), r_max=self.model_radius)
 
-        
+        # calculate cutoffs for attention masking, with deafult to 6A
+        edge_cutoff = get_cutoff(
+            displacement_vectors.norm(dim=-1), r_max=self.model_radius
+        )
+
         for i, gnn in enumerate(gns.gnn_stacks):
             if i > 0:
-                local_nodes_to_push = nodes[:n_local_atoms] # [n_local, hidden_dim]
+                local_nodes_to_push = nodes[:n_local_atoms]  # [n_local, hidden_dim]
 
                 nodes = FeaturePushToExchange.apply(
                     local_nodes_to_push, distributed_state, self._latent_exchangers[i]
-                ) # [n_local + n_ghost, hidden_dim]
+                )  # [n_local + n_ghost, hidden_dim]
 
             if os.environ.get("ORB_DEBUG") == "1" and n_atoms > n_local_atoms:
                 _gh = nodes[n_local_atoms:]
@@ -227,8 +263,13 @@ class ORBModel(DynamisModel, nn.Module):
 
             # Run the interaction layer
             nodes, edges = gnn(
-                nodes, edges, senders, receivers, edge_cutoff,
-                cond_nodes=cond_nodes, cond_edges=cond_edges,
+                nodes,
+                edges,
+                senders,
+                receivers,
+                edge_cutoff,
+                cond_nodes=cond_nodes,
+                cond_edges=cond_edges,
             )
 
         # Build a local-only graph for the energy head so n_node, atomic_numbers,
@@ -236,17 +277,25 @@ class ORBModel(DynamisModel, nn.Module):
         # EnergyHead aggregates over batch.n_node and adds reference(atomic_numbers).
         local_node_embeddings = nodes[:n_local_atoms]
         local_graph = AtomGraphs(
-            senders=senders[:0],  # empty edge list (head ignores edges); [:0] keeps int64 dtype
+            senders=senders[
+                :0
+            ],  # empty edge list (head ignores edges); [:0] keeps int64 dtype
             receivers=receivers[:0],
             n_node=torch.tensor([n_local_atoms], device=self.device),
             n_edge=torch.tensor([0], device=self.device),
             node_features={"atomic_numbers": local_atom_types},
             edge_features={"vectors": displacement_vectors.new_zeros((0, 3))},
             system_features={"cell": sim_config.cell.unsqueeze(0).to(positions.dtype)},
-            node_targets={}, edge_targets={}, system_targets={},
-            system_id=None, fix_atoms=None, tags=None,
+            node_targets={},
+            edge_targets={},
+            system_targets={},
+            system_id=None,
+            fix_atoms=None,
+            tags=None,
             radius=sim_config.cutoff,
-            max_num_neighbors=torch.tensor([self.model_max_num_neighbors], device=self.device),
+            max_num_neighbors=torch.tensor(
+                [self.model_max_num_neighbors], device=self.device
+            ),
             half_supercell=False,
         )
         # 1. EnergyHead: below replicates the energyhead.forward() call
@@ -254,12 +303,16 @@ class ORBModel(DynamisModel, nn.Module):
 
         world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-        local_emb_sum = local_node_embeddings.sum(dim=0, keepdim=True)  # [1, latent_dim]
+        local_emb_sum = local_node_embeddings.sum(
+            dim=0, keepdim=True
+        )  # [1, latent_dim]
         local_count = torch.tensor(
-            [float(n_local_atoms)], device=local_emb_sum.device, dtype=local_emb_sum.dtype
+            [float(n_local_atoms)],
+            device=local_emb_sum.device,
+            dtype=local_emb_sum.dtype,
         )
-        # dist_nn.all_reduce is an autograd function 
-        if world_size > 1: 
+        # dist_nn.all_reduce is an autograd function
+        if world_size > 1:
             global_emb_sum = dist_nn.all_reduce(local_emb_sum, op=dist.ReduceOp.SUM)
             global_count = dist_nn.all_reduce(local_count, op=dist.ReduceOp.SUM)
         else:
@@ -267,8 +320,8 @@ class ORBModel(DynamisModel, nn.Module):
 
         global_mean = global_emb_sum / global_count  # [1, latent_dim]
 
-        mlp_out = energy_head.mlp(global_mean).squeeze(-1)   
-        
+        mlp_out = energy_head.mlp(global_mean).squeeze(-1)
+
         # look at _denormalize in forcefield_heads.py
         interaction_global = energy_head.normalizer.inverse(mlp_out)
         if getattr(energy_head, "atom_avg", False):
@@ -282,8 +335,14 @@ class ORBModel(DynamisModel, nn.Module):
         if getattr(self.orbff, "pair_repulsion", False):
             # RECEIVER-local edge set, not the union MP graph: one rank per pair.
             zbl_graph = self._make_atomgraph(
-                atom_types, n_atoms, zbl_edge_index[0], zbl_edge_index[1],
-                zbl_displacement, sim_config.cell, sim_config.cutoff, self.device,
+                atom_types,
+                n_atoms,
+                zbl_edge_index[0],
+                zbl_edge_index[1],
+                zbl_displacement,
+                sim_config.cell,
+                sim_config.cutoff,
+                self.device,
             )
             zbl_local = self.orbff.pair_repulsion_fn(zbl_graph)["energy"].squeeze()
 
@@ -295,8 +354,10 @@ class ORBModel(DynamisModel, nn.Module):
         # Sum in fp64, mirroring ORB's EnergyHead.absolute_energy. The element reference is about 1e4 to 1e5 eV against a ~10 eV interaction
         # Free here — all matmuls are done — and autograd casts back at the fp32 leaf.
         local_energy = (
-            interaction_contribution.double() + zbl_local.double() + reference_local.double()
-        ) * _EV_PER_A_TO_AMU_A_PER_FS2 # ev -> amu * A^2 / fs^2
+            interaction_contribution.double()
+            + zbl_local.double()
+            + reference_local.double()
+        ) * _EV_PER_A_TO_AMU_A_PER_FS2  # ev -> amu * A^2 / fs^2
 
         if os.environ.get("ORB_DEBUG") == "1" and world_size > 1:
             # Unfiltered gns.forward over all n_atoms this rank sees. Valid only
@@ -313,8 +374,14 @@ class ORBModel(DynamisModel, nn.Module):
                 )
                 _fdisp = positions[_fr] - positions[_fs] - _fshift
                 _fgraph = self._make_atomgraph(
-                    atom_types, n_atoms, _fs, _fr, _fdisp,
-                    sim_config.cell, sim_config.cutoff, self.device,
+                    atom_types,
+                    n_atoms,
+                    _fs,
+                    _fr,
+                    _fdisp,
+                    sim_config.cell,
+                    sim_config.cutoff,
+                    self.device,
                 )
                 _fout = gns(_fgraph)
                 _fint = energy_head(_fout["node_features"], _fgraph)
@@ -340,8 +407,10 @@ class ORBModel(DynamisModel, nn.Module):
             )
 
         (grad_local_positions,) = torch.autograd.grad(
-            local_energy, local_positions,
-            create_graph=False, retain_graph=False,
+            local_energy,
+            local_positions,
+            create_graph=False,
+            retain_graph=False,
         )
         local_forces = -grad_local_positions
 

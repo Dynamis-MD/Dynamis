@@ -15,12 +15,11 @@
 //
 // Returns (edges_kept [2, E'], cell_shifts_kept [E', 3]).
 std::tuple<at::Tensor, at::Tensor>
-filter_edges_to_radius_cuda_impl(
-    at::Tensor edges,        // [2, E] int64
-    at::Tensor cell_shifts,  // [E, 3] float32 (shift applied to src)
-    at::Tensor pos,          // [N, 3] float32 (PBC-wrapped)
-    at::Tensor cell,         // [3, 3] float32 row-major (lattice vectors)
-    double radius);
+filter_edges_to_radius_cuda_impl(at::Tensor edges, // [2, E] int64
+                                 at::Tensor cell_shifts, // [E, 3] float32 (shift applied to src)
+                                 at::Tensor pos, // [N, 3] float32 (PBC-wrapped)
+                                 at::Tensor cell, // [3, 3] float32 row-major (lattice vectors)
+                                 double radius);
 
 // Extract halo send/recv CSR + interior mask from per-rank edges (dst is
 // guaranteed to be in my_outer) using geometric symmetry, matching
@@ -36,29 +35,17 @@ filter_edges_to_radius_cuda_impl(
 //   interior_mask       [num_local]  bool   (my atoms with no remote-src edge)
 //   recv_atom_global    [total_recv] int64  (halo recv global ids, peer-then-id order)
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
-extract_halo_info_cuda_impl(
-    at::Tensor edges,          // [2, E] int64 (dst in my_outer)
-    at::Tensor pid_outer,      // [N] int64 partition id
-    at::Tensor my_outer_atoms, // [num_local] int64 global ids
-    int64_t my_rank,
-    int64_t world_size,
-    int64_t N);
+extract_halo_info_cuda_impl(at::Tensor edges, // [2, E] int64 (dst in my_outer)
+                            at::Tensor pid_outer, // [N] int64 partition id
+                            at::Tensor my_outer_atoms, // [num_local] int64 global ids
+                            int64_t my_rank, int64_t world_size, int64_t N);
 
 // ===== C++ entry points with input validation (dist_graph_ops.cpp) =====
 
-std::tuple<at::Tensor, at::Tensor>
-filter_edges_to_radius(
-    at::Tensor edges,
-    at::Tensor cell_shifts,
-    at::Tensor pos,
-    at::Tensor cell,
-    double radius);
+std::tuple<at::Tensor, at::Tensor> filter_edges_to_radius(at::Tensor edges, at::Tensor cell_shifts,
+                                                          at::Tensor pos, at::Tensor cell,
+                                                          double radius);
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
-extract_halo_info(
-    at::Tensor edges,
-    at::Tensor pid_outer,
-    at::Tensor my_outer_atoms,
-    int64_t my_rank,
-    int64_t world_size,
-    int64_t N);
+extract_halo_info(at::Tensor edges, at::Tensor pid_outer, at::Tensor my_outer_atoms,
+                  int64_t my_rank, int64_t world_size, int64_t N);

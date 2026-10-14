@@ -191,12 +191,8 @@ class PythonNCCLExchanger(Exchanger):
         send_offsets = partition_info.send_offsets.cpu().tolist()
         recv_offsets = partition_info.recv_offsets.cpu().tolist()
 
-        send_splits = [
-            send_offsets[r + 1] - send_offsets[r] for r in range(world_size)
-        ]
-        recv_splits = [
-            recv_offsets[r + 1] - recv_offsets[r] for r in range(world_size)
-        ]
+        send_splits = [send_offsets[r + 1] - send_offsets[r] for r in range(world_size)]
+        recv_splits = [recv_offsets[r + 1] - recv_offsets[r] for r in range(world_size)]
 
         total_send = send_offsets[-1]
         total_recv = recv_offsets[-1]
@@ -272,12 +268,8 @@ class PythonNCCLExchanger(Exchanger):
         send_offsets = partition_info.send_offsets.cpu().tolist()
         recv_offsets = partition_info.recv_offsets.cpu().tolist()
 
-        send_splits = [
-            send_offsets[r + 1] - send_offsets[r] for r in range(world_size)
-        ]
-        recv_splits = [
-            recv_offsets[r + 1] - recv_offsets[r] for r in range(world_size)
-        ]
+        send_splits = [send_offsets[r + 1] - send_offsets[r] for r in range(world_size)]
+        recv_splits = [recv_offsets[r + 1] - recv_offsets[r] for r in range(world_size)]
 
         total_send = send_offsets[-1]
         total_recv = recv_offsets[-1]
@@ -341,7 +333,9 @@ class GPUDirectExchanger(Exchanger):
         self.is_ipc_setup = False
         self.send_buffer = None
         self.grad_recv_buffer = None
-        self._wired_flags = None   # drift_flags.DriftFlags this exchanger currently carries
+        self._wired_flags = (
+            None  # drift_flags.DriftFlags this exchanger currently carries
+        )
 
     def reset_buffers(self):
         """Reset the internal buffers of the exchanger to prepare for the next communication round."""

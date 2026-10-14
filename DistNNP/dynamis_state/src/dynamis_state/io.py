@@ -47,10 +47,16 @@ class TrajectoryWriter:
         opts: Optional[list] = None,
     ):
         self._impl = dynamis_state_impl.TrajectoryWriterImpl(
-            global_rank, run_id, author,
-            os.fspath(output_dir), os.fspath(output_file),
-            molecular_info, cell, pbc,
-            time_per_step, steps_per_write,
+            global_rank,
+            run_id,
+            author,
+            os.fspath(output_dir),
+            os.fspath(output_file),
+            molecular_info,
+            cell,
+            pbc,
+            time_per_step,
+            steps_per_write,
             opts or [],
         )
 
@@ -76,6 +82,10 @@ class TrajectoryWriter:
         self.flush()
 
 
-def translate_dynamis_to_xyz(dynamis_path, xyz_path, opts: Optional[list] = None) -> None:
+def translate_dynamis_to_xyz(
+    dynamis_path, xyz_path, opts: Optional[list] = None
+) -> None:
     """Translates every frame of a .dynamis file into a multi-frame extended-xyz file."""
-    dynamis_state_impl.translate_dynamis_to_xyz(os.fspath(dynamis_path), os.fspath(xyz_path), opts or [])
+    dynamis_state_impl.translate_dynamis_to_xyz(
+        os.fspath(dynamis_path), os.fspath(xyz_path), opts or []
+    )

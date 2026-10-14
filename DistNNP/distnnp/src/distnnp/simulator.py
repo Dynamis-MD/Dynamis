@@ -72,8 +72,12 @@ class SimulatorConfig:
 
     # Repartitioning
     rebalance_interval: int = 100  # Repartition every N steps (0 = never)
-    enable_drift_watchdog: bool = True  # Also repartition when any atom has drifted too far
-    drift_threshold_angstrom: Optional[float] = None  # None -> ghost_buffer_angstrom / 2
+    enable_drift_watchdog: bool = (
+        True  # Also repartition when any atom has drifted too far
+    )
+    drift_threshold_angstrom: Optional[float] = (
+        None  # None -> ghost_buffer_angstrom / 2
+    )
 
     # Output
     output_dir: str = "./results"
@@ -162,8 +166,12 @@ class Simulator:
         )
         self._drift_dt: float = config.timestep_fs
         self._steps_done = 0
-        self.drift_rebuild_steps: List[int] = []  # steps preceded by a halo-only rebuild
-        self.drift_breach_steps: List[int] = []  # steps whose graph exceeded the guarantee
+        self.drift_rebuild_steps: List[int] = (
+            []
+        )  # steps preceded by a halo-only rebuild
+        self.drift_breach_steps: List[int] = (
+            []
+        )  # steps whose graph exceeded the guarantee
         device_id = torch.cuda.current_device() if torch.cuda.is_available() else -1
         TimingRegistry.instance().init(
             dist_environment.global_rank,
@@ -223,11 +231,9 @@ class Simulator:
         self._reset_drift_flags()  # SimState latched fresh reference positions
         # Once the state is initialized, we can initialize the model buffers based on the local partition info
 
-        self.model.initialize_buffers(
-            self.state.partition_info, device=device
-        )
+        self.model.initialize_buffers(self.state.partition_info, device=device)
 
-    def setup(self, system_input: Union[str , MolecularInfo]) -> None:
+    def setup(self, system_input: Union[str, MolecularInfo]) -> None:
         # (0) Initialize distributed if not already done.
         # Single-GPU / single-process runs skip init_process_group entirely —
         # torchrun sets RANK; SLURM sets SLURM_PROCID. If neither is present we
@@ -264,7 +270,9 @@ class Simulator:
         global_mol_info = molecular_info
 
         # put tensors on device
-        global_mol_info.atom_vertex_numbers = global_mol_info.atom_vertex_numbers.to(device=self.device)
+        global_mol_info.atom_vertex_numbers = global_mol_info.atom_vertex_numbers.to(
+            device=self.device
+        )
         global_mol_info.atom_types = global_mol_info.atom_types.to(device=self.device)
         global_mol_info.atom_positions = global_mol_info.atom_positions.to(
             device=self.device
@@ -287,7 +295,9 @@ class Simulator:
         self.model.initialize_buffers(
             self.state.local_partition_info, device=device if device else self.device
         )
-        self.writer.update_atom_counts(self.state.local_partition_info.atom_counts.to(torch.uint32))
+        self.writer.update_atom_counts(
+            self.state.local_partition_info.atom_counts.to(torch.uint32)
+        )
         self.integrator.reset()
         self._reset_drift_flags()  # state.sync_and_repartition() re-latched the reference
 
@@ -314,7 +324,8 @@ class Simulator:
             # then built on (Verlet/Langevin after halfstep1, Euler before its update),
             # so the drift word is written there and rides on this step's own pushes.
             self._drift_dt = (
-                step_size if step_size is not None
+                step_size
+                if step_size is not None
                 else getattr(self.integrator, "dt", self.config.timestep_fs)
             )
             out = self.integrator.step(
@@ -426,7 +437,9 @@ class Simulator:
                 energy = self.step(self.config.timestep_fs)
                 self.timer.stop()
                 if self.should_write_traj(total_done):
-                    self.state.local_state.atom_vertex_numbers = self.state.local_partition_info.partition_indices
+                    self.state.local_state.atom_vertex_numbers = (
+                        self.state.local_partition_info.partition_indices
+                    )
                     self.writer.submit(total_done, self.state.local_state)
                 total_done += 1
             self.writer.flush()

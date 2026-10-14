@@ -47,6 +47,7 @@ def install_trajectory_simulator_import_compatibility() -> None:
     if not hasattr(simulator_module, "os"):
         simulator_module.os = os
 
+
 try:
     from ase import Atoms
     from ase.build import bulk
@@ -121,7 +122,9 @@ RDF_TOL = 0.3
 
 def _require_ase() -> None:
     if not HAS_ASE:
-        raise ImportError("Periodic MACE trajectory tests require ASE.") from _ASE_IMPORT_ERROR
+        raise ImportError(
+            "Periodic MACE trajectory tests require ASE."
+        ) from _ASE_IMPORT_ERROR
 
 
 def _pos_rmsd_tolerance(step: int) -> float:
@@ -264,7 +267,9 @@ def build_mace_model(
         device=device.type,
         enable_cueq=enable_cueq,
     )
-    supported_atomic_numbers = {int(value) for value in raw_model.atomic_numbers.detach().cpu().tolist()}
+    supported_atomic_numbers = {
+        int(value) for value in raw_model.atomic_numbers.detach().cpu().tolist()
+    }
     if spec["atomic_number"] not in supported_atomic_numbers:
         raise ValueError(
             f"Selected MACE model_family={model_family!r}, model={model!r} does not support "
@@ -384,7 +389,9 @@ def build_monolithic_mace_model(
 
     calculator_models = getattr(calculator, "models", None)
     if calculator_models is None or len(calculator_models) == 0:
-        raise AttributeError("Public MACE calculator does not expose its loaded model list.")
+        raise AttributeError(
+            "Public MACE calculator does not expose its loaded model list."
+        )
     calculator_model = calculator_models[0]
     cutoff_value = getattr(calculator_model, "r_max", None)
     if cutoff_value is None:
@@ -392,8 +399,7 @@ def build_monolithic_mace_model(
     cutoff = float(torch.as_tensor(cutoff_value).detach().cpu())
 
     supported_atomic_numbers = {
-        int(value)
-        for value in calculator_model.atomic_numbers.detach().cpu().tolist()
+        int(value) for value in calculator_model.atomic_numbers.detach().cpu().tolist()
     }
     if spec["atomic_number"] not in supported_atomic_numbers:
         raise ValueError(
@@ -440,6 +446,7 @@ def extract_frame(sim, energy) -> Dict[str, Any]:
         "vid": vid[order],
     }
     return frame
+
 
 # key orchestration point
 def run_md_loop(
@@ -490,7 +497,12 @@ def energy_oscillation_std(traj) -> float:
     return float(np.std(residual))
 
 
-def compute_rdf(positions: np.ndarray, cell_length: float, r_max: float = RDF_R_MAX, n_bins: int = RDF_N_BINS):
+def compute_rdf(
+    positions: np.ndarray,
+    cell_length: float,
+    r_max: float = RDF_R_MAX,
+    n_bins: int = RDF_N_BINS,
+):
     n = positions.shape[0]
     diffs = positions[:, None, :] - positions[None, :, :]
     diffs -= cell_length * np.round(diffs / cell_length)
@@ -614,9 +626,9 @@ def compare_trajectories(
         write_comparison_report_csv(rows, report_path)
     print_comparison_report_summary(rows)
 
-    assert len(dist_traj) == len(ref_traj) == N_STEPS, (
-        f"frame count mismatch: ref={len(ref_traj)} dist={len(dist_traj)} expected={N_STEPS}"
-    )
+    assert (
+        len(dist_traj) == len(ref_traj) == N_STEPS
+    ), f"frame count mismatch: ref={len(ref_traj)} dist={len(dist_traj)} expected={N_STEPS}"
 
     for step, (ref_frame, dist_frame) in enumerate(zip(ref_traj, dist_traj)):
         assert np.array_equal(ref_frame["vid"], dist_frame["vid"]), (
@@ -698,10 +710,12 @@ def compare_trajectories(
     _, g_ref = averaged_rdf(ref_traj, RDF_LAST_K_FRAMES, side_length_angstrom)
     _, g_dist = averaged_rdf(dist_traj, RDF_LAST_K_FRAMES, side_length_angstrom)
     rdf_diff = float(np.mean(np.abs(g_ref - g_dist)))
-    print(f"[phase 2] RDF mean abs difference (last {RDF_LAST_K_FRAMES} frames): {rdf_diff:.4f}")
-    assert rdf_diff <= RDF_TOL, (
-        f"[phase 2] RDF mean abs difference {rdf_diff:.4f} exceeds loose sanity threshold {RDF_TOL}"
+    print(
+        f"[phase 2] RDF mean abs difference (last {RDF_LAST_K_FRAMES} frames): {rdf_diff:.4f}"
     )
+    assert (
+        rdf_diff <= RDF_TOL
+    ), f"[phase 2] RDF mean abs difference {rdf_diff:.4f} exceeds loose sanity threshold {RDF_TOL}"
 
 
 def reference_vs_reference_check(
@@ -739,7 +753,9 @@ def reference_vs_reference_check(
     traj_b = _one_run(output_dir_b)
     diffs = rmsd_between_trajectories(traj_a, traj_b)
 
-    print(f"{'step':>4}  {'pos_rmsd':>12}  {'pos_tol':>12}  {'vel_rmsd':>12}  {'vel_tol':>12}")
+    print(
+        f"{'step':>4}  {'pos_rmsd':>12}  {'pos_tol':>12}  {'vel_rmsd':>12}  {'vel_tol':>12}"
+    )
     for step in range(N_STEPS):
         if step <= EARLY_PHASE_STEPS:
             pos_tol = POS_VEL_TOL

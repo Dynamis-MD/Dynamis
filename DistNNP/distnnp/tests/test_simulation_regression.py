@@ -29,7 +29,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 @pytest.mark.parametrize("n_steps", [1, 5, 10, 15, 20])
 def test_forces_match_baseline(simulation_factory, n_steps, request):
     integrator_name = request.node.callspec.params.get("simulation_factory")
-    
+
     # Skip langevin, it is tested seperately
     if integrator_name == "langevin":
         pytest.skip("langevin tested seperately")
@@ -38,7 +38,9 @@ def test_forces_match_baseline(simulation_factory, n_steps, request):
     device = simulation.state.pos.device
     local_indices = simulation.state.local_partition_info.partition_indices
 
-    fixture = torch.load(FIXTURES_DIR / f"lj_reference_{integrator_name}.pt", map_location=device)
+    fixture = torch.load(
+        FIXTURES_DIR / f"lj_reference_{integrator_name}.pt", map_location=device
+    )
     reference = fixture[n_steps]
 
     for _ in range(n_steps - 1):
@@ -46,13 +48,15 @@ def test_forces_match_baseline(simulation_factory, n_steps, request):
 
     _, forces = simulation.step()
 
-    torch.testing.assert_close(reference["forces"][local_indices], forces, atol=2e-5, rtol=1e-6)
+    torch.testing.assert_close(
+        reference["forces"][local_indices], forces, atol=2e-5, rtol=1e-6
+    )
 
 
 @pytest.mark.parametrize("n_steps", [1, 5, 10, 15, 20])
 def test_positions_match_baseline(simulation_factory, n_steps, request):
     integrator_name = request.node.callspec.params.get("simulation_factory")
-    
+
     # Skip langevin, it is tested seperately
     if integrator_name == "langevin":
         pytest.skip("langevin tested seperately")
@@ -61,18 +65,26 @@ def test_positions_match_baseline(simulation_factory, n_steps, request):
     device = simulation.state.pos.device
     local_indices = simulation.state.local_partition_info.partition_indices
 
-    fixture = torch.load(FIXTURES_DIR / f"lj_reference_{integrator_name}.pt", map_location=device)
+    fixture = torch.load(
+        FIXTURES_DIR / f"lj_reference_{integrator_name}.pt", map_location=device
+    )
     reference = fixture[n_steps]
 
     for _ in range(n_steps):
         simulation.step()
 
-    torch.testing.assert_close(reference["positions"][local_indices], simulation.state.pos, atol=2e-5, rtol=1e-6)
-    
+    torch.testing.assert_close(
+        reference["positions"][local_indices],
+        simulation.state.pos,
+        atol=2e-5,
+        rtol=1e-6,
+    )
+
+
 @pytest.mark.parametrize("n_steps", [1, 5, 10, 15, 20])
 def test_energy_matches_baseline(simulation_factory, n_steps, request):
     integrator_name = request.node.callspec.params.get("simulation_factory")
-    
+
     # Skip langevin, it is tested seperately
     if integrator_name == "langevin":
         pytest.skip("langevin tested seperately")
@@ -80,7 +92,9 @@ def test_energy_matches_baseline(simulation_factory, n_steps, request):
     simulation = simulation_factory()
     device = simulation.state.pos.device
 
-    fixture = torch.load(FIXTURES_DIR / f"lj_reference_{integrator_name}.pt", map_location=device)
+    fixture = torch.load(
+        FIXTURES_DIR / f"lj_reference_{integrator_name}.pt", map_location=device
+    )
     reference = fixture[n_steps]
 
     for _ in range(n_steps - 1):
@@ -93,7 +107,8 @@ def test_energy_matches_baseline(simulation_factory, n_steps, request):
 
     if dist.get_rank() == 0:
         torch.testing.assert_close(reference["energy"], energy, atol=2e-5, rtol=1e-6)
-        
+
+
 # Langevin canonical-ensemble check. Compares the single-GPU reference
 # (in the fixture) against a fresh multi-GPU run of the same system —
 # same atoms, same params, only the Langevin noise seed differs.
@@ -128,8 +143,12 @@ def _langevin_run_means(sim, n_steps, n_equil):
         energy, _ = sim.step()
         if step > n_equil:
             local = sim.state.local_state
-            local_masses = TORCH_MASSES.to(local.atom_positions.device)[local.atom_types.reshape(-1)]
-            local_ke = 0.5 * (local_masses.unsqueeze(1) * local.atom_velocities ** 2).sum()
+            local_masses = TORCH_MASSES.to(local.atom_positions.device)[
+                local.atom_types.reshape(-1)
+            ]
+            local_ke = (
+                0.5 * (local_masses.unsqueeze(1) * local.atom_velocities**2).sum()
+            )
             dist.all_reduce(local_ke, op=dist.ReduceOp.SUM)
             total_pe = energy.clone()
             dist.all_reduce(total_pe, op=dist.ReduceOp.SUM)
@@ -154,7 +173,9 @@ def test_langevin_matches_baseline(simulation_factory, request):
     if integrator_name != "langevin":
         pytest.skip("langevin-only test")
 
-    fixture = torch.load(FIXTURES_DIR / f"lj_reference_{integrator_name}.pt", map_location="cpu")
+    fixture = torch.load(
+        FIXTURES_DIR / f"lj_reference_{integrator_name}.pt", map_location="cpu"
+    )
     ref_ke = fixture["ke_per_run"].to(torch.float64).numpy()
     ref_pe = fixture["pe_per_run"].to(torch.float64).numpy()
 

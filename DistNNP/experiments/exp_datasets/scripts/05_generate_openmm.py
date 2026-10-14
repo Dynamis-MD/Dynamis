@@ -39,8 +39,9 @@ def check_openmm():
         from openmm import unit  # noqa: F401
         from openmm.app import PDBFile  # noqa: F401
     except ImportError:
-        sys.exit("Missing: conda install -c conda-forge openmm\n"
-                 "         pip install ase")
+        sys.exit(
+            "Missing: conda install -c conda-forge openmm\n" "         pip install ase"
+        )
 
 
 def check_openmmtools():
@@ -51,6 +52,7 @@ def check_openmmtools():
 
 
 # ── shared helper ─────────────────────────────────────────────────────────
+
 
 def topology_to_ase(topology, positions_nm, cell_vectors_nm=None):
     """Convert OpenMM Topology + positions (nm) to ASE Atoms."""
@@ -73,6 +75,7 @@ def topology_to_ase(topology, positions_nm, cell_vectors_nm=None):
 
 # ── DHFR ─────────────────────────────────────────────────────────────────
 
+
 def generate_dhfr(out_path: Path):
     """DHFR + TIP3P water from openmmtools testsystems."""
     check_openmmtools()
@@ -86,17 +89,11 @@ def generate_dhfr(out_path: Path):
     test = DHFRExplicit()
 
     # test.positions is an OpenMM Quantity[nm]; convert to Å numpy array
-    pos = np.array([
-        [v.value_in_unit(ang_unit) for v in p]
-        for p in test.positions
-    ])
+    pos = np.array([[v.value_in_unit(ang_unit) for v in p] for p in test.positions])
     elements = [a.element.symbol for a in test.topology.atoms()]
 
     box_vecs = test.topology.getPeriodicBoxVectors()
-    cell = np.array([
-        [v.value_in_unit(ang_unit) for v in row]
-        for row in box_vecs
-    ])
+    cell = np.array([[v.value_in_unit(ang_unit) for v in row] for row in box_vecs])
 
     atoms = Atoms(symbols=elements, positions=pos, cell=cell, pbc=True)
     atoms.wrap()
@@ -106,6 +103,7 @@ def generate_dhfr(out_path: Path):
 
 
 # ── ApoA1 ────────────────────────────────────────────────────────────────
+
 
 def generate_apoa1(pdb_path: Path, out_path: Path):
     """ApoA1 + POPC membrane + water from OpenMM example PDB."""
@@ -118,18 +116,14 @@ def generate_apoa1(pdb_path: Path, out_path: Path):
     print(f"  Reading {pdb_path.name} ...")
     pdb = PDBFile(str(pdb_path))
 
-    pos = np.array([
-        [p.value_in_unit(angstrom) for p in v]
-        for v in pdb.getPositions()
-    ])
+    pos = np.array([[p.value_in_unit(angstrom) for p in v] for v in pdb.getPositions()])
     elements = [a.element.symbol for a in pdb.topology.atoms()]
 
     box_vectors = pdb.topology.getPeriodicBoxVectors()
     if box_vectors is not None:
-        cell = np.array([
-            [v.value_in_unit(angstrom) for v in row]
-            for row in box_vectors
-        ])
+        cell = np.array(
+            [[v.value_in_unit(angstrom) for v in row] for row in box_vectors]
+        )
         atoms = Atoms(symbols=elements, positions=pos, cell=cell, pbc=True)
         atoms.wrap()
     else:
@@ -141,6 +135,7 @@ def generate_apoa1(pdb_path: Path, out_path: Path):
 
 
 # ── DPPC membrane ─────────────────────────────────────────────────────────
+
 
 def generate_dppc(out_path: Path):
     """DPPC bilayer + water from OpenMM built-in data files."""
@@ -157,27 +152,27 @@ def generate_dppc(out_path: Path):
 
     if not dppc_pdb.exists():
         # Try alternate name
-        candidates = list(openmm_data.glob("dppc*.pdb")) + list(openmm_data.glob("DPPC*.pdb"))
+        candidates = list(openmm_data.glob("dppc*.pdb")) + list(
+            openmm_data.glob("DPPC*.pdb")
+        )
         if not candidates:
-            sys.exit(f"DPPC.pdb not found in {openmm_data}. "
-                     "List available membranes: ls " + str(openmm_data) + "/*.pdb")
+            sys.exit(
+                f"DPPC.pdb not found in {openmm_data}. "
+                "List available membranes: ls " + str(openmm_data) + "/*.pdb"
+            )
         dppc_pdb = candidates[0]
 
     print(f"  Reading {dppc_pdb.name} from OpenMM data ...")
     pdb = PDBFile(str(dppc_pdb))
 
-    pos = np.array([
-        [p.value_in_unit(angstrom) for p in v]
-        for v in pdb.getPositions()
-    ])
+    pos = np.array([[p.value_in_unit(angstrom) for p in v] for v in pdb.getPositions()])
     elements = [a.element.symbol for a in pdb.topology.atoms()]
 
     box_vectors = pdb.topology.getPeriodicBoxVectors()
     if box_vectors is not None:
-        cell = np.array([
-            [v.value_in_unit(angstrom) for v in row]
-            for row in box_vectors
-        ])
+        cell = np.array(
+            [[v.value_in_unit(angstrom) for v in row] for row in box_vectors]
+        )
         atoms = Atoms(symbols=elements, positions=pos, cell=cell, pbc=True)
         atoms.wrap()
     else:
@@ -191,12 +186,17 @@ def generate_dppc(out_path: Path):
 # ── main ─────────────────────────────────────────────────────────────────
 
 SYSTEMS = {
-    "dhfr":  ("DHFR + TIP3P water (openmmtools)",
-               SOL_DIR / "dhfr_23k_openmm.xyz",   None),
-    "apoa1": ("ApoA1 + POPC + water (OpenMM example)",
-               MEM_DIR / "apoa1_92k_openmm.xyz",   PDB_DIR / "apoa1.pdb"),
-    "dppc":  ("DPPC bilayer + water (OpenMM built-in)",
-               MEM_DIR / "dppc_membrane_28k.xyz",  None),
+    "dhfr": ("DHFR + TIP3P water (openmmtools)", SOL_DIR / "dhfr_23k_openmm.xyz", None),
+    "apoa1": (
+        "ApoA1 + POPC + water (OpenMM example)",
+        MEM_DIR / "apoa1_92k_openmm.xyz",
+        PDB_DIR / "apoa1.pdb",
+    ),
+    "dppc": (
+        "DPPC bilayer + water (OpenMM built-in)",
+        MEM_DIR / "dppc_membrane_28k.xyz",
+        None,
+    ),
 }
 
 
@@ -204,17 +204,33 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate pre-equilibrated systems via OpenMM"
     )
-    parser.add_argument("--systems", nargs="*", default=None,
-                        choices=list(SYSTEMS.keys()),
-                        help="Systems to generate (default: all)")
+    parser.add_argument(
+        "--systems",
+        nargs="*",
+        default=None,
+        choices=list(SYSTEMS.keys()),
+        help="Systems to generate (default: all)",
+    )
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--sol-dir", type=Path, default=None,
-                        help="Override output dir for solvated systems (default: protein_solvated/)")
-    parser.add_argument("--mem-dir", type=Path, default=None,
-                        help="Override output dir for membrane systems (default: membrane/)")
-    parser.add_argument("--pdb-dir", type=Path, default=None,
-                        help="Override directory for source PDB files (default: pdb/)")
+    parser.add_argument(
+        "--sol-dir",
+        type=Path,
+        default=None,
+        help="Override output dir for solvated systems (default: protein_solvated/)",
+    )
+    parser.add_argument(
+        "--mem-dir",
+        type=Path,
+        default=None,
+        help="Override output dir for membrane systems (default: membrane/)",
+    )
+    parser.add_argument(
+        "--pdb-dir",
+        type=Path,
+        default=None,
+        help="Override directory for source PDB files (default: pdb/)",
+    )
     args = parser.parse_args()
 
     if args.list:
@@ -245,6 +261,7 @@ def main():
 
         if out_path.exists() and not args.overwrite:
             from ase.io import read
+
             n = len(read(str(out_path)))
             print(f"  SKIP (exists): {out_path.name} ({n} atoms)")
             continue
@@ -255,7 +272,9 @@ def main():
                 generate_dhfr(out_path)
             elif key == "apoa1":
                 if not src_path.exists():
-                    print(f"  SKIP: {src_path.name} not found. Run 01_download_pdbs.sh first.")
+                    print(
+                        f"  SKIP: {src_path.name} not found. Run 01_download_pdbs.sh first."
+                    )
                     continue
                 generate_apoa1(src_path, out_path)
             elif key == "dppc":
@@ -263,6 +282,7 @@ def main():
         except Exception as e:
             print(f"  ERROR: {e}")
             import traceback
+
             traceback.print_exc()
 
 

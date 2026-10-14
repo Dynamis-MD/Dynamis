@@ -10,6 +10,7 @@ Run:
 
 The multi-rank tests use torchrun launched internally via subprocess.
 """
+
 import os
 import subprocess
 import sys
@@ -25,13 +26,12 @@ from dynamis_state.dist_graph_builder import (
     _extract_halo_info_local,
 )
 
-
 # ─── ground-truth oracle (mirrors main/build_halo_maps.cpp) ────────────────
 
 
 def oracle_build_halo_maps(
     pos: torch.Tensor,
-    partition_id: torch.Tensor,    # [N] int32/int64
+    partition_id: torch.Tensor,  # [N] int32/int64
     cell: torch.Tensor,
     pbc: torch.Tensor,
     cutoff_plus_skin: float,
@@ -52,15 +52,20 @@ def oracle_build_halo_maps(
 
     # Full graph at r+skin (replicated)
     edges, cell_shifts, _, _ = _impl.radius_graph_pbc_ex(
-        pos, cell, pbc, cutoff_plus_skin,
-        1000, False, None,
+        pos,
+        cell,
+        pbc,
+        cutoff_plus_skin,
+        1000,
+        False,
+        None,
     )
     src = edges[0]
     dst = edges[1]
 
     # needed_by[N, W]
     needed_by = torch.zeros((N, W), dtype=torch.bool, device=device)
-    needed_by[torch.arange(N, device=device), pid] = True            # self
+    needed_by[torch.arange(N, device=device), pid] = True  # self
     owner_dst = pid.index_select(0, dst)
     needed_by[src, owner_dst] = True
 
@@ -69,9 +74,11 @@ def oracle_build_halo_maps(
     num_local = my_indices.numel()
 
     # SEND: my atoms needed by other ranks
-    my_needed = needed_by.index_select(0, my_indices).clone()       # [num_local, W]
-    my_needed[:, R] = False                                          # zero self col
-    send_pairs = torch.nonzero(my_needed, as_tuple=False)            # [E_send, 2]: (local_pos, peer)
+    my_needed = needed_by.index_select(0, my_indices).clone()  # [num_local, W]
+    my_needed[:, R] = False  # zero self col
+    send_pairs = torch.nonzero(
+        my_needed, as_tuple=False
+    )  # [E_send, 2]: (local_pos, peer)
     if send_pairs.numel() > 0:
         send_atom_global = my_indices[send_pairs[:, 0]]
         send_peer = send_pairs[:, 1]
@@ -111,8 +118,10 @@ def oracle_build_halo_maps(
     recv_offsets[1:] = torch.cumsum(recv_counts, 0)
     total_recv = recv_global.numel()
     recv_ghost_indices = torch.arange(
-        num_local, num_local + total_recv,
-        dtype=torch.int64, device=device,
+        num_local,
+        num_local + total_recv,
+        dtype=torch.int64,
+        device=device,
     )
 
     # interior_mask: my atoms with no remote-src edge
@@ -134,11 +143,11 @@ def oracle_build_halo_maps(
     return dict(
         send_offsets=send_offsets,
         send_local_indices=send_local_indices,
-        send_atom_global=send_atom_global,           # for cross-validation
+        send_atom_global=send_atom_global,  # for cross-validation
         send_peer=send_peer,
         recv_offsets=recv_offsets,
         recv_ghost_indices=recv_ghost_indices,
-        recv_atom_global=recv_global,                # for cross-validation
+        recv_atom_global=recv_global,  # for cross-validation
         recv_peer=recv_peer,
         interior_mask=interior_mask,
         my_indices=my_indices,
@@ -169,7 +178,11 @@ def test_v5_single_rank_smoke():
     env.num_nodes = 1
 
     builder = DistGraphBuilder(
-        cell, pbc, cutoff=4.0, ghost_buffer=0.5, env=env,
+        cell,
+        pbc,
+        cutoff=4.0,
+        ghost_buffer=0.5,
+        env=env,
         refresh_interval=100,
     )
     res = builder.build(pos)
@@ -224,7 +237,9 @@ def test_v5_halo_map_vs_cpp_build_halo_maps(W):
         cfg.pbc = pbc
         info = _impl.PartitionMessagePassingInfo()
         info.partition_id = pid
-        info.global_send_recv_matrix = torch.zeros(W, W, dtype=torch.int64, device=device)
+        info.global_send_recv_matrix = torch.zeros(
+            W, W, dtype=torch.int64, device=device
+        )
         _impl.SimpleSpatialPartitioner().build_halo_maps(info, mol, env, cfg)
 
         # --- v5 extract_halo_info on the same partition (edges at r+skin) ---
@@ -232,17 +247,23 @@ def test_v5_halo_map_vs_cpp_build_halo_maps(W):
         edges, _, _, _ = _impl.radius_graph_pbc_ex(
             pos, cell, pbc, r_skin, 0, False, my_outer
         )
-        (send_offsets, send_local_indices, recv_offsets,
-         recv_ghost_indices, interior_mask, _) = _impl.extract_halo_info(
-            edges, pid, my_outer, R, W, N
-        )
+        (
+            send_offsets,
+            send_local_indices,
+            recv_offsets,
+            recv_ghost_indices,
+            interior_mask,
+            _,
+        ) = _impl.extract_halo_info(edges, pid, my_outer, R, W, N)
 
         assert torch.equal(info.send_offsets, send_offsets), f"send_offsets rank {R}"
-        assert torch.equal(info.send_local_indices, send_local_indices), \
-            f"send_local_indices rank {R}"
+        assert torch.equal(
+            info.send_local_indices, send_local_indices
+        ), f"send_local_indices rank {R}"
         assert torch.equal(info.recv_offsets, recv_offsets), f"recv_offsets rank {R}"
-        assert torch.equal(info.recv_ghost_indices, recv_ghost_indices), \
-            f"recv_ghost_indices rank {R}"
+        assert torch.equal(
+            info.recv_ghost_indices, recv_ghost_indices
+        ), f"recv_ghost_indices rank {R}"
         assert torch.equal(info.interior_mask, interior_mask), f"interior_mask rank {R}"
         total_send += int(send_local_indices.numel())
 
@@ -494,10 +515,17 @@ def test_v5_w2_correctness_vs_oracle():
 
     result = subprocess.run(
         [
-            sys.executable, "-m", "torch.distributed.run",
-            "--standalone", "--nproc_per_node=2", script_path,
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nproc_per_node=2",
+            script_path,
         ],
-        capture_output=True, text=True, timeout=180, env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=env,
     )
     print("=== STDOUT ===")
     print(result.stdout)
@@ -607,9 +635,18 @@ def test_v5_w2_mode_b_consistency():
     env = os.environ.copy()
     env["PYTHONPATH"] = os.getcwd() + "/dynamis_state/src:" + env.get("PYTHONPATH", "")
     result = subprocess.run(
-        [sys.executable, "-m", "torch.distributed.run",
-         "--standalone", "--nproc_per_node=2", script_path],
-        capture_output=True, text=True, timeout=180, env=env,
+        [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nproc_per_node=2",
+            script_path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=env,
     )
     print("=== STDOUT ===\n" + result.stdout)
     print("=== STDERR ===\n" + result.stderr)

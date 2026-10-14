@@ -11,18 +11,16 @@
 #include "dynamis_state/radius_graph.hpp"
 #include "dynamis_state/timing.hpp"
 
-namespace dynamis_state
-{
+namespace dynamis_state {
 
 static constexpr int64_t PARTITION_MAX_NUM_NEIGHBORS = 1000;
 
 // ---------------------------------------------------------------------------
 // CPU fallback: Morton key computation (21-bit, bit-interleave loop)
 // ---------------------------------------------------------------------------
-static torch::Tensor compute_morton_keys_cpu(
-    const torch::Tensor &pos,    // [N, 3]
-    const torch::Tensor &pos_min,
-    const torch::Tensor &pos_range)
+static torch::Tensor compute_morton_keys_cpu(const torch::Tensor &pos, // [N, 3]
+                                             const torch::Tensor &pos_min,
+                                             const torch::Tensor &pos_range)
 {
     int64_t N = pos.size(0);
     auto long_opts = torch::TensorOptions().dtype(torch::kLong).device(pos.device());
@@ -34,7 +32,7 @@ static torch::Tensor compute_morton_keys_cpu(
     auto y = coords_int.select(1, 1);
     auto z = coords_int.select(1, 2);
 
-    auto result = torch::zeros({N}, long_opts);
+    auto result = torch::zeros({ N }, long_opts);
     for (int i = 0; i < 21; i++) {
         auto x_bit = x.bitwise_right_shift(i).bitwise_and(1);
         auto y_bit = y.bitwise_right_shift(i).bitwise_and(1);
@@ -49,10 +47,9 @@ static torch::Tensor compute_morton_keys_cpu(
 // ---------------------------------------------------------------------------
 // CPU fallback: Hilbert key computation (order=7, matching baseline)
 // ---------------------------------------------------------------------------
-static torch::Tensor compute_hilbert_keys_cpu(
-    const torch::Tensor &pos,    // [N, 3]
-    const torch::Tensor &pos_min,
-    const torch::Tensor &pos_range)
+static torch::Tensor compute_hilbert_keys_cpu(const torch::Tensor &pos, // [N, 3]
+                                              const torch::Tensor &pos_min,
+                                              const torch::Tensor &pos_range)
 {
     int64_t N = pos.size(0);
     auto long_opts = torch::TensorOptions().dtype(torch::kLong).device(pos.device());
@@ -60,12 +57,13 @@ static torch::Tensor compute_hilbert_keys_cpu(
 
     const int order = 7;
     const int64_t grid_max = (1 << order) - 1;
-    auto coords_int = (coords_normalized * static_cast<double>(grid_max)).to(torch::kLong).clamp(0, grid_max);
+    auto coords_int =
+            (coords_normalized * static_cast<double>(grid_max)).to(torch::kLong).clamp(0, grid_max);
     auto x = coords_int.select(1, 0);
     auto y = coords_int.select(1, 1);
     auto z = coords_int.select(1, 2);
 
-    auto result = torch::zeros({N}, long_opts);
+    auto result = torch::zeros({ N }, long_opts);
     for (int i = 0; i < order; i++) {
         auto x_bit = x.bitwise_right_shift(i).bitwise_and(1);
         auto y_bit = y.bitwise_right_shift(i).bitwise_and(1);
@@ -73,22 +71,22 @@ static torch::Tensor compute_hilbert_keys_cpu(
 
         torch::Tensor bx, by, bz;
         if (i == 0) {
-            bx = x_bit; by = y_bit; bz = z_bit;
+            bx = x_bit;
+            by = y_bit;
+            bz = z_bit;
         } else {
             auto x_mask = x_bit.to(torch::kBool);
             auto y_mask = y_bit.to(torch::kBool);
             auto z_mask = z_bit.to(torch::kBool);
 
             bx = torch::where(x_mask, z_bit, x_bit);
-            by = torch::where(x_mask, y_bit,
-                    torch::where(y_mask, z_bit, y_bit));
+            by = torch::where(x_mask, y_bit, torch::where(y_mask, z_bit, y_bit));
             bz = torch::where(x_mask, y_bit,
-                    torch::where(y_mask, x_bit,
-                        torch::where(z_mask, y_bit, z_bit)));
+                              torch::where(y_mask, x_bit, torch::where(z_mask, y_bit, z_bit)));
         }
         result.bitwise_or_(bx.bitwise_left_shift(3 * i)
-                           .bitwise_or(by.bitwise_left_shift(3 * i + 1))
-                           .bitwise_or(bz.bitwise_left_shift(3 * i + 2)));
+                                   .bitwise_or(by.bitwise_left_shift(3 * i + 1))
+                                   .bitwise_or(bz.bitwise_left_shift(3 * i + 2)));
     }
     return result;
 }
@@ -96,11 +94,10 @@ static torch::Tensor compute_hilbert_keys_cpu(
 // ---------------------------------------------------------------------------
 // Common helper: SFC partition → extract local atoms for rank R.
 // ---------------------------------------------------------------------------
-static PartitionMessagePassingInfo do_partition(
-    const MolecularInfo &state,
-    const DistEnvironment &env,
-    const torch::Tensor &weights,   // may be undefined
-    SFCCurveType curve_type)
+static PartitionMessagePassingInfo do_partition(const MolecularInfo &state,
+                                                const DistEnvironment &env,
+                                                const torch::Tensor &weights, // may be undefined
+                                                SFCCurveType curve_type)
 {
     PartitionMessagePassingInfo info;
     auto device = state.atom_positions.device();
@@ -113,8 +110,7 @@ static PartitionMessagePassingInfo do_partition(
 
     torch::Tensor labels;
     if (device.is_cuda()) {
-        labels = sfc_partition_cuda(
-            state.atom_positions.to(torch::kFloat), weights, W, ct);
+        labels = sfc_partition_cuda(state.atom_positions.to(torch::kFloat), weights, W, ct);
     } else {
         // CPU fallback: compute keys → sort → assign
         auto pos = state.atom_positions.to(torch::kFloat);
@@ -130,7 +126,7 @@ static PartitionMessagePassingInfo do_partition(
         }
 
         auto perm = std::get<1>(at::sort(sfc_keys));
-        labels = torch::empty({N}, long_opts);
+        labels = torch::empty({ N }, long_opts);
 
         if (weights.defined()) {
             // Exact int64 prefix sum (weights are integer edge counts). A float
@@ -150,7 +146,7 @@ static PartitionMessagePassingInfo do_partition(
             }
         } else {
             int64_t base = N / W;
-            int64_t rem  = N % W;
+            int64_t rem = N % W;
             int64_t threshold = rem * (base + 1);
 
             for (int64_t i = 0; i < N; i++) {
@@ -173,11 +169,11 @@ static PartitionMessagePassingInfo do_partition(
     auto my_indices = torch::nonzero(my_mask).squeeze(-1);
     int64_t num_local = my_indices.size(0);
 
-    info.atom_counts           = torch::bincount(labels, /*weights=*/{}, /*minlength=*/env.world_size);
-    info.partition_indices     = state.atom_vertex_numbers.index_select(0, my_indices);
+    info.atom_counts = torch::bincount(labels, /*weights=*/{}, /*minlength=*/env.world_size);
+    info.partition_indices = state.atom_vertex_numbers.index_select(0, my_indices);
 
-    info.global_send_recv_matrix = torch::zeros({W, W}, long_opts);
-    info.global_send_recv_matrix.index_put_({R, R}, num_local);
+    info.global_send_recv_matrix = torch::zeros({ W, W }, long_opts);
+    info.global_send_recv_matrix.index_put_({ R, R }, num_local);
 
     return info;
 }
@@ -185,8 +181,8 @@ static PartitionMessagePassingInfo do_partition(
 // ---------------------------------------------------------------------------
 // Mode 1 & 2: unweighted or user-provided edge_counts
 // ---------------------------------------------------------------------------
-PartitionMessagePassingInfo SFCPartitioner::partition(
-    const MolecularInfo &state, const DistEnvironment &env)
+PartitionMessagePassingInfo SFCPartitioner::partition(const MolecularInfo &state,
+                                                      const DistEnvironment &env)
 {
     Timer t;
     t.start("partition", TimerClass::Compute,
@@ -202,10 +198,9 @@ PartitionMessagePassingInfo SFCPartitioner::partition(
 // ---------------------------------------------------------------------------
 // Mode 3: auto-compute edge weights via radius_graph_pbc (CUDA required).
 // ---------------------------------------------------------------------------
-PartitionMessagePassingInfo SFCPartitioner::partition(
-    const MolecularInfo &state,
-    const DistEnvironment &env,
-    const SimulationConfig &config)
+PartitionMessagePassingInfo SFCPartitioner::partition(const MolecularInfo &state,
+                                                      const DistEnvironment &env,
+                                                      const SimulationConfig &config)
 {
     // Mode 3 always operates on CUDA tensors (radius_graph_pbc requires it).
     Timer t;
@@ -218,18 +213,18 @@ PartitionMessagePassingInfo SFCPartitioner::partition(
 
     float cutoff = static_cast<float>(config.cutoff);
     auto cell = config.cell.to(device).to(torch::kFloat);
-    auto pbc  = config.pbc.to(device);
+    auto pbc = config.pbc.to(device);
 
     // Build graph at cutoff radius (timed inside as "build_graph")
-    auto graph_result = radius_graph_pbc(
-        pos.to(torch::kFloat), cell, pbc, cutoff,
-        PARTITION_MAX_NUM_NEIGHBORS, /*enforce_max_strictly=*/false);
-    auto edge_idx = std::get<0>(graph_result);  // [2, E]
+    auto graph_result =
+            radius_graph_pbc(pos.to(torch::kFloat), cell, pbc, cutoff, PARTITION_MAX_NUM_NEIGHBORS,
+                             /*enforce_max_strictly=*/false);
+    auto edge_idx = std::get<0>(graph_result); // [2, E]
 
     // Count edges per atom (dst-based)
-    auto dst = edge_idx[1];  // [E]
-    auto edge_counts = torch::zeros({N}, long_opts);
-    edge_counts.scatter_add_(0, dst, torch::ones({dst.size(0)}, long_opts));
+    auto dst = edge_idx[1]; // [E]
+    auto edge_counts = torch::zeros({ N }, long_opts);
+    edge_counts.scatter_add_(0, dst, torch::ones({ dst.size(0) }, long_opts));
 
     // Partition using computed weights
     auto info = do_partition(state, env, edge_counts, curve_type_);

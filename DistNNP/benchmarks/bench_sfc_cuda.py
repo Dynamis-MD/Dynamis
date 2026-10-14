@@ -19,6 +19,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "baseline"))
 try:
     from sfc import sfc_partition as baseline_sfc_partition
+
     HAS_BASELINE = True
 except ImportError:
     HAS_BASELINE = False
@@ -90,13 +91,19 @@ def main():
             p_kd = KDTreePartitioner()
             t_kd = bench(lambda: p_kd.partition(state, env))
 
-            line = f"{N:>8} {W:>4} {t_morton:>9.2f}ms {t_hilbert:>9.2f}ms {t_kd:>9.2f}ms"
+            line = (
+                f"{N:>8} {W:>4} {t_morton:>9.2f}ms {t_hilbert:>9.2f}ms {t_kd:>9.2f}ms"
+            )
 
             # Baseline Python
             if HAS_BASELINE:
                 pos = state.atom_positions
-                t_bl_morton = bench(lambda: baseline_sfc_partition(pos, W, "morton", device))
-                t_bl_hilbert = bench(lambda: baseline_sfc_partition(pos, W, "hilbert", device))
+                t_bl_morton = bench(
+                    lambda: baseline_sfc_partition(pos, W, "morton", device)
+                )
+                t_bl_hilbert = bench(
+                    lambda: baseline_sfc_partition(pos, W, "hilbert", device)
+                )
                 line += f" {t_bl_morton:>9.2f}ms {t_bl_hilbert:>9.2f}ms"
             else:
                 t_bl_morton = None
@@ -107,7 +114,9 @@ def main():
 
     # Weighted benchmark
     print("\n--- Weighted (edge_counts) ---")
-    print(f"{'N':>8} {'W':>4} {'SFC-M-W':>10} {'SFC-H-W':>10} {'KD-W':>10} {'Speedup':>10}")
+    print(
+        f"{'N':>8} {'W':>4} {'SFC-M-W':>10} {'SFC-H-W':>10} {'KD-W':>10} {'Speedup':>10}"
+    )
     print("-" * 55)
 
     for N in sizes:
@@ -126,7 +135,9 @@ def main():
             t_kd = bench(lambda: p_kd.partition(state, env))
 
             speedup = t_kd / t_morton if t_morton > 0 else float("inf")
-            print(f"{N:>8} {W:>4} {t_morton:>9.2f}ms {t_hilbert:>9.2f}ms {t_kd:>9.2f}ms {speedup:>9.2f}x")
+            print(
+                f"{N:>8} {W:>4} {t_morton:>9.2f}ms {t_hilbert:>9.2f}ms {t_kd:>9.2f}ms {speedup:>9.2f}x"
+            )
 
 
 if __name__ == "__main__":

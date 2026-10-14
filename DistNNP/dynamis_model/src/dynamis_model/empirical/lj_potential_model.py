@@ -126,7 +126,9 @@ class LennardJonesPotentialModel(DynamisModel):
             # next integrator step and overflows the radius-graph grid size.
             atom_types = (
                 FeaturePushToExchange.apply(
-                    local_atom_types.float().unsqueeze(1), distributed_state, self.atom_type_exchanger
+                    local_atom_types.float().unsqueeze(1),
+                    distributed_state,
+                    self.atom_type_exchanger,
                 )
                 .long()
                 .reshape(-1)
@@ -156,7 +158,11 @@ class LennardJonesPotentialModel(DynamisModel):
 
         # Compute the Lennard-Jones potential energy using the local atom types, positions, and edge index
         energy = lennard_jones_potential(
-            atom_types, positions, edge_index, self.epsilon, self.sigma,
+            atom_types,
+            positions,
+            edge_index,
+            self.epsilon,
+            self.sigma,
             n_local=local_positions.shape[0],
         )
 

@@ -7,8 +7,13 @@ import os
 
 # Load reference implementation directly
 _ref_path = os.path.join(
-    os.path.dirname(__file__), "..", "..", "baseline",
-    "local_fairchem", "graph", "radius_graph_pbc.py"
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "baseline",
+    "local_fairchem",
+    "graph",
+    "radius_graph_pbc.py",
 )
 _spec = importlib.util.spec_from_file_location("_ref", _ref_path)
 _mod = importlib.util.module_from_spec(_spec)
@@ -83,10 +88,10 @@ if __name__ == "__main__":
         f"{'v2':>10s}  {'cuda':>10s}  {'speedup':>8s}  check"
     )
     print("=" * 115)
-    bench("100 atoms, r=5, box=20",      100,  20.0, 5.0, 200)
-    bench("500 atoms, r=5, box=25",      500,  25.0, 5.0, 200)
-    bench("1K atoms, r=5, box=30",      1000,  30.0, 5.0, 200)
-    bench("2K atoms, r=6, box=40",      2000,  40.0, 6.0, 500)
-    bench("4K atoms, r=6, box=50",      4000,  50.0, 6.0, 500)
-    bench("10K atoms, r=6, box=65",    10000,  65.0, 6.0, 500)
+    bench("100 atoms, r=5, box=20", 100, 20.0, 5.0, 200)
+    bench("500 atoms, r=5, box=25", 500, 25.0, 5.0, 200)
+    bench("1K atoms, r=5, box=30", 1000, 30.0, 5.0, 200)
+    bench("2K atoms, r=6, box=40", 2000, 40.0, 6.0, 500)
+    bench("4K atoms, r=6, box=50", 4000, 50.0, 6.0, 500)
+    bench("10K atoms, r=6, box=65", 10000, 65.0, 6.0, 500)
     print("=" * 115)

@@ -45,6 +45,7 @@ def test_energy_forces_finite(simulation_factory):
     assert torch.isfinite(energy).all()
     assert torch.isfinite(forces).all()
 
+
 def test_multi_step_no_crash(simulation_factory):
     """10 consecutive steps complete without error or state corruption."""
     simulation = simulation_factory()

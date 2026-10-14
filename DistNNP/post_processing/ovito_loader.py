@@ -5,17 +5,88 @@ from ovito.io import FileReaderInterface, import_file
 from typing import Callable, Any
 
 ELEMENT_SYMBOLS = {
-    1: 'H',   2: 'He',  3: 'Li',  4: 'Be',  5: 'B',   6: 'C',   7: 'N',   8: 'O',
-    9: 'F',  10: 'Ne', 11: 'Na', 12: 'Mg', 13: 'Al', 14: 'Si', 15: 'P',  16: 'S',
-    17: 'Cl', 18: 'Ar', 19: 'K',  20: 'Ca', 21: 'Sc', 22: 'Ti', 23: 'V',  24: 'Cr',
-    25: 'Mn', 26: 'Fe', 27: 'Co', 28: 'Ni', 29: 'Cu', 30: 'Zn', 31: 'Ga', 32: 'Ge',
-    33: 'As', 34: 'Se', 35: 'Br', 36: 'Kr', 37: 'Rb', 38: 'Sr', 39: 'Y',  40: 'Zr',
-    41: 'Nb', 42: 'Mo', 43: 'Tc', 44: 'Ru', 45: 'Rh', 46: 'Pd', 47: 'Ag', 48: 'Cd',
-    49: 'In', 50: 'Sn', 51: 'Sb', 52: 'Te', 53: 'I',  54: 'Xe', 55: 'Cs', 56: 'Ba',
-    57: 'La', 58: 'Ce', 59: 'Pr', 60: 'Nd', 61: 'Pm', 62: 'Sm', 63: 'Eu', 64: 'Gd',
-    65: 'Tb', 66: 'Dy', 67: 'Ho', 68: 'Er', 69: 'Tm', 70: 'Yb', 71: 'Lu', 72: 'Hf',
-    73: 'Ta', 74: 'W',  75: 'Re', 76: 'Os', 77: 'Ir', 78: 'Pt', 79: 'Au', 80: 'Hg',
-    81: 'Tl', 82: 'Pb',
+    1: "H",
+    2: "He",
+    3: "Li",
+    4: "Be",
+    5: "B",
+    6: "C",
+    7: "N",
+    8: "O",
+    9: "F",
+    10: "Ne",
+    11: "Na",
+    12: "Mg",
+    13: "Al",
+    14: "Si",
+    15: "P",
+    16: "S",
+    17: "Cl",
+    18: "Ar",
+    19: "K",
+    20: "Ca",
+    21: "Sc",
+    22: "Ti",
+    23: "V",
+    24: "Cr",
+    25: "Mn",
+    26: "Fe",
+    27: "Co",
+    28: "Ni",
+    29: "Cu",
+    30: "Zn",
+    31: "Ga",
+    32: "Ge",
+    33: "As",
+    34: "Se",
+    35: "Br",
+    36: "Kr",
+    37: "Rb",
+    38: "Sr",
+    39: "Y",
+    40: "Zr",
+    41: "Nb",
+    42: "Mo",
+    43: "Tc",
+    44: "Ru",
+    45: "Rh",
+    46: "Pd",
+    47: "Ag",
+    48: "Cd",
+    49: "In",
+    50: "Sn",
+    51: "Sb",
+    52: "Te",
+    53: "I",
+    54: "Xe",
+    55: "Cs",
+    56: "Ba",
+    57: "La",
+    58: "Ce",
+    59: "Pr",
+    60: "Nd",
+    61: "Pm",
+    62: "Sm",
+    63: "Eu",
+    64: "Gd",
+    65: "Tb",
+    66: "Dy",
+    67: "Ho",
+    68: "Er",
+    69: "Tm",
+    70: "Yb",
+    71: "Lu",
+    72: "Hf",
+    73: "Ta",
+    74: "W",
+    75: "Re",
+    76: "Os",
+    77: "Ir",
+    78: "Pt",
+    79: "Au",
+    80: "Hg",
+    81: "Tl",
+    82: "Pb",
 }
 
 # Byte layout of the .dynamis front matter. Everything up to field_count is
@@ -85,7 +156,10 @@ class BinaryReader(FileReaderInterface):
     def detect(filename: str):
         try:
             is_correct_ext = os.path.splitext(filename)[1].lower() == ".dynamis"
-            if not is_correct_ext or os.path.getsize(filename) < OFFSET_FIELD_DESCRIPTORS:
+            if (
+                not is_correct_ext
+                or os.path.getsize(filename) < OFFSET_FIELD_DESCRIPTORS
+            ):
                 return False
             with open(filename, "rb") as f:
                 return f.read(8) == MAGIC
@@ -114,7 +188,13 @@ class BinaryReader(FileReaderInterface):
                 current_offset += bytes_per_frame
                 frame_index += 1
 
-    def parse(self, data: DataCollection, filename: str, frame_info: tuple[int, int], **kwargs: Any):
+    def parse(
+        self,
+        data: DataCollection,
+        filename: str,
+        frame_info: tuple[int, int],
+        **kwargs: Any,
+    ):
         frame_offset, num_atoms = frame_info
         num_atoms = int(num_atoms)
 
@@ -168,12 +248,16 @@ class BinaryReader(FileReaderInterface):
 
             # 5. Positions are mandatory (already validated by _read_header).
             f.seek(field_offsets["position"])
-            frame_positions = np.fromfile(f, dtype=np.float32, count=num_atoms * 3).reshape(num_atoms, 3)
+            frame_positions = np.fromfile(
+                f, dtype=np.float32, count=num_atoms * 3
+            ).reshape(num_atoms, 3)
 
             # 6. Velocities default to zero if the field is absent.
             if "velocity" in field_offsets:
                 f.seek(field_offsets["velocity"])
-                frame_velocities = np.fromfile(f, dtype=np.float32, count=num_atoms * 3).reshape(num_atoms, 3)
+                frame_velocities = np.fromfile(
+                    f, dtype=np.float32, count=num_atoms * 3
+                ).reshape(num_atoms, 3)
             else:
                 frame_velocities = np.zeros((num_atoms, 3), dtype=np.float32)
 

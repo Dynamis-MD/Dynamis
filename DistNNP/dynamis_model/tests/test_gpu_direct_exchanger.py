@@ -120,7 +120,9 @@ def _worker_forward_backward(rank, world_size, result_dict):
 
     # --- Backward pass ---
     # Gradient of 1.0 everywhere at the output.
-    grad_output = torch.ones(n_local + total_recv, F, dtype=torch.float32, device=device)
+    grad_output = torch.ones(
+        n_local + total_recv, F, dtype=torch.float32, device=device
+    )
 
     grad_input = exchanger.feature_push_backward(
         grad_output,
@@ -178,13 +180,19 @@ def _worker_reset_buffers(rank, world_size, result_dict):
     # First forward pass triggers setup
     out1 = exchanger.feature_push_forward(local_features, partition_info)
     torch.cuda.synchronize()
-    assert exchanger.is_ipc_setup, "Exchanger should be marked as set up after first forward"
+    assert (
+        exchanger.is_ipc_setup
+    ), "Exchanger should be marked as set up after first forward"
 
     # reset_buffers must clear the setup flag and internal buffers
     exchanger.reset_buffers()
-    assert not exchanger.is_ipc_setup, "Exchanger should not be set up after reset_buffers"
+    assert (
+        not exchanger.is_ipc_setup
+    ), "Exchanger should not be set up after reset_buffers"
     assert exchanger.send_buffer is None, "send_buffer should be None after reset"
-    assert exchanger.grad_recv_buffer is None, "grad_recv_buffer should be None after reset"
+    assert (
+        exchanger.grad_recv_buffer is None
+    ), "grad_recv_buffer should be None after reset"
 
     # Second forward pass must re-trigger setup and produce identical results
     out2 = exchanger.feature_push_forward(local_features, partition_info)
@@ -224,7 +232,9 @@ def _worker_backward_without_forward(rank, world_size, result_dict):
     partition_info = _build_partition_info(rank, world_size, device)
 
     exchanger = GPUDirectExchanger()
-    grad_output = torch.ones(n_local + total_recv, F, dtype=torch.float32, device=device)
+    grad_output = torch.ones(
+        n_local + total_recv, F, dtype=torch.float32, device=device
+    )
 
     raised = False
     try:
@@ -239,6 +249,7 @@ def _worker_backward_without_forward(rank, world_size, result_dict):
 # ---------------------------------------------------------------------------
 # Test entry points
 # ---------------------------------------------------------------------------
+
 
 def test_gpu_direct_exchanger_forward_backward_2gpu():
     """GPUDirectExchanger forward and backward produce correct values on 2 GPUs."""
@@ -259,7 +270,9 @@ def test_gpu_direct_exchanger_forward_backward_2gpu():
         assert r["shape_ok"], f"Rank {rank}: wrong output shape {r['output_shape']}"
         assert r["local_ok"], f"Rank {rank}: local features mutated after forward"
         assert r["ghost_ok"], f"Rank {rank}: ghost features incorrect after forward"
-        assert r["grad_shape_ok"], f"Rank {rank}: wrong gradient shape {r['grad_shape']}"
+        assert r[
+            "grad_shape_ok"
+        ], f"Rank {rank}: wrong gradient shape {r['grad_shape']}"
         assert r["grad_ok"], f"Rank {rank}: gradient values incorrect after backward"
 
 
@@ -279,11 +292,15 @@ def test_gpu_direct_exchanger_reset_buffers_2gpu():
 
     for rank in range(world_size):
         r = result_dict[rank]
-        assert r["shapes_match"], f"Rank {rank}: output shape changed after reset and re-forward"
-        assert r["values_match"], f"Rank {rank}: output values differ after reset and re-forward"
-        assert r["output_shape"] == r["expected_shape"], (
-            f"Rank {rank}: expected shape {r['expected_shape']}, got {r['output_shape']}"
-        )
+        assert r[
+            "shapes_match"
+        ], f"Rank {rank}: output shape changed after reset and re-forward"
+        assert r[
+            "values_match"
+        ], f"Rank {rank}: output values differ after reset and re-forward"
+        assert (
+            r["output_shape"] == r["expected_shape"]
+        ), f"Rank {rank}: expected shape {r['expected_shape']}, got {r['output_shape']}"
 
 
 def test_gpu_direct_exchanger_backward_without_forward_raises_2gpu():
@@ -301,9 +318,9 @@ def test_gpu_direct_exchanger_backward_without_forward_raises_2gpu():
     )
 
     for rank in range(world_size):
-        assert result_dict[rank]["raised"], (
-            f"Rank {rank}: expected RuntimeError when calling backward before forward"
-        )
+        assert result_dict[rank][
+            "raised"
+        ], f"Rank {rank}: expected RuntimeError when calling backward before forward"
 
 
 if __name__ == "__main__":

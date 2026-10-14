@@ -26,7 +26,11 @@ from dynamis_model.comm.exchanger import GPUDirectExchanger
 from dynamis_model.comm.feature_push import FeaturePushToExchange
 from dynamis_model.potential import DynamisModel
 from dynamis_model.units import EV_PER_A_TO_AMU_A_PER_FS2
-from dynamis_state import DynamisState, PartitionMessagePassingInfo, radius_graph_pbc_cuda
+from dynamis_state import (
+    DynamisState,
+    PartitionMessagePassingInfo,
+    radius_graph_pbc_cuda,
+)
 
 COMPUTE_DTYPE = torch.float32
 
@@ -53,7 +57,9 @@ except Exception as exc:  # pragma: no cover - optional dependency
 
 def _require_mace() -> None:
     if _MACE_IMPORT_ERROR is not None:
-        raise ImportError("MACEModel requires the MACE package.") from _MACE_IMPORT_ERROR
+        raise ImportError(
+            "MACEModel requires the MACE package."
+        ) from _MACE_IMPORT_ERROR
 
 
 def load_raw_mace_model(
@@ -75,7 +81,9 @@ def load_raw_mace_model(
     ).to(dtype=COMPUTE_DTYPE)
     if enable_cueq:
         if _CUEQ_IMPORT_ERROR is not None:
-            raise ImportError("CuEquivariance conversion was requested but is unavailable.") from _CUEQ_IMPORT_ERROR
+            raise ImportError(
+                "CuEquivariance conversion was requested but is unavailable."
+            ) from _CUEQ_IMPORT_ERROR
         loaded_model = run_e3nn_to_cueq(loaded_model, device=device).to(device)
     return loaded_model
 
@@ -105,7 +113,8 @@ def validate_partition_info(
     if recv_ghost_indices.numel() != total_recv:
         raise ValueError("recv_ghost_indices does not match recv_offsets.")
     if total_send > 0 and (
-        int(send_local_indices.min().item()) < 0 or int(send_local_indices.max().item()) >= n_local
+        int(send_local_indices.min().item()) < 0
+        or int(send_local_indices.max().item()) >= n_local
     ):
         raise ValueError("send_local_indices must stay within the local atom range.")
     expected_ghost_indices = torch.arange(
@@ -127,7 +136,9 @@ def validate_partition_info(
     }
 
 
-def resolve_model_head_name(model: Any, requested_head_name: Optional[str] = None) -> str:
+def resolve_model_head_name(
+    model: Any, requested_head_name: Optional[str] = None
+) -> str:
     heads = list(getattr(model, "heads", []))
     if requested_head_name:
         if heads and requested_head_name not in heads:
@@ -149,7 +160,9 @@ def resolve_model_head_name(model: Any, requested_head_name: Optional[str] = Non
     )
 
 
-def resolve_model_head_index(model: Any, requested_head_name: Optional[str] = None) -> int:
+def resolve_model_head_index(
+    model: Any, requested_head_name: Optional[str] = None
+) -> int:
     heads = list(getattr(model, "heads", []))
     if not heads:
         return 0
@@ -174,16 +187,21 @@ class MACEOwnedGraph:
 
 
 class _RadiusGraphInput:
-    def __init__(self, positions: torch.Tensor, cell: torch.Tensor, pbc: torch.Tensor) -> None:
+    def __init__(
+        self, positions: torch.Tensor, cell: torch.Tensor, pbc: torch.Tensor
+    ) -> None:
         self.pos = positions
         self.cell = cell.reshape(1, 3, 3)
         self.pbc = pbc.reshape(1, 3)
-        self.natoms = torch.tensor([positions.shape[0]], dtype=torch.long, device=positions.device)
+        self.natoms = torch.tensor(
+            [positions.shape[0]], dtype=torch.long, device=positions.device
+        )
 
 
 ##===================================================
-#End of utility functions
+# End of utility functions
 ##===================================================
+
 
 class MACEScaleShiftRuntime(torch.nn.Module):
     """Explicit runtime wrapper for the distributed MACE forward path."""
@@ -227,7 +245,9 @@ class MACEScaleShiftRuntime(torch.nn.Module):
         if self._feature_width is None:
             self._feature_width = feature_width
         elif self._feature_width != feature_width:
-            raise ValueError("Feature exchange width changed across interaction layers.")
+            raise ValueError(
+                "Feature exchange width changed across interaction layers."
+            )
         if self._feature_exchanger.is_ipc_setup:
             return
         partition_info = self._feature_partition_info or state.local_partition_info
@@ -242,14 +262,18 @@ class MACEScaleShiftRuntime(torch.nn.Module):
         node_feats: torch.Tensor,
         layer_index: int,
     ) -> torch.Tensor:
-        if not self._exchange_enabled or not self._should_exchange_after_product(layer_index):
+        if not self._exchange_enabled or not self._should_exchange_after_product(
+            layer_index
+        ):
             return node_feats
         state = self._state
         if state is None:
-            raise RuntimeError("Feature exchange reached without an active DynamisState.")
+            raise RuntimeError(
+                "Feature exchange reached without an active DynamisState."
+            )
         num_local = int(state.local_molecular_info.num_atoms)
         self._ensure_feature_exchanger_ready(node_feats, state)
-        #The actual feature exchange point between layers
+        # The actual feature exchange point between layers
         exchanged = FeaturePushToExchange.apply(
             node_feats[:num_local].contiguous(),
             state,
@@ -268,7 +292,9 @@ class MACEScaleShiftRuntime(torch.nn.Module):
         )
         node_heads = ctx.node_heads.to(torch.int64)
         atom_range = ctx.num_atoms_arange.to(torch.int64)
-        node_e0 = self.model.atomic_energies_fn(data["node_attrs"])[atom_range, node_heads]
+        node_e0 = self.model.atomic_energies_fn(data["node_attrs"])[
+            atom_range, node_heads
+        ]
         node_feats = self.model.node_embedding(data["node_attrs"])
         edge_attrs = self.model.spherical_harmonics(ctx.vectors)
         edge_feats, cutoff = self.model.radial_embedding(
@@ -310,13 +336,17 @@ class MACEScaleShiftRuntime(torch.nn.Module):
                 lammps_class=ctx.interaction_kwargs.lammps_class,
                 lammps_natoms=ctx.interaction_kwargs.lammps_natoms,
             )
-            node_feats = product(node_feats=node_feats, sc=sc, node_attrs=data["node_attrs"])
+            node_feats = product(
+                node_feats=node_feats, sc=sc, node_attrs=data["node_attrs"]
+            )
             node_feats = self._exchange_after_product(node_feats, layer_index)
             node_feats_list.append(node_feats)
         for readout_index, readout in enumerate(self.model.readouts):
             feature_index = -1 if len(self.model.readouts) == 1 else readout_index
             node_es_list.append(
-                readout(node_feats_list[feature_index], node_heads)[atom_range, node_heads]
+                readout(node_feats_list[feature_index], node_heads)[
+                    atom_range, node_heads
+                ]
             )
         node_inter_es = self.model.scale_shift(
             torch.sum(torch.stack(node_es_list), dim=0),
@@ -332,8 +362,8 @@ class MACEScaleShiftRuntime(torch.nn.Module):
             "owned_node_energy": owned_node_energy,
             "owned_local_energy": owned_node_energy.sum(),
         }
-        #removed the force recovery logic performed by MACE beyond this point
-        #can experiment with this enabled to verify if speedup caused by this removal?
+        # removed the force recovery logic performed by MACE beyond this point
+        # can experiment with this enabled to verify if speedup caused by this removal?
 
 
 class MACEModel(DynamisModel):
@@ -389,7 +419,9 @@ class MACEModel(DynamisModel):
             )
         num_layers = len(getattr(model, "interactions"))
         if num_layers != len(getattr(model, "products")):
-            raise TypeError("MACE interactions and products must have matching lengths.")
+            raise TypeError(
+                "MACE interactions and products must have matching lengths."
+            )
         num_readouts = len(getattr(model, "readouts"))
         if num_readouts not in (1, num_layers):
             raise TypeError(
@@ -420,7 +452,9 @@ class MACEModel(DynamisModel):
             self.exchange_enabled = False
             return
         if total_send == 0 or total_recv == 0:
-            raise RuntimeError("Asymmetric halo traffic cannot form a local Dynamis view.")
+            raise RuntimeError(
+                "Asymmetric halo traffic cannot form a local Dynamis view."
+            )
         self.position_exchanger.setup_exchanger(3, partition_info, device)
         self.atom_type_exchanger.setup_exchanger(1, partition_info, device)
         self.exchange_enabled = True
@@ -452,7 +486,9 @@ class MACEModel(DynamisModel):
             return atom_types
         max_atom_type = int(atom_types.max().item()) if atom_types.numel() > 0 else -1
         lookup = self._build_atomic_number_lookup(atom_types.device, max_atom_type)
-        mapped = lookup.index_select(0, atom_types.reshape(-1)).reshape(atom_types.shape)
+        mapped = lookup.index_select(0, atom_types.reshape(-1)).reshape(
+            atom_types.shape
+        )
         missing_mask = mapped.lt(0)
         if bool(missing_mask.any()):
             missing = atom_types[missing_mask].unique().cpu().tolist()
@@ -472,14 +508,20 @@ class MACEModel(DynamisModel):
             )
         local_types = state.local_molecular_info.atom_types.to(torch.long)
         local_global = state.local_partition_info.partition_indices.long()
-        expected_total = int(local_global.numel() + self.partition_validation["total_recv"])
+        expected_total = int(
+            local_global.numel() + self.partition_validation["total_recv"]
+        )
         if self.exchange_enabled:
             with torch.no_grad():
-                exchanged_types = FeaturePushToExchange.apply(
-                    local_types.float().unsqueeze(-1),
-                    state,
-                    self.atom_type_exchanger,
-                ).squeeze(-1).long()
+                exchanged_types = (
+                    FeaturePushToExchange.apply(
+                        local_types.float().unsqueeze(-1),
+                        state,
+                        self.atom_type_exchanger,
+                    )
+                    .squeeze(-1)
+                    .long()
+                )
         else:
             exchanged_types = local_types
         mapped_atomic_numbers = self._map_atomic_numbers(exchanged_types)
@@ -487,12 +529,16 @@ class MACEModel(DynamisModel):
             device=mapped_atomic_numbers.device,
             dtype=torch.long,
         )
-        node_attrs = mapped_atomic_numbers[:, None].eq(model_atomic_numbers[None, :]).to(
-            dtype=COMPUTE_DTYPE
+        node_attrs = (
+            mapped_atomic_numbers[:, None]
+            .eq(model_atomic_numbers[None, :])
+            .to(dtype=COMPUTE_DTYPE)
         )
         row_match_counts = node_attrs.sum(dim=1)
         if not bool(torch.all(row_match_counts == 1)):
-            raise ValueError("MACE species compatibility check failed for the exchanged atom types.")
+            raise ValueError(
+                "MACE species compatibility check failed for the exchanged atom types."
+            )
         device = mapped_atomic_numbers.device
         head_index = resolve_model_head_index(self.model, self.head_name)
         self._static_cache = {
@@ -500,8 +546,12 @@ class MACEModel(DynamisModel):
             "batch": torch.zeros(expected_total, dtype=torch.long, device=device),
             "ptr": torch.tensor([0, expected_total], dtype=torch.long, device=device),
             "head": torch.tensor([head_index], dtype=torch.long, device=device),
-            "expected_total": torch.tensor(expected_total, dtype=torch.long, device=device),
-            "num_local": torch.tensor(int(local_global.numel()), dtype=torch.long, device=device),
+            "expected_total": torch.tensor(
+                expected_total, dtype=torch.long, device=device
+            ),
+            "num_local": torch.tensor(
+                int(local_global.numel()), dtype=torch.long, device=device
+            ),
         }
         self._static_cache_ready = True
 
@@ -546,7 +596,9 @@ class MACEModel(DynamisModel):
             )
         return edge_index.long(), -cell_offsets
 
-    def _build_owned_graph(self, view: MACEStructuralView, state: DynamisState) -> MACEOwnedGraph:
+    def _build_owned_graph(
+        self, view: MACEStructuralView, state: DynamisState
+    ) -> MACEOwnedGraph:
         edge_index, unit_shifts = self._radius_graph(view.exchanged_positions, state)
         pre_filter_edge_count = int(edge_index.shape[1])
         owned_destination = edge_index[1] < view.num_local
@@ -582,7 +634,9 @@ class MACEModel(DynamisModel):
         owned_energy: torch.Tensor,
         view: MACEStructuralView,
     ) -> torch.Tensor:
-        (local_grad,) = torch.autograd.grad(owned_energy, [view.local_positions], allow_unused=False)
+        (local_grad,) = torch.autograd.grad(
+            owned_energy, [view.local_positions], allow_unused=False
+        )
         return -local_grad
 
     def __call__(self, state: DynamisState, *args: Any, **kwargs: Any):

@@ -35,9 +35,13 @@ OUT_DIR = SCRIPT_DIR / ".." / "protein_solvated"
 BUFFER = 12.0
 
 SYSTEMS = {
-    "1aki": ("1aki_vacuum_openmm.xyz",  "1aki_density.xyz",  "Lysozyme"),
-    "2rik": ("2rik_vacuum_openmm.xyz",  "2rik_density.xyz",  "Titin I-band"),
-    "9gmo": ("9gmo_vacuum.xyz",         "9gmo_density.xyz",  "Ribosome 9GMO (~1.5M atoms, slow)"),
+    "1aki": ("1aki_vacuum_openmm.xyz", "1aki_density.xyz", "Lysozyme"),
+    "2rik": ("2rik_vacuum_openmm.xyz", "2rik_density.xyz", "Titin I-band"),
+    "9gmo": (
+        "9gmo_vacuum.xyz",
+        "9gmo_density.xyz",
+        "Ribosome 9GMO (~1.5M atoms, slow)",
+    ),
 }
 
 PROTEIN_ELEMENTS = {"C", "N", "S", "P", "Fe", "Zn", "Ca", "Mg", "Na", "Cl", "K"}
@@ -71,8 +75,9 @@ def extract_protein(atoms):
     return species[is_protein], positions[is_protein]
 
 
-def fill_water(box_size: np.ndarray, protein_pos: np.ndarray,
-               min_dist: float = 2.4, seed: int = 42):
+def fill_water(
+    box_size: np.ndarray, protein_pos: np.ndarray, min_dist: float = 2.4, seed: int = 42
+):
     """Place water molecules on grid at liquid density, excluding protein region."""
     from scipy.spatial import cKDTree
 
@@ -84,11 +89,14 @@ def fill_water(box_size: np.ndarray, protein_pos: np.ndarray,
     nz = int(np.ceil(box_size[2] / spacing))
 
     ix, iy, iz = np.meshgrid(np.arange(nx), np.arange(ny), np.arange(nz), indexing="ij")
-    o_pos = np.stack([
-        (ix.ravel() + 0.5) * spacing,
-        (iy.ravel() + 0.5) * spacing,
-        (iz.ravel() + 0.5) * spacing,
-    ], axis=1)
+    o_pos = np.stack(
+        [
+            (ix.ravel() + 0.5) * spacing,
+            (iy.ravel() + 0.5) * spacing,
+            (iz.ravel() + 0.5) * spacing,
+        ],
+        axis=1,
+    )
     o_pos += rng.uniform(-0.3, 0.3, size=o_pos.shape)
 
     if len(protein_pos) > 0:
@@ -102,11 +110,15 @@ def fill_water(box_size: np.ndarray, protein_pos: np.ndarray,
 
     phi = rng.uniform(0, 2 * np.pi, n_mol)
     cos_theta = rng.uniform(-1, 1, n_mol)
-    sin_theta = np.sqrt(1 - cos_theta ** 2)
+    sin_theta = np.sqrt(1 - cos_theta**2)
     psi = rng.uniform(0, 2 * np.pi, n_mol)
 
-    h1_local = np.array([bond_len * np.sin(half_angle), bond_len * np.cos(half_angle), 0.0])
-    h2_local = np.array([-bond_len * np.sin(half_angle), bond_len * np.cos(half_angle), 0.0])
+    h1_local = np.array(
+        [bond_len * np.sin(half_angle), bond_len * np.cos(half_angle), 0.0]
+    )
+    h2_local = np.array(
+        [-bond_len * np.sin(half_angle), bond_len * np.cos(half_angle), 0.0]
+    )
 
     h1_all = np.zeros_like(o_pos)
     h2_all = np.zeros_like(o_pos)
@@ -114,11 +126,13 @@ def fill_water(box_size: np.ndarray, protein_pos: np.ndarray,
         cp, sp = np.cos(phi[i]), np.sin(phi[i])
         ct, st = cos_theta[i], sin_theta[i]
         cps, sps = np.cos(psi[i]), np.sin(psi[i])
-        R = np.array([
-            [cp * ct * cps - sp * sps, -cp * ct * sps - sp * cps, cp * st],
-            [sp * ct * cps + cp * sps, -sp * ct * sps + cp * cps, sp * st],
-            [-st * cps,                 st * sps,                  ct],
-        ])
+        R = np.array(
+            [
+                [cp * ct * cps - sp * sps, -cp * ct * sps - sp * cps, cp * st],
+                [sp * ct * cps + cp * sps, -sp * ct * sps + cp * cps, sp * st],
+                [-st * cps, st * sps, ct],
+            ]
+        )
         h1_all[i] = o_pos[i] + R @ h1_local
         h2_all[i] = o_pos[i] + R @ h2_local
 
@@ -141,8 +155,10 @@ def generate_solvated(vac_xyz: Path, out_xyz: Path, buffer: float = BUFFER):
     box_size = extent + 2 * buffer
     prot_shifted = prot_pos - pmin + buffer
 
-    print(f"  Protein: {n_prot} atoms, "
-          f"extent {extent[0]:.1f}×{extent[1]:.1f}×{extent[2]:.1f} Å")
+    print(
+        f"  Protein: {n_prot} atoms, "
+        f"extent {extent[0]:.1f}×{extent[1]:.1f}×{extent[2]:.1f} Å"
+    )
     print(f"  Box: {box_size[0]:.1f}×{box_size[1]:.1f}×{box_size[2]:.1f} Å")
     print("  Filling with water ...")
 
@@ -154,8 +170,10 @@ def generate_solvated(vac_xyz: Path, out_xyz: Path, buffer: float = BUFFER):
     prot_frac = 100 * n_prot / n_total
     density = n_total / np.prod(box_size)
     print(f"  Water: {n_mol} molecules ({n_mol * 3} atoms)")
-    print(f"  Total: {n_total} atoms, protein {prot_frac:.1f}%, "
-          f"density {density:.4f} atoms/Å³")
+    print(
+        f"  Total: {n_total} atoms, protein {prot_frac:.1f}%, "
+        f"density {density:.4f} atoms/Å³"
+    )
 
     cell = np.diag(box_size)
     result = Atoms(symbols=all_species, positions=all_pos, cell=cell, pbc=True)
@@ -168,13 +186,21 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate solvated protein systems (protein + grid water)"
     )
-    parser.add_argument("--systems", nargs="*", default=None,
-                        help="System keys (default: all). See --list.")
+    parser.add_argument(
+        "--systems",
+        nargs="*",
+        default=None,
+        help="System keys (default: all). See --list.",
+    )
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--vac-dir", type=Path, default=VAC_DIR)
     parser.add_argument("--out-dir", type=Path, default=OUT_DIR)
-    parser.add_argument("--buffer", type=float, default=BUFFER,
-                        help="Box buffer in Å around protein bounding box (default: 12)")
+    parser.add_argument(
+        "--buffer",
+        type=float,
+        default=BUFFER,
+        help="Box buffer in Å around protein bounding box (default: 12)",
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -207,6 +233,7 @@ def main():
 
         if out_path.exists() and not args.overwrite:
             from ase.io import read
+
             n = len(read(str(out_path)))
             print(f"  SKIP (exists): {out_name} ({n} atoms)")
             continue

@@ -68,6 +68,7 @@ def only_recs(records):
 
 # ── off by default ────────────────────────────────────────────────────────────
 
+
 def test_level_is_off_before_anything_sets_it():
     """A fresh process records nothing until asked to.
 
@@ -130,6 +131,7 @@ def test_level_off_costs_little_per_call():
 
 # ── basic host timer ──────────────────────────────────────────────────────────
 
+
 def test_host_timer_records_elapsed(tmp_path):
     init_registry(tmp_path)
 
@@ -177,6 +179,7 @@ def test_host_records_carry_a_monotonic_start_timestamp(tmp_path):
 
 
 # ── nesting ───────────────────────────────────────────────────────────────────
+
 
 def test_host_nesting_is_derivable_from_timestamps(tmp_path):
     """The whole point of t_start_ns: post-processing must be able to tell that
@@ -253,6 +256,7 @@ def test_host_and_device_records_share_a_timebase(tmp_path):
 
 
 # ── span identity and nesting ─────────────────────────────────────────────────
+
 
 def test_records_carry_span_identity(tmp_path):
     """Nesting is recorded, not inferred — t_start_ns is too imprecise and
@@ -407,12 +411,13 @@ def test_explicit_parent_crosses_a_thread_boundary(tmp_path):
 
 def test_current_span_id_is_zero_outside_any_region():
     # Also a hygiene check: the open-span stack is process state no fixture resets.
-    assert Timer.current_span_id() == 0, (
-        "an earlier test leaked a running Timer onto this thread's open-span stack"
-    )
+    assert (
+        Timer.current_span_id() == 0
+    ), "an earlier test leaked a running Timer onto this thread's open-span stack"
 
 
 # ── reuse across steps ────────────────────────────────────────────────────────
+
 
 def test_timer_reuse_produces_one_record_per_stop(tmp_path):
     init_registry(tmp_path)
@@ -465,6 +470,7 @@ def test_stop_without_start_is_safe(tmp_path):
 
 # ── set_step stamps records ───────────────────────────────────────────────────
 
+
 def test_set_step_stamps_records(tmp_path):
     init_registry(tmp_path)
 
@@ -494,6 +500,7 @@ def test_step_is_captured_at_start_not_at_stop(tmp_path):
 
 
 # ── thread safety ─────────────────────────────────────────────────────────────
+
 
 def test_concurrent_timers_produce_well_formed_lines(tmp_path):
     """The halo-exchange backward runs on a PyTorch autograd worker thread, so the
@@ -563,6 +570,7 @@ def test_concurrent_timers_and_flushes(tmp_path):
 
 # ── call_order ────────────────────────────────────────────────────────────────
 
+
 def test_call_order_reflects_first_seen_order(tmp_path):
     init_registry(tmp_path)
 
@@ -598,6 +606,7 @@ def test_call_order_is_re_emitted_on_every_flush(tmp_path):
 
 # ── metadata header ───────────────────────────────────────────────────────────
 
+
 def test_header_fields(tmp_path):
     init_registry(tmp_path, rank=3)
 
@@ -619,6 +628,7 @@ def test_header_fields(tmp_path):
 
 
 # ── per-rank file naming ──────────────────────────────────────────────────────
+
 
 def test_output_file_named_by_rank(tmp_path):
     for rank in [0, 2, 7]:
@@ -649,6 +659,7 @@ def test_init_creates_nested_output_dir(tmp_path):
 
 # ── robustness against misuse ─────────────────────────────────────────────────
 
+
 def test_timing_without_init_does_not_crash():
     # set_level(Basic) with no init() used to write to fd -1 and throw EBADF.
     Timer.set_level(Level.Basic)
@@ -673,6 +684,7 @@ def test_records_after_close_do_not_crash(tmp_path):
 
 
 # ── failure handling ──────────────────────────────────────────────────────────
+
 
 def test_close_survives_a_write_failure(tmp_path):
     """close() must not throw, because ~TimingRegistry() calls it and an escaping
@@ -700,7 +712,9 @@ except BaseException as exc:
 print("survived")
 """
     out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
-    assert out.returncode == 0, f"rc={out.returncode}\nstdout={out.stdout}\nstderr={out.stderr}"
+    assert (
+        out.returncode == 0
+    ), f"rc={out.returncode}\nstdout={out.stdout}\nstderr={out.stderr}"
     assert "survived" in out.stdout
     assert "close raised" not in out.stdout, out.stdout
 
@@ -772,6 +786,7 @@ def test_concurrent_flush_and_close_do_not_lose_records(tmp_path):
 
 
 # ── write-once-at-exit ────────────────────────────────────────────────────────
+
 
 def test_nothing_is_written_before_close(tmp_path):
     """The run buffers everything and writes once. Without an explicit flush, a
@@ -871,13 +886,16 @@ def test_reinit_closes_previous_file(tmp_path):
     assert only_recs(read_records(tmp_path, rank=0))
 
 
-@pytest.mark.parametrize("key", [
-    'quote"inside',
-    "back\\slash",
-    "new\nline",
-    "tab\there",
-    "ctrl\x01char",
-])
+@pytest.mark.parametrize(
+    "key",
+    [
+        'quote"inside',
+        "back\\slash",
+        "new\nline",
+        "tab\there",
+        "ctrl\x01char",
+    ],
+)
 def test_keys_are_json_escaped(tmp_path, key):
     # Timer.start takes an arbitrary std::string from Python. An unescaped quote or
     # newline breaks the parse of the entire file, not just one record.
@@ -895,13 +913,17 @@ def test_keys_are_json_escaped(tmp_path, key):
 
 # ── TimerClass values round-trip through the file ────────────────────────────
 
-@pytest.mark.parametrize("cls,expected", [
-    (TimerClass.Compute, "compute"),
-    (TimerClass.Comm,    "comm"),
-    (TimerClass.Wait,    "wait"),
-    (TimerClass.Other,   "other"),
-    (TimerClass.Total,   "total"),
-])
+
+@pytest.mark.parametrize(
+    "cls,expected",
+    [
+        (TimerClass.Compute, "compute"),
+        (TimerClass.Comm, "comm"),
+        (TimerClass.Wait, "wait"),
+        (TimerClass.Other, "other"),
+        (TimerClass.Total, "total"),
+    ],
+)
 def test_timer_class_written_correctly(tmp_path, cls, expected):
     init_registry(tmp_path)
 
@@ -914,6 +936,7 @@ def test_timer_class_written_correctly(tmp_path, cls, expected):
 
 # ── trajectory writer ─────────────────────────────────────────────────────────
 
+
 def test_trajectory_writer_emits_records(tmp_path):
     """The writer is instrumented in C++ (TrajectoryWriter::submit / ::flush), so
     any caller is measured — not only Simulator.run()."""
@@ -921,8 +944,18 @@ def test_trajectory_writer_emits_records(tmp_path):
 
     xyz = os.path.join(os.path.dirname(__file__), "xyz.xyz")
     state, cell, pbc = TrajectoryReader.read(xyz)
-    with TrajectoryWriter(0, RUN_ID, "author", str(tmp_path), "trajectory.dynamis",
-                          state, cell, pbc, 1.0, 1) as writer:
+    with TrajectoryWriter(
+        0,
+        RUN_ID,
+        "author",
+        str(tmp_path),
+        "trajectory.dynamis",
+        state,
+        cell,
+        pbc,
+        1.0,
+        1,
+    ) as writer:
         writer.update_atom_counts(torch.tensor([6], dtype=torch.uint32))
         writer.submit(0, state)
         writer.flush()
@@ -939,6 +972,7 @@ def test_trajectory_writer_emits_records(tmp_path):
 
 
 # ── device timers ─────────────────────────────────────────────────────────────
+
 
 @requires_cuda
 def test_device_timer_produces_device_record(tmp_path):

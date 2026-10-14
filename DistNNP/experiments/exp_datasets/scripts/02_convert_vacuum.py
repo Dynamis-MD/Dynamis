@@ -33,13 +33,43 @@ SYSTEMS = {
     # Each entry: (pdb_source, output_name, buffer_angstrom, description)
     # Use *_fixed.pdb when available (pre-repaired, reproduces committed datasets exactly).
     # Fall back to raw PDB if fixed version is absent — pdbfixer will repair on the fly.
-    "1aki": ("1AKI_fixed.pdb|1AKI.pdb",  "1aki_vacuum_openmm.xyz",  3.0, "Lysozyme (PDB 1AKI)"),
-    "2rik": ("2RIK_fixed.pdb|2RIK.pdb",  "2rik_vacuum_openmm.xyz",  3.0, "Titin I-band (PDB 2RIK)"),
-    "1grl": ("1GRL_fixed.pdb|1GRL.pdb",  "groel_vacuum_openmm.xyz", 3.0, "GroEL chaperonin (PDB 1GRL)"),
-    "2w49": ("2W49_fixed.pdb|2W49.pdb",  "2w49_vacuum_openmm.xyz",  3.0, "Filament (PDB 2W49, DistMLIP)"),
-    "6p9x": ("6P9X_fixed.pdb|6P9X.pdb",  "6p9x_vacuum_openmm.xyz",  3.0, "GPCR (PDB 6P9X, DistMLIP)"),
+    "1aki": (
+        "1AKI_fixed.pdb|1AKI.pdb",
+        "1aki_vacuum_openmm.xyz",
+        3.0,
+        "Lysozyme (PDB 1AKI)",
+    ),
+    "2rik": (
+        "2RIK_fixed.pdb|2RIK.pdb",
+        "2rik_vacuum_openmm.xyz",
+        3.0,
+        "Titin I-band (PDB 2RIK)",
+    ),
+    "1grl": (
+        "1GRL_fixed.pdb|1GRL.pdb",
+        "groel_vacuum_openmm.xyz",
+        3.0,
+        "GroEL chaperonin (PDB 1GRL)",
+    ),
+    "2w49": (
+        "2W49_fixed.pdb|2W49.pdb",
+        "2w49_vacuum_openmm.xyz",
+        3.0,
+        "Filament (PDB 2W49, DistMLIP)",
+    ),
+    "6p9x": (
+        "6P9X_fixed.pdb|6P9X.pdb",
+        "6p9x_vacuum_openmm.xyz",
+        3.0,
+        "GPCR (PDB 6P9X, DistMLIP)",
+    ),
     # 9GMO is available as mmCIF only; pdbfixer reads .cif directly
-    "9gmo": ("9GMO_fixed.pdb|9GMO.cif",  "9gmo_vacuum.xyz",          3.0, "Ribosome complex (PDB 9GMO)"),
+    "9gmo": (
+        "9GMO_fixed.pdb|9GMO.cif",
+        "9gmo_vacuum.xyz",
+        3.0,
+        "Ribosome complex (PDB 9GMO)",
+    ),
 }
 
 
@@ -58,9 +88,11 @@ def check_deps():
     except ImportError:
         missing.append("ase")
     if missing:
-        sys.exit(f"Missing dependencies: {', '.join(missing)}\n"
-                 "Install with: conda install -c conda-forge pdbfixer openmm\n"
-                 "             pip install ase")
+        sys.exit(
+            f"Missing dependencies: {', '.join(missing)}\n"
+            "Install with: conda install -c conda-forge pdbfixer openmm\n"
+            "             pip install ase"
+        )
 
 
 def convert_pdb_to_vacuum_xyz(pdb_path: Path, out_path: Path, buffer: float = 3.0):
@@ -98,10 +130,7 @@ def convert_pdb_to_vacuum_xyz(pdb_path: Path, out_path: Path, buffer: float = 3.
     print("  Adding hydrogens at pH 7.0 ...")
     fixer.addMissingHydrogens(7.0)
 
-    pos = np.array([
-        [p.value_in_unit(angstrom) for p in v]
-        for v in fixer.positions
-    ])
+    pos = np.array([[p.value_in_unit(angstrom) for p in v] for v in fixer.positions])
     elements = [a.element.symbol for a in fixer.topology.atoms()]
     n_atoms = len(elements)
 
@@ -117,23 +146,39 @@ def convert_pdb_to_vacuum_xyz(pdb_path: Path, out_path: Path, buffer: float = 3.
     write(str(out_path), atoms, format="extxyz")
 
     density = n_atoms / np.prod(box)
-    print(f"  {n_atoms} atoms, box {box[0]:.1f}×{box[1]:.1f}×{box[2]:.1f} Å, "
-          f"density {density:.5f} atoms/Å³")
+    print(
+        f"  {n_atoms} atoms, box {box[0]:.1f}×{box[1]:.1f}×{box[2]:.1f} Å, "
+        f"density {density:.5f} atoms/Å³"
+    )
     print(f"  Written: {out_path.name}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Convert PDB → vacuum XYZ")
-    parser.add_argument("--systems", nargs="*", default=None,
-                        help="System keys to process (default: all). See --list.")
-    parser.add_argument("--list", action="store_true",
-                        help="Print available systems and exit")
-    parser.add_argument("--pdb-dir", type=Path, default=PDB_DIR,
-                        help="Directory containing PDB/CIF source files")
-    parser.add_argument("--out-dir", type=Path, default=OUT_DIR,
-                        help="Output directory for vacuum XYZ files")
-    parser.add_argument("--overwrite", action="store_true",
-                        help="Overwrite existing output files")
+    parser.add_argument(
+        "--systems",
+        nargs="*",
+        default=None,
+        help="System keys to process (default: all). See --list.",
+    )
+    parser.add_argument(
+        "--list", action="store_true", help="Print available systems and exit"
+    )
+    parser.add_argument(
+        "--pdb-dir",
+        type=Path,
+        default=PDB_DIR,
+        help="Directory containing PDB/CIF source files",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=OUT_DIR,
+        help="Output directory for vacuum XYZ files",
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true", help="Overwrite existing output files"
+    )
     args = parser.parse_args()
 
     if args.list:
@@ -172,6 +217,7 @@ def main():
 
         if out_path.exists() and not args.overwrite:
             import ase.io
+
             existing = ase.io.read(str(out_path))
             print(f"  SKIP (exists): {out_name} ({len(existing)} atoms)")
             continue
@@ -181,6 +227,7 @@ def main():
         except Exception as e:
             print(f"  ERROR: {e}")
             import traceback
+
             traceback.print_exc()
 
 

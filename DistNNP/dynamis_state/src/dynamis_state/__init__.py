@@ -25,7 +25,11 @@ from dynamis_state.dist_graph_builder import (
 )
 
 # IO
-from dynamis_state.io import TrajectoryReader, TrajectoryWriter, translate_dynamis_to_xyz
+from dynamis_state.io import (
+    TrajectoryReader,
+    TrajectoryWriter,
+    translate_dynamis_to_xyz,
+)
 
 # Timing
 TimingRegistry = dynamis_state_impl.TimingRegistry
@@ -37,6 +41,7 @@ TIMING_ENABLED = dynamis_state_impl.TIMING_ENABLED
 if TIMING_ENABLED:
     Timer = dynamis_state_impl.Timer
 else:
+
     class Timer:  # type: ignore[no-redef]
         """No-op stand-in for when dynamis_state was built with timing off.
 
@@ -67,6 +72,7 @@ else:
         @staticmethod
         def set_step(step) -> None:
             pass
+
 
 __all__ = [
     "MolecularInfo",

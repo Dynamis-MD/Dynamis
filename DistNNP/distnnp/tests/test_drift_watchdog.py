@@ -27,7 +27,7 @@ from distnnp_model.empirical.lj_potential_model import LennardJonesPotentialMode
 from .conftest import _make_env, _make_global_state
 
 NUM_ATOMS = 64
-SMALL = 0.003   # A; the LJ test system moves ~0.0003 A per step
+SMALL = 0.003  # A; the LJ test system moves ~0.0003 A per step
 
 
 @pytest.fixture
@@ -99,8 +99,14 @@ def test_word_or_over_many_pushes(make_simulator):
         words = torch.randint(0, 4, (world,), generator=gen)
         delay = torch.randint(0, 200_000, (world,), generator=gen)
         if it < 4:  # all zero, only rank 0, only the last rank, all set
-            words = torch.tensor([[0] * world, [1] + [0] * (world - 1),
-                                  [0] * (world - 1) + [2], [3] * world][it])
+            words = torch.tensor(
+                [
+                    [0] * world,
+                    [1] + [0] * (world - 1),
+                    [0] * (world - 1) + [2],
+                    [3] * world,
+                ][it]
+            )
         flags.local.fill_(int(words[rank]))
         torch.cuda._sleep(int(delay[rank]))
         # the bare model, so our word is not overwritten before the pushes carry it
@@ -123,7 +129,7 @@ def _run_and_check_guarantee(sim, steps):
     thr = sim._drift_threshold
     flags = sim._drift_flags
     ref = sim.state.pos.detach().clone()
-    carried = None   # OR over ranks of the words carried by the last step
+    carried = None  # OR over ranks of the words carried by the last step
     trips, worst = 0, 0.0
     for t in range(steps):
         if t > 0:
@@ -132,7 +138,7 @@ def _run_and_check_guarantee(sim, steps):
             assert tripped == bool(carried & DRIFT_TRIP)
             if tripped:
                 trips += 1
-                sim.rebuild_halo()   # what run() does on a drift trip
+                sim.rebuild_halo()  # what run() does on a drift trip
                 ref = sim.state.pos.detach().clone()
         sim.step()
         # Verlet builds the graph after halfstep1; positions do not move afterwards
@@ -151,7 +157,7 @@ def test_guarantee_holds_piggyback(make_simulator):
     trips, worst = _run_and_check_guarantee(sim, 120)
     assert sim._drift_mode == "piggyback"
     assert trips >= 3, f"only {trips} trips; worst displacement {worst}"
-    assert worst > 0.5 * SMALL   # the gate is not tripping trivially early
+    assert worst > 0.5 * SMALL  # the gate is not tripping trivially early
 
 
 def test_guarantee_holds_all_reduce_fallback(make_simulator):
@@ -170,7 +176,7 @@ def test_breach_is_reported_on_every_rank(make_simulator):
     assert not sim.drift_watchdog_tripped()
     if dist.get_rank() == 0:
         sim.state.pos[0, 0] += 1.0
-    sim.step()   # step index 1: its graph is built with the teleported atom
+    sim.step()  # step index 1: its graph is built with the teleported atom
     with pytest.warns(RuntimeWarning, match="drift watchdog"):
         tripped = sim.drift_watchdog_tripped()
     assert tripped
@@ -204,14 +210,14 @@ def test_rebuild_halo_keeps_partition_and_state(make_simulator):
     # the gathered global positions are exactly every rank's current local positions
     full = st._state.global_molecular_info.atom_positions
     assert torch.equal(full[pidx], pos)
-    sim.step()   # the rebuilt exchangers work
+    sim.step()  # the rebuilt exchangers work
 
 
 def test_run_rebuilds_halo_on_trip_and_repartitions_on_schedule(make_simulator):
     sim = make_simulator(threshold=SMALL)
     sim.config.rebalance_interval = 40
     sim.config.total_steps = 100
-    sim.config.timestep_fs = 1e-3   # run() steps with this; match the Verlet dt above
+    sim.config.timestep_fs = 1e-3  # run() steps with this; match the Verlet dt above
     calls = {"full": 0, "halo": 0}
     full, halo = sim.sync_and_repartition, sim.rebuild_halo
 
@@ -225,7 +231,7 @@ def test_run_rebuilds_halo_on_trip_and_repartitions_on_schedule(make_simulator):
 
     sim.sync_and_repartition, sim.rebuild_halo = count_full, count_halo
     sim.run()
-    assert calls["full"] == 3                      # steps 0, 40, 80
+    assert calls["full"] == 3  # steps 0, 40, 80
     assert calls["halo"] == len(sim.drift_rebuild_steps) >= 3
     assert not set(sim.drift_rebuild_steps) & {0, 40, 80}
     assert sim.drift_breach_steps == []

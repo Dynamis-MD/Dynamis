@@ -11,6 +11,7 @@ from dynamis_state import DistNNPState
 from distnnp_model import DistNNPModel
 from dynamis_integrator.masses import TORCH_MASSES
 
+
 class Euler(DistNNPIntegrator):
     def __init__(self, dt: float) -> None:
         super().__init__()
@@ -63,7 +64,9 @@ class Euler(DistNNPIntegrator):
         else:
             step_size = self.dt
 
-        atom_masses = TORCH_MASSES.to(molecular_info.atom_positions.device)[molecular_info.atom_types.reshape(-1).to(torch.long)]
+        atom_masses = TORCH_MASSES.to(molecular_info.atom_positions.device)[
+            molecular_info.atom_types.reshape(-1).to(torch.long)
+        ]
 
         self.step_(
             molecular_info.atom_positions,

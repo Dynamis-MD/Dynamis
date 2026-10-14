@@ -72,6 +72,7 @@ FORCE_RTOL = 1e-4
 
 try:
     from orb_models.forcefield import pretrained
+
     HAS_ORB = True
 except ImportError:
     HAS_ORB = False
@@ -114,12 +115,16 @@ def test_orb_distributed_parity():
     # -----------------------------------------------------------------
     if rank == 0:
         factory_fn = getattr(pretrained, MODEL_NAME)
-        ref_orbff, atoms_adapter = factory_fn(device=device, precision="float32-highest", compile=False)
+        ref_orbff, atoms_adapter = factory_fn(
+            device=device, precision="float32-highest", compile=False
+        )
         ref_orbff.eval()
 
     # Distributed model on every rank
     # precision must match the reference model above — ORBModel has no default.
-    dist_model = ORBModel(model_name=MODEL_NAME, precision="float32-highest", device=device)
+    dist_model = ORBModel(
+        model_name=MODEL_NAME, precision="float32-highest", device=device
+    )
 
     # -----------------------------------------------------------------
     # 2. Global system — identical on all ranks (seeded)
@@ -129,7 +134,9 @@ def test_orb_distributed_parity():
     torch.manual_seed(42)
 
     global_positions = torch.rand((total_atoms, 3), device=device) * cell_length
-    global_atom_types = torch.randint(1, 10, (total_atoms,), device=device, dtype=torch.long)
+    global_atom_types = torch.randint(
+        1, 10, (total_atoms,), device=device, dtype=torch.long
+    )
     global_cell = torch.eye(3, device=device) * cell_length
     global_pbc = torch.tensor([True, True, True], device=device)
 
@@ -145,7 +152,9 @@ def test_orb_distributed_parity():
 
     global_mol = MolecularInfo()
     global_mol.num_atoms = total_atoms
-    global_mol.atom_vertex_numbers = torch.arange(total_atoms, device=device, dtype=torch.long)
+    global_mol.atom_vertex_numbers = torch.arange(
+        total_atoms, device=device, dtype=torch.long
+    )
     global_mol.atom_types = global_atom_types
     global_mol.atom_positions = global_positions
     global_mol.atom_velocities = torch.zeros((total_atoms, 3), device=device)
@@ -164,8 +173,12 @@ def test_orb_distributed_parity():
         dist.all_reduce(partition_info.global_send_recv_matrix, op=dist.ReduceOp.SUM)
 
     local_mol = MolecularInfo()
-    local_mol.atom_positions = global_mol.atom_positions[partition_info.partition_indices]
-    local_mol.atom_velocities = global_mol.atom_velocities[partition_info.partition_indices]
+    local_mol.atom_positions = global_mol.atom_positions[
+        partition_info.partition_indices
+    ]
+    local_mol.atom_velocities = global_mol.atom_velocities[
+        partition_info.partition_indices
+    ]
     local_mol.atom_types = global_mol.atom_types[partition_info.partition_indices]
     n_local = local_mol.atom_positions.shape[0]
     local_mol.num_atoms = n_local
@@ -184,6 +197,7 @@ def test_orb_distributed_parity():
     # -----------------------------------------------------------------
     if rank == 0:
         import ase
+
         ref_atoms = ase.Atoms(
             numbers=global_atom_types.cpu().numpy(),
             positions=global_positions.detach().cpu().numpy(),
@@ -193,9 +207,9 @@ def test_orb_distributed_parity():
         ref_graph = atoms_adapter.from_ase_atoms(ref_atoms, device=device)
         ref_out = ref_orbff.predict(ref_graph, split=False)
 
-        ename = ref_orbff.energy_name          # "energy"
-        fname = ref_orbff.grad_forces_name     # "grad_forces"
-        print("[ref] predict keys:", list(ref_out.keys()))   # see them once
+        ename = ref_orbff.energy_name  # "energy"
+        fname = ref_orbff.grad_forces_name  # "grad_forces"
+        print("[ref] predict keys:", list(ref_out.keys()))  # see them once
         # predict() is eV / eV per A; ORBModel returns amu*A^2/fs^2 and
         # amu*A/fs^2. Convert the reference so both sides are in MD units.
         ref_energy = ref_out[ename].to(torch.float32).squeeze() * EV_TO_MD
@@ -249,11 +263,14 @@ def test_orb_distributed_parity():
     local_indices = partition_info.partition_indices[:n_local].long().to(device)
     rank_force = torch.zeros((total_atoms, 3), device=device)
     # So row i of local_forces lands at row g of rank_force. Everything else stays 0.
-    rank_force.scatter_(0, local_indices.unsqueeze(-1).expand(-1, 3), local_forces[:n_local])
+    rank_force.scatter_(
+        0, local_indices.unsqueeze(-1).expand(-1, 3), local_forces[:n_local]
+    )
 
     gathered = (
         [torch.zeros((total_atoms, 3), device=device) for _ in range(world_size)]
-        if rank == 0 else None
+        if rank == 0
+        else None
     )
     dist.gather(rank_force, gather_list=gathered, dst=0)
 
@@ -267,7 +284,9 @@ def test_orb_distributed_parity():
         f_diff = (reconstructed - ref_forces).abs()
         f_max = f_diff.max()
         f_scale = ref_forces.abs().max()
-        print(f"[parity forces] ref max|F|={f_scale.item()} dist max|F|={reconstructed.abs().max().item()}")
+        print(
+            f"[parity forces] ref max|F|={f_scale.item()} dist max|F|={reconstructed.abs().max().item()}"
+        )
         f_rel = (f_max / f_scale).item()
         print(f"[parity forces] abs diff={f_max.item()} rel diff={f_rel}")
         assert f_rel < FORCE_RTOL, (
@@ -280,9 +299,10 @@ def test_orb_distributed_parity():
     # -----------------------------------------------------------------
     assert local_energy.numel() == 1, "local_energy must be scalar"
     assert torch.isfinite(local_energy).all(), "local_energy has NaN/Inf"
-    assert local_forces.shape == (n_local, 3), (
-        f"forces shape {local_forces.shape} != ({n_local}, 3) — ghosts leaking?"
-    )
+    assert local_forces.shape == (
+        n_local,
+        3,
+    ), f"forces shape {local_forces.shape} != ({n_local}, 3) — ghosts leaking?"
     assert torch.isfinite(local_forces).all(), "local_forces has NaN/Inf"
     if rank == 0:
         print("Sanity checks passed")
@@ -292,6 +312,7 @@ def test_orb_distributed_parity():
 
 if __name__ == "__main__":
     if int(os.environ.get("WORLD_SIZE", 1)) < 2:
-        print("Run with: torchrun --nproc_per_node=2 dynamis_model/tests/test_orb_model.py")
+        print(
+            "Run with: torchrun --nproc_per_node=2 dynamis_model/tests/test_orb_model.py"
+        )
     test_orb_distributed_parity()
-    

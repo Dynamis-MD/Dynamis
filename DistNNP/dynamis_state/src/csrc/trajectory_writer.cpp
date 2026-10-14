@@ -11,19 +11,12 @@
 
 namespace dynamis_state {
 
-TrajectoryWriterImpl::TrajectoryWriterImpl(
-        uint32_t global_rank,
-        py::bytes run_id,
-        const std::string& author,
-        const std::string& output_dir,
-        const std::string& output_file,
-        const MolecularInfo& molecular_info,
-        torch::Tensor cell,
-        torch::Tensor pbc,
-        float time_per_step,
-        uint32_t steps_per_write,
-        std::vector<std::string> opts
-)
+TrajectoryWriterImpl::TrajectoryWriterImpl(uint32_t global_rank, py::bytes run_id,
+                                           const std::string &author, const std::string &output_dir,
+                                           const std::string &output_file,
+                                           const MolecularInfo &molecular_info, torch::Tensor cell,
+                                           torch::Tensor pbc, float time_per_step,
+                                           uint32_t steps_per_write, std::vector<std::string> opts)
     : rank(global_rank)
     , output_dir(output_dir)
     , output_file(output_file)
@@ -34,7 +27,8 @@ TrajectoryWriterImpl::TrajectoryWriterImpl(
     // exactly one succeeds and the rest get EEXIST. No check-then-create
     // window, so no race, and every rank knows it exists before open().
     if (mkdir(output_dir.c_str(), 0755) != 0 && errno != EEXIST) {
-        throw std::runtime_error("failed to create output directory '" + output_dir + "': " + strerror(errno));
+        throw std::runtime_error("failed to create output directory '" + output_dir +
+                                 "': " + strerror(errno));
     }
     struct stat st;
     if (stat(output_dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
@@ -42,9 +36,8 @@ TrajectoryWriterImpl::TrajectoryWriterImpl(
     }
 
     const std::string file_path = output_dir + "/" + output_file;
-    fd = (global_rank == 0)
-        ? open(file_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644)
-        : open(file_path.c_str(), O_RDWR | O_CREAT, 0644);
+    fd = (global_rank == 0) ? open(file_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644)
+                            : open(file_path.c_str(), O_RDWR | O_CREAT, 0644);
     if (fd < 0) {
         throw std::runtime_error("failed to open '" + file_path + "': " + strerror(errno));
     }
@@ -56,14 +49,17 @@ TrajectoryWriterImpl::TrajectoryWriterImpl(
     current_pbc = pbc.to(torch::kCPU).contiguous().toType(torch::kUInt8);
 }
 
-TrajectoryWriterImpl::~TrajectoryWriterImpl() {
+TrajectoryWriterImpl::~TrajectoryWriterImpl()
+{
     // only flush and close if not already done
     if (!flushed) {
         auto res = close(fd);
-        if (res != 0) throw std::runtime_error("close failed: " + std::string(strerror(errno)));
+        if (res != 0)
+            throw std::runtime_error("close failed: " + std::string(strerror(errno)));
     }
 }
-void TrajectoryWriterImpl::flush() {
+void TrajectoryWriterImpl::flush()
+{
     if (!flushed) {
         // Where::Host: closing an fd is host work, and on a networked filesystem
         // (Delta's /u is NFS) it is not necessarily cheap.
@@ -71,12 +67,14 @@ void TrajectoryWriterImpl::flush() {
         t.start("traj_flush", TimerClass::Other, Where::Host);
         auto res = close(fd);
         t.stop();
-        if (res != 0) throw std::runtime_error("close failed: " + std::string(strerror(errno)));
+        if (res != 0)
+            throw std::runtime_error("close failed: " + std::string(strerror(errno)));
         flushed = true;
     }
 }
 
-void TrajectoryWriterImpl::parse_opts(const std::vector<std::string>& opts) {
+void TrajectoryWriterImpl::parse_opts(const std::vector<std::string> &opts)
+{
     if (opts.empty()) {
         has_indices = true;
         has_positions = true;
@@ -86,39 +84,48 @@ void TrajectoryWriterImpl::parse_opts(const std::vector<std::string>& opts) {
     has_indices = false;
     has_positions = false;
     has_velocities = false;
-    for (const auto& o : opts) {
-        if (o == "indices") has_indices = true;
-        else if (o == "positions") has_positions = true;
-        else if (o == "velocities") has_velocities = true;
-        else throw std::runtime_error("TrajectoryWriter: unknown option '" + o + "'");
+    for (const auto &o : opts) {
+        if (o == "indices")
+            has_indices = true;
+        else if (o == "positions")
+            has_positions = true;
+        else if (o == "velocities")
+            has_velocities = true;
+        else
+            throw std::runtime_error("TrajectoryWriter: unknown option '" + o + "'");
     }
     if (!has_positions) {
         throw std::runtime_error("TrajectoryWriter: 'positions' cannot be excluded from options");
     }
 }
 
-void TrajectoryWriterImpl::write_front_matter(float time_per_step, uint32_t steps_per_write, const MolecularInfo& state, uint32_t rank) {
+void TrajectoryWriterImpl::write_front_matter(float time_per_step, uint32_t steps_per_write,
+                                              const MolecularInfo &state, uint32_t rank)
+{
     // figure out sizes of header and each rank size
     // resize file to the correct size
 
     // write the front_matter
 
     // determine which fields are active, in canonical order
-    std::vector<const FieldSpec*> active_fields;
-    for (const auto& f : kFieldOrder) {
+    std::vector<const FieldSpec *> active_fields;
+    for (const auto &f : kFieldOrder) {
         std::string opt(f.opt_name);
-        if (opt == "indices" && !has_indices) continue;
-        if (opt == "positions" && !has_positions) continue;
-        if (opt == "velocities" && !has_velocities) continue;
+        if (opt == "indices" && !has_indices)
+            continue;
+        if (opt == "positions" && !has_positions)
+            continue;
+        if (opt == "velocities" && !has_velocities)
+            continue;
         active_fields.push_back(&f);
     }
     // +1 for the pbc_cell block, which is always written as a field
     // descriptor even though it isn't a per-atom field (see submit())
     const uint32_t field_count = static_cast<uint32_t>(active_fields.size()) + 1;
 
-    uint64_t front_matter_size = layout::kFieldDescriptorsOffset
-                               + field_count * layout::kFieldDescriptorSize
-                               + sizeof(uint64_t); // front_matter_size itself
+    uint64_t front_matter_size = layout::kFieldDescriptorsOffset +
+            field_count * layout::kFieldDescriptorSize +
+            sizeof(uint64_t); // front_matter_size itself
 
     // should pad the front_matter_size so this block is on a 8 byte boundary
     uint32_t front_matter_padding = padding_to_8(front_matter_size);
@@ -135,7 +142,7 @@ void TrajectoryWriterImpl::write_front_matter(float time_per_step, uint32_t step
 
     // This is only for version 1
     uint32_t bytes_per_atom = 0;
-    for (const auto* f : active_fields)
+    for (const auto *f : active_fields)
         bytes_per_atom += f->bytes_per_atom;
 
     this->front_matter_size = front_matter_size;
@@ -143,8 +150,8 @@ void TrajectoryWriterImpl::write_front_matter(float time_per_step, uint32_t step
     this->total_atoms = state.num_atoms;
 
     // all other ranks only need to know the above 3 values so can return here
-    if (rank != 0) return;
-
+    if (rank != 0)
+        return;
 
     // create a buffer
     std::vector<uint8_t> buf(front_matter_size);
@@ -195,13 +202,14 @@ void TrajectoryWriterImpl::write_front_matter(float time_per_step, uint32_t step
     // pbc_cell — the per-frame cell/pbc block (not a per-atom field, but
     // listed here for self-description; its layout is fixed, see submit())
     {
-        const char* pbc_cell_str = "pbc_cell";
+        const char *pbc_cell_str = "pbc_cell";
         uint32_t pbc_cell_size = strlen(pbc_cell_str);
         memcpy(buf.data() + offset, pbc_cell_str, pbc_cell_size);
-        memset(buf.data() + offset + pbc_cell_size, 0, layout::kFieldDescriptorSize - pbc_cell_size);
+        memset(buf.data() + offset + pbc_cell_size, 0,
+               layout::kFieldDescriptorSize - pbc_cell_size);
         offset += layout::kFieldDescriptorSize;
     }
-    for (const auto* f : active_fields) {
+    for (const auto *f : active_fields) {
         std::string name(f->descriptor_name);
         memcpy(buf.data() + offset, name.data(), name.size());
         memset(buf.data() + offset + name.size(), 0, layout::kFieldDescriptorSize - name.size());
@@ -217,7 +225,8 @@ void TrajectoryWriterImpl::write_front_matter(float time_per_step, uint32_t step
     offset += front_matter_padding;
 
     // tensor of atomic numbers
-    // TODO this could be large and its own separate write to the file to make things easier probably
+    // TODO this could be large and its own separate write to the file to make things easier
+    // probably
     auto t = state.atom_types.contiguous().toType(torch::kUInt8);
 
     size_t tensor_bytes = t.numel() * t.element_size();
@@ -233,7 +242,10 @@ void TrajectoryWriterImpl::write_front_matter(float time_per_step, uint32_t step
     CHECK_WRITE(written, buf.size());
 }
 
-void TrajectoryWriterImpl::submit(uint32_t step, MolecularInfo state, c10::optional<torch::Tensor> cell, c10::optional<torch::Tensor> pbc) {
+void TrajectoryWriterImpl::submit(uint32_t step, MolecularInfo state,
+                                  c10::optional<torch::Tensor> cell,
+                                  c10::optional<torch::Tensor> pbc)
+{
 
     // Where::Host, not Device: this launches no asynchronous CUDA work. The
     // .to(kCPU) copies below synchronize internally, so a host clock measures the
@@ -243,9 +255,8 @@ void TrajectoryWriterImpl::submit(uint32_t step, MolecularInfo state, c10::optio
 
     // to make this easier, i think im going to write each tensor one after the other
     // so it will be
-    // pbc_cell | 9 x float32 (cell) + 3 x uint8 (pbc) + 1 byte padding, written once per frame by rank 0
-    // vertex_ids | uint8 x frame_size
-    // atom_positions | 3 x float32 x frame_size
+    // pbc_cell | 9 x float32 (cell) + 3 x uint8 (pbc) + 1 byte padding, written once per frame by
+    // rank 0 vertex_ids | uint8 x frame_size atom_positions | 3 x float32 x frame_size
     // atom_velocities | 3 x float32 x frame_size
 
     // cell/pbc are optional; if not provided, keep writing whatever was last
@@ -258,7 +269,8 @@ void TrajectoryWriterImpl::submit(uint32_t step, MolecularInfo state, c10::optio
     if (front_matter_size == 0)
         throw std::runtime_error("submit() called before front matter was written");
 
-    uint32_t offset = front_matter_size + (step * (kPbcCellBlockSize + total_atoms * bytes_per_atom));
+    uint32_t offset =
+            front_matter_size + (step * (kPbcCellBlockSize + total_atoms * bytes_per_atom));
 
     if (rank == 0) {
         std::vector<uint8_t> pbc_cell_buf(kPbcCellBlockSize, 0);

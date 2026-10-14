@@ -83,6 +83,7 @@ def run_benchmark(sizes: List[int], k_values: List[int], warmup: int, repeats: i
     baseline_available = False
     try:
         from scripts.kdtree_benchmark import kdtree_weighted_gpu
+
         baseline_available = True
     except ImportError:
         print("  [WARN] Baseline not importable, skipping baseline comparison\n")
@@ -143,13 +144,16 @@ def run_benchmark(sizes: List[int], k_values: List[int], warmup: int, repeats: i
 
             # --- Baseline Python GPU weighted ---
             if baseline_available:
+
                 def fn_base():
                     return kdtree_weighted_gpu(positions, W, weights)
 
                 t_base = time_fn(fn_base, device, warmup, repeats)
                 row["base_wt"] = t_base
                 ratio = t_base / row["cuda_wt"]
-                print(f"  {'Baseline Python GPU (weighted)':<35s} {t_base:10.3f} {ratio:7.2f}x")
+                print(
+                    f"  {'Baseline Python GPU (weighted)':<35s} {t_base:10.3f} {ratio:7.2f}x"
+                )
 
             all_results.append(row)
 
@@ -166,8 +170,10 @@ def run_benchmark(sizes: List[int], k_values: List[int], warmup: int, repeats: i
 
     for r in all_results:
         vals = [
-            f"{r['N']:>12,d}", f"{r['W']:>12d}",
-            f"{r.get('cuda_uw',0):>12.3f}", f"{r.get('cuda_wt',0):>12.3f}",
+            f"{r['N']:>12,d}",
+            f"{r['W']:>12d}",
+            f"{r.get('cuda_uw',0):>12.3f}",
+            f"{r.get('cuda_wt',0):>12.3f}",
         ]
         if baseline_available and "base_wt" in r:
             ratio = r["base_wt"] / r["cuda_wt"]
@@ -177,12 +183,20 @@ def run_benchmark(sizes: List[int], k_values: List[int], warmup: int, repeats: i
 
 def main():
     parser = argparse.ArgumentParser(description="CUDA KD-tree partitioner benchmark")
-    parser.add_argument("--sizes", type=int, nargs="+",
-                        default=[1000, 8000, 64000, 256000],
-                        help="Atom counts to benchmark")
-    parser.add_argument("--k", type=int, nargs="+",
-                        default=[4, 8, 16, 64, 256],
-                        help="Partition counts to test")
+    parser.add_argument(
+        "--sizes",
+        type=int,
+        nargs="+",
+        default=[1000, 8000, 64000, 256000],
+        help="Atom counts to benchmark",
+    )
+    parser.add_argument(
+        "--k",
+        type=int,
+        nargs="+",
+        default=[4, 8, 16, 64, 256],
+        help="Partition counts to test",
+    )
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
     args = parser.parse_args()

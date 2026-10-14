@@ -18,38 +18,47 @@ namespace {
 
 // Resolves a possibly-negative frame_index against a known frame count,
 // shared by both the xyz and dynamis read paths.
-int64_t resolve_frame_index(int64_t frame_index, uint64_t frame_count, const std::string& path) {
+int64_t resolve_frame_index(int64_t frame_index, uint64_t frame_count, const std::string &path)
+{
     int64_t count = static_cast<int64_t>(frame_count);
     int64_t resolved = frame_index < 0 ? count + frame_index : frame_index;
     if (resolved < 0 || resolved >= count) {
-        throw std::runtime_error(
-            "frame_index " + std::to_string(frame_index) + " out of range for '" + path +
-            "' (found " + std::to_string(count) + (count == 1 ? " frame)" : " frames)"));
+        throw std::runtime_error("frame_index " + std::to_string(frame_index) +
+                                 " out of range for '" + path + "' (found " +
+                                 std::to_string(count) + (count == 1 ? " frame)" : " frames)"));
     }
     return resolved;
 }
 
 // Validates the caller-supplied opts list, throwing on anything unusable, and
 // reports whether velocities were requested.
-bool validate_xyz_opts(const std::vector<std::string>& opts) {
-    if (opts.empty()) return true; // default: everything present
+bool validate_xyz_opts(const std::vector<std::string> &opts)
+{
+    if (opts.empty())
+        return true; // default: everything present
     bool has_velocities = false;
     bool has_positions = false;
-    for (const auto& o : opts) {
-        if (o == "velocities") has_velocities = true;
-        else if (o == "positions") has_positions = true;
-        else if (o == "indices") continue; // xyz never writes an id column
-        else throw std::runtime_error("translate_dynamis_to_xyz: unknown option '" + o + "'");
+    for (const auto &o : opts) {
+        if (o == "velocities")
+            has_velocities = true;
+        else if (o == "positions")
+            has_positions = true;
+        else if (o == "indices")
+            continue; // xyz never writes an id column
+        else
+            throw std::runtime_error("translate_dynamis_to_xyz: unknown option '" + o + "'");
     }
     if (!has_positions) {
-        throw std::runtime_error("translate_dynamis_to_xyz: 'positions' cannot be excluded from options");
+        throw std::runtime_error(
+                "translate_dynamis_to_xyz: 'positions' cannot be excluded from options");
     }
     return has_velocities;
 }
 
-void write_xyz_frame(std::ostream& out, const MolecularInfo& state, torch::Tensor cell,
-                      torch::Tensor pbc, bool has_velocities) {
-    const auto& rev = reverse_periodic_table();
+void write_xyz_frame(std::ostream &out, const MolecularInfo &state, torch::Tensor cell,
+                     torch::Tensor pbc, bool has_velocities)
+{
+    const auto &rev = reverse_periodic_table();
 
     auto types = state.atom_types.accessor<int64_t, 1>();
     auto positions = state.atom_positions.accessor<float, 2>();
@@ -69,7 +78,8 @@ void write_xyz_frame(std::ostream& out, const MolecularInfo& state, torch::Tenso
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
             out << cell_acc[i][j];
-            if (!(i == 2 && j == 2)) out << ' ';
+            if (!(i == 2 && j == 2))
+                out << ' ';
         }
     }
     out << "\" ";
@@ -77,7 +87,8 @@ void write_xyz_frame(std::ostream& out, const MolecularInfo& state, torch::Tenso
     // what the integrators consume, so the column is labelled for what it is
     // rather than as p = m*v.
     out << "Properties=species:S:1:pos:R:3" << (has_velocities ? ":vel:R:3" : "") << " ";
-    out << "pbc=\"" << (pbc_acc[0] ? "T" : "F") << ' ' << (pbc_acc[1] ? "T" : "F") << ' ' << (pbc_acc[2] ? "T" : "F") << "\"\n";
+    out << "pbc=\"" << (pbc_acc[0] ? "T" : "F") << ' ' << (pbc_acc[1] ? "T" : "F") << ' '
+        << (pbc_acc[2] ? "T" : "F") << "\"\n";
 
     if (has_velocities) {
         auto velocities = state.atom_velocities.accessor<float, 2>();
@@ -109,7 +120,8 @@ struct DynamisHeader {
     uint64_t frame_count{ 0 };
 };
 
-DynamisHeader read_dynamis_header(int fd, const std::string& path) {
+DynamisHeader read_dynamis_header(int fd, const std::string &path)
+{
     ssize_t n;
 
     uint8_t magic[8];
@@ -123,8 +135,8 @@ DynamisHeader read_dynamis_header(int fd, const std::string& path) {
     n = pread(fd, &version, sizeof(version), layout::kVersionOffset);
     CHECK_READ(n, sizeof(version));
     if (version != 1) {
-        throw std::runtime_error("'" + path + "': unsupported dynamis version " + std::to_string(version) +
-                                  " (only version 1 is supported)");
+        throw std::runtime_error("'" + path + "': unsupported dynamis version " +
+                                 std::to_string(version) + " (only version 1 is supported)");
     }
 
     DynamisHeader h;
@@ -141,19 +153,22 @@ DynamisHeader read_dynamis_header(int fd, const std::string& path) {
 
     // Field count can never be more than 4 (pbc_cell + id + position + velocity)
     if (field_count > 4) {
-        throw std::runtime_error("implausible field_count (" + std::to_string(field_count) + ") in '" + path + "'");
+        throw std::runtime_error("implausible field_count (" + std::to_string(field_count) +
+                                 ") in '" + path + "'");
     }
 
     h.field_names.resize(field_count);
     for (uint32_t i = 0; i < field_count; i++) {
         char name_buf[layout::kFieldDescriptorSize] = { 0 };
-        n = pread(fd, name_buf, sizeof(name_buf), layout::kFieldDescriptorsOffset + i * layout::kFieldDescriptorSize);
+        n = pread(fd, name_buf, sizeof(name_buf),
+                  layout::kFieldDescriptorsOffset + i * layout::kFieldDescriptorSize);
         CHECK_READ(n, sizeof(name_buf));
         h.field_names[i] = std::string(name_buf, strnlen(name_buf, sizeof(name_buf)));
     }
 
     n = pread(fd, &h.front_matter_size, sizeof(h.front_matter_size),
-              layout::kFieldDescriptorsOffset + static_cast<uint64_t>(field_count) * layout::kFieldDescriptorSize);
+              layout::kFieldDescriptorsOffset +
+                      static_cast<uint64_t>(field_count) * layout::kFieldDescriptorSize);
     CHECK_READ(n, sizeof(h.front_matter_size));
 
     // atom types sit right before the front_matter_size boundary, padded to
@@ -164,7 +179,10 @@ DynamisHeader read_dynamis_header(int fd, const std::string& path) {
     std::vector<uint8_t> types(h.num_atoms);
     n = pread(fd, types.data(), types.size(), atom_types_offset);
     CHECK_READ(n, static_cast<ssize_t>(types.size()));
-    h.atom_types = torch::from_blob(types.data(), { static_cast<int64_t>(h.num_atoms) }, torch::kUInt8).clone().to(torch::kInt64);
+    h.atom_types =
+            torch::from_blob(types.data(), { static_cast<int64_t>(h.num_atoms) }, torch::kUInt8)
+                    .clone()
+                    .to(torch::kInt64);
 
     h.frame_size = kPbcCellBlockSize + static_cast<uint64_t>(h.bytes_per_atom) * h.num_atoms;
     if (h.frame_size <= kPbcCellBlockSize) {
@@ -173,7 +191,9 @@ DynamisHeader read_dynamis_header(int fd, const std::string& path) {
 
     uint64_t file_size = static_cast<uint64_t>(lseek(fd, 0, SEEK_END));
     if (file_size < h.front_matter_size || (file_size - h.front_matter_size) % h.frame_size != 0) {
-        throw std::runtime_error("'" + path + "': file size is inconsistent with its own header (truncated or corrupt)");
+        throw std::runtime_error(
+                "'" + path +
+                "': file size is inconsistent with its own header (truncated or corrupt)");
     }
     h.frame_count = (file_size - h.front_matter_size) / h.frame_size;
     if (h.frame_count == 0) {
@@ -183,7 +203,9 @@ DynamisHeader read_dynamis_header(int fd, const std::string& path) {
     return h;
 }
 
-std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_dynamis_frame(int fd, const DynamisHeader& h, const std::string& path, uint64_t frame_index) {
+std::tuple<MolecularInfo, torch::Tensor, torch::Tensor>
+read_dynamis_frame(int fd, const DynamisHeader &h, const std::string &path, uint64_t frame_index)
+{
     ssize_t n;
 
     MolecularInfo atoms;
@@ -205,13 +227,18 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_dynamis_frame(int f
     uint64_t cursor = loc + kPbcCellBlockSize;
 
     std::unordered_map<std::string, uint64_t> field_offsets;
-    for (const auto& name : h.field_names) {
-        if (name == "pbc_cell") continue; // already read above; not part of the per-atom block
+    for (const auto &name : h.field_names) {
+        if (name == "pbc_cell")
+            continue; // already read above; not part of the per-atom block
         field_offsets[name] = cursor;
-        if (name == "id") cursor += h.num_atoms * sizeof(int64_t);
-        else if (name == "position") cursor += h.num_atoms * 3 * sizeof(float);
-        else if (name == "velocity") cursor += h.num_atoms * 3 * sizeof(float);
-        else throw std::runtime_error("unknown field descriptor '" + name + "' in '" + path + "'");
+        if (name == "id")
+            cursor += h.num_atoms * sizeof(int64_t);
+        else if (name == "position")
+            cursor += h.num_atoms * 3 * sizeof(float);
+        else if (name == "velocity")
+            cursor += h.num_atoms * 3 * sizeof(float);
+        else
+            throw std::runtime_error("unknown field descriptor '" + name + "' in '" + path + "'");
     }
 
     // ids: default to sequential order if not present
@@ -220,7 +247,9 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_dynamis_frame(int f
         std::vector<int64_t> ids(h.num_atoms);
         n = pread(fd, ids.data(), block_size, field_offsets.at("id"));
         CHECK_READ(n, block_size);
-        atoms.atom_vertex_numbers = torch::from_blob(ids.data(), { static_cast<int64_t>(h.num_atoms) }, torch::kInt64).clone();
+        atoms.atom_vertex_numbers =
+                torch::from_blob(ids.data(), { static_cast<int64_t>(h.num_atoms) }, torch::kInt64)
+                        .clone();
     } else {
         atoms.atom_vertex_numbers = torch::arange(0, h.num_atoms, 1).to(torch::kInt64);
     }
@@ -234,7 +263,8 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_dynamis_frame(int f
         std::vector<float> attribs(h.num_atoms * 3);
         n = pread(fd, attribs.data(), block_size, field_offsets.at("position"));
         CHECK_READ(n, block_size);
-        atoms.atom_positions = torch::from_blob(attribs.data(), { static_cast<int64_t>(h.num_atoms), 3 }).clone();
+        atoms.atom_positions =
+                torch::from_blob(attribs.data(), { static_cast<int64_t>(h.num_atoms), 3 }).clone();
     }
 
     // velocities: default to zero if not present
@@ -243,7 +273,8 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_dynamis_frame(int f
         std::vector<float> attribs(h.num_atoms * 3);
         n = pread(fd, attribs.data(), block_size, field_offsets.at("velocity"));
         CHECK_READ(n, block_size);
-        atoms.atom_velocities = torch::from_blob(attribs.data(), { static_cast<int64_t>(h.num_atoms), 3 }).clone();
+        atoms.atom_velocities =
+                torch::from_blob(attribs.data(), { static_cast<int64_t>(h.num_atoms), 3 }).clone();
     } else {
         atoms.atom_velocities = torch::zeros({ static_cast<int64_t>(h.num_atoms), 3 });
     }
@@ -251,9 +282,12 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_dynamis_frame(int f
     return { atoms, cell, pbc };
 }
 
-std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> load_dynamis_file(const std::string& path, int64_t frame_index) {
+std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> load_dynamis_file(const std::string &path,
+                                                                          int64_t frame_index)
+{
     int fd = open(path.c_str(), O_RDONLY);
-    if (fd < 0) throw std::runtime_error("failed to open '" + path + "': " + strerror(errno));
+    if (fd < 0)
+        throw std::runtime_error("failed to open '" + path + "': " + strerror(errno));
 
     try {
         DynamisHeader h = read_dynamis_header(fd, path);
@@ -269,7 +303,8 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> load_dynamis_file(const 
 
 // ─── .xyz reading ──────────────────────────────────────────────────────────
 
-std::vector<std::string> tokenize_xyz_comment(const std::string& line) {
+std::vector<std::string> tokenize_xyz_comment(const std::string &line)
+{
     // Tokenize on whitespace, but treat a "..." span (which may contain
     // embedded spaces, e.g. Lattice="15.0 0.0 0.0 ...") as a single token.
     std::vector<std::string> tokens;
@@ -289,7 +324,8 @@ std::vector<std::string> tokenize_xyz_comment(const std::string& line) {
             current_token += c;
         }
     }
-    if (!current_token.empty()) tokens.push_back(current_token);
+    if (!current_token.empty())
+        tokens.push_back(current_token);
     return tokens;
 }
 
@@ -300,18 +336,20 @@ struct XyzFrameLocator {
 
 // First pass: walks every frame block, recording where each starts and
 // validating the constant-atom-count invariant, without parsing atom lines.
-XyzFrameLocator scan_xyz_frames(std::ifstream& xyz_file, const std::string& path) {
+XyzFrameLocator scan_xyz_frames(std::ifstream &xyz_file, const std::string &path)
+{
     XyzFrameLocator locator;
     std::string line;
 
     while (true) {
         std::streampos block_start = xyz_file.tellg();
-        if (!std::getline(xyz_file, line)) break; // clean EOF between blocks
+        if (!std::getline(xyz_file, line))
+            break; // clean EOF between blocks
 
         int natoms;
         try {
             natoms = std::stoi(line);
-        } catch (const std::exception&) {
+        } catch (const std::exception &) {
             throw std::runtime_error("'" + path + "': malformed atom-count line '" + line + "'");
         }
         if (natoms < 0) {
@@ -321,20 +359,23 @@ XyzFrameLocator scan_xyz_frames(std::ifstream& xyz_file, const std::string& path
         if (locator.offsets.empty()) {
             locator.num_atoms = static_cast<uint64_t>(natoms);
         } else if (static_cast<uint64_t>(natoms) != locator.num_atoms) {
-            throw std::runtime_error(
-                "'" + path + "': frame " + std::to_string(locator.offsets.size()) + " has " +
-                std::to_string(natoms) + " atoms, expected " + std::to_string(locator.num_atoms) +
-                " (atom count must be constant across frames)");
+            throw std::runtime_error("'" + path + "': frame " +
+                                     std::to_string(locator.offsets.size()) + " has " +
+                                     std::to_string(natoms) + " atoms, expected " +
+                                     std::to_string(locator.num_atoms) +
+                                     " (atom count must be constant across frames)");
         }
         locator.offsets.push_back(block_start);
 
         if (!std::getline(xyz_file, line)) {
-            throw std::runtime_error("'" + path + "': unexpected end of file (missing comment line)");
+            throw std::runtime_error("'" + path +
+                                     "': unexpected end of file (missing comment line)");
         }
         for (int i = 0; i < natoms; i++) {
             if (!std::getline(xyz_file, line)) {
-                throw std::runtime_error("'" + path + "': unexpected end of file while scanning frame " +
-                                          std::to_string(locator.offsets.size() - 1));
+                throw std::runtime_error("'" + path +
+                                         "': unexpected end of file while scanning frame " +
+                                         std::to_string(locator.offsets.size() - 1));
             }
         }
     }
@@ -347,7 +388,9 @@ XyzFrameLocator scan_xyz_frames(std::ifstream& xyz_file, const std::string& path
 
 // Second pass: xyz_file must already be seeked to the start of the target
 // block (its natoms line). Parses that one block fully.
-std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> parse_xyz_block(std::ifstream& xyz_file, const std::string& path, uint64_t block_index) {
+std::tuple<MolecularInfo, torch::Tensor, torch::Tensor>
+parse_xyz_block(std::ifstream &xyz_file, const std::string &path, uint64_t block_index)
+{
     std::string line;
 
     std::getline(xyz_file, line);
@@ -366,7 +409,8 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> parse_xyz_block(std::ifs
         if (token.find("Properties") == 0) {
             size_t property_start = token.find('=');
             if (property_start == std::string::npos) {
-                throw std::runtime_error("'" + path + "': malformed Properties= in frame " + std::to_string(block_index));
+                throw std::runtime_error("'" + path + "': malformed Properties= in frame " +
+                                         std::to_string(block_index));
             }
             property_start += 1; // past the =
             token = token.substr(property_start, token.size() - property_start);
@@ -389,54 +433,58 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> parse_xyz_block(std::ifs
         } else if (token.find("Lattice=") == 0) {
             std::stringstream ls(token.substr(strlen("Lattice=")));
             float v;
-            while (ls >> v) cell_values.push_back(v);
-            if (cell_values.size() != 9) cell_values.clear(); // malformed; fall back to default below
+            while (ls >> v)
+                cell_values.push_back(v);
+            if (cell_values.size() != 9)
+                cell_values.clear(); // malformed; fall back to default below
         } else if (token.find("pbc=") == 0) {
             std::stringstream ps(token.substr(strlen("pbc=")));
             std::string flag;
             while (ps >> flag) {
                 pbc_values.push_back((flag == "T" || flag == "True" || flag == "1") ? 1 : 0);
             }
-            if (pbc_values.size() != 3) pbc_values.clear(); // malformed; fall back to default below
+            if (pbc_values.size() != 3)
+                pbc_values.clear(); // malformed; fall back to default below
         }
     }
 
     // row-major [3, 3] cell, [3] pbc flags; default to no box/no periodicity
     // when the comment line doesn't carry Lattice=/pbc= (e.g. plain xyz)
     torch::Tensor cell = (cell_values.size() == 9)
-        ? torch::from_blob(cell_values.data(), { 3, 3 }, torch::kFloat32).clone()
-        : torch::zeros({ 3, 3 }, torch::kFloat32);
+            ? torch::from_blob(cell_values.data(), { 3, 3 }, torch::kFloat32).clone()
+            : torch::zeros({ 3, 3 }, torch::kFloat32);
     torch::Tensor pbc = (pbc_values.size() == 3)
-        ? torch::from_blob(pbc_values.data(), { 3 }, torch::kUInt8).clone()
-        : torch::zeros({ 3 }, torch::kUInt8);
+            ? torch::from_blob(pbc_values.data(), { 3 }, torch::kUInt8).clone()
+            : torch::zeros({ 3 }, torch::kUInt8);
 
     std::vector<uint8_t> types;
     std::vector<float> positions;
     std::vector<float> velocities;
     for (int i = 0; i < num_atoms; i++) {
         std::getline(xyz_file, line); // already validated to exist during the scan pass
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
 
         std::stringstream ss(line);
         std::string element, xstr, ystr, zstr;
         if (!(ss >> element >> xstr >> ystr >> zstr)) {
-            throw std::runtime_error("'" + path + "': malformed atom line in frame " + std::to_string(block_index) +
-                                      ": '" + line + "'");
+            throw std::runtime_error("'" + path + "': malformed atom line in frame " +
+                                     std::to_string(block_index) + ": '" + line + "'");
         }
 
         auto it = periodic_table.find(element);
         if (it == periodic_table.end()) {
-            throw std::runtime_error("'" + path + "': unknown element symbol '" + element + "' in frame " +
-                                      std::to_string(block_index));
+            throw std::runtime_error("'" + path + "': unknown element symbol '" + element +
+                                     "' in frame " + std::to_string(block_index));
         }
         types.emplace_back(it->second.number);
         try {
             positions.emplace_back(std::stof(xstr));
             positions.emplace_back(std::stof(ystr));
             positions.emplace_back(std::stof(zstr));
-        } catch (const std::exception&) {
-            throw std::runtime_error("'" + path + "': malformed position in frame " + std::to_string(block_index) +
-                                      ": '" + line + "'");
+        } catch (const std::exception &) {
+            throw std::runtime_error("'" + path + "': malformed position in frame " +
+                                     std::to_string(block_index) + ": '" + line + "'");
         }
 
         if (velocity_index != -1) {
@@ -447,8 +495,8 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> parse_xyz_block(std::ifs
                 idx--;
             }
             if (!(ss >> xstr >> ystr >> zstr)) {
-                throw std::runtime_error("'" + path + "': malformed velocity in frame " + std::to_string(block_index) +
-                                          ": '" + line + "'");
+                throw std::runtime_error("'" + path + "': malformed velocity in frame " +
+                                         std::to_string(block_index) + ": '" + line + "'");
             }
             // MolecularInfo stores velocities, so a momenta column has to be
             // divided back through by this atom's mass (v = p / m).
@@ -462,16 +510,20 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> parse_xyz_block(std::ifs
     MolecularInfo atoms;
     atoms.num_atoms = num_atoms;
     atoms.atom_vertex_numbers = torch::arange(0, num_atoms, 1).to(torch::kInt64);
-    atoms.atom_types = torch::from_blob(types.data(), { num_atoms }, torch::kUInt8).clone().toType(torch::kInt64);
+    atoms.atom_types = torch::from_blob(types.data(), { num_atoms }, torch::kUInt8)
+                               .clone()
+                               .toType(torch::kInt64);
     atoms.atom_positions = torch::from_blob(positions.data(), { num_atoms, 3 }).clone();
     atoms.atom_velocities = (velocity_index == -1)
-        ? torch::zeros({ num_atoms, 3 })
-        : torch::from_blob(velocities.data(), { num_atoms, 3 }).clone();
+            ? torch::zeros({ num_atoms, 3 })
+            : torch::from_blob(velocities.data(), { num_atoms, 3 }).clone();
 
     return { atoms, cell, pbc };
 }
 
-std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> load_xyz_file(const std::string& path, int64_t frame_index) {
+std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> load_xyz_file(const std::string &path,
+                                                                      int64_t frame_index)
+{
     std::ifstream xyz_file(path);
     if (!xyz_file.is_open()) {
         throw std::runtime_error("failed to open '" + path + "'");
@@ -488,7 +540,9 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> load_xyz_file(const std:
 
 } // namespace
 
-std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_molecular_info(const std::string& path, int64_t frame_index) {
+std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_molecular_info(const std::string &path,
+                                                                            int64_t frame_index)
+{
     auto len = path.size();
     if (len >= 4 && path.compare(len - 4, 4, ".xyz") == 0) {
         return load_xyz_file(path, frame_index);
@@ -499,12 +553,14 @@ std::tuple<MolecularInfo, torch::Tensor, torch::Tensor> read_molecular_info(cons
     throw std::runtime_error("'" + path + "': unsupported file type (expected .xyz or .dynamis)");
 }
 
-void translate_dynamis_to_xyz(const std::string& dynamis_path, const std::string& xyz_path,
-                               std::vector<std::string> opts) {
+void translate_dynamis_to_xyz(const std::string &dynamis_path, const std::string &xyz_path,
+                              std::vector<std::string> opts)
+{
     bool has_velocities = validate_xyz_opts(opts);
 
     int fd = open(dynamis_path.c_str(), O_RDONLY);
-    if (fd < 0) throw std::runtime_error("failed to open '" + dynamis_path + "': " + strerror(errno));
+    if (fd < 0)
+        throw std::runtime_error("failed to open '" + dynamis_path + "': " + strerror(errno));
 
     std::ofstream out(xyz_path);
     if (!out.is_open()) {

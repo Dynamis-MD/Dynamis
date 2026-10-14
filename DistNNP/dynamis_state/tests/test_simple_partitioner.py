@@ -169,9 +169,9 @@ class TestBuildHaloMaps:
 
         for i in range(world_size):
             for j in range(world_size):
-                assert all_send[i, j].item() == all_recv[j, i].item(), (
-                    f"send[{i},{j}]={all_send[i,j]} != recv[{j},{i}]={all_recv[j,i]}"
-                )
+                assert (
+                    all_send[i, j].item() == all_recv[j, i].item()
+                ), f"send[{i},{j}]={all_send[i,j]} != recv[{j},{i}]={all_recv[j,i]}"
 
     def test_interior_mask_shape(self):
         device = torch.device("cuda")
