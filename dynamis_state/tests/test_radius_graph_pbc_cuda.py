@@ -4,28 +4,15 @@ Compares CUDA output against the reference radius_graph_pbc_v2 implementation.
 Edge sets are compared after sorting to handle different orderings.
 """
 
-import sys
-import os
 import math
-import importlib.util
 import pytest
 import torch
 
-# Directly load radius_graph_pbc module to avoid baseline's __init__.py import chain
-_RGB_PBC_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "..",
-    "..",
-    "baseline",
-    "local_fairchem",
-    "graph",
-    "radius_graph_pbc.py",
-)
-_spec = importlib.util.spec_from_file_location("_radius_graph_pbc_ref", _RGB_PBC_PATH)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-radius_graph_pbc_v2 = _mod.radius_graph_pbc_v2
+# Reference implementation ships with fairchem-core (an optional dependency,
+# installed via `dynamis_model[uma]`); skip this module when it is absent.
+radius_graph_pbc_v2 = pytest.importorskip(
+    "fairchem.core.graph.radius_graph_pbc"
+).radius_graph_pbc_v2
 
 # Import the CUDA implementation
 import dynamis_state.dynamis_state_impl as _impl
@@ -42,7 +29,7 @@ class FakeData:
         self.natoms = natoms
         if pbc is None:
             pbc = torch.tensor([[True, True, True]])
-        self.pbc = pbc
+        self.pbc = pbc.to(pos.device)
         if batch is None:
             self.batch = torch.zeros(pos.size(0), dtype=torch.int, device=pos.device)
         else:
@@ -219,7 +206,7 @@ class TestPartialPBC:
         n = 30
         data = make_cubic_system(n, 15.0, device)
         pbc_flags = torch.tensor([True, True, False])
-        data.pbc = pbc_flags.unsqueeze(0)
+        data.pbc = pbc_flags.unsqueeze(0).to(data.pos.device)
 
         radius = 4.0
         max_neighbors = 200
@@ -239,7 +226,7 @@ class TestPartialPBC:
         n = 25
         data = make_cubic_system(n, 20.0, device)
         pbc_flags = torch.tensor([False, False, False])
-        data.pbc = pbc_flags.unsqueeze(0)
+        data.pbc = pbc_flags.unsqueeze(0).to(data.pos.device)
 
         radius = 5.0
         max_neighbors = 200

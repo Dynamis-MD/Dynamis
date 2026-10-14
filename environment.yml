@@ -1,4 +1,4 @@
-name: DistNNP
+name: dynamis
 channels:
   - defaults
 dependencies:
@@ -64,8 +64,6 @@ dependencies:
       - custodian==2025.12.14
       - cycler==0.12.1
       - distlib==0.4.0
-      - distnnp-model==0.0.1
-      - distnnp-state==0.1.0
       - e3nn==0.5.9
       - emmet-core==0.86.3
       - fairchem-core==2.16.1.dev10+g0d7cb7ee6
@@ -236,4 +234,3 @@ dependencies:
       - wrapt==2.0.1
       - yarl==1.22.0
       - zipp==3.23.0
-prefix: /u/hqin1/ldata/miniconda3/envs/DistNNP

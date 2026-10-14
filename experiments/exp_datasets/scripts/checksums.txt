@@ -1,4 +1,4 @@
-# DistNNP experiment dataset checksums (SHA256)
+# Dynamis experiment dataset checksums (SHA256)
 # ---------------------------------------------------------------------------
 # Paths are relative to experiments/exp_datasets/.
 # Verify one tier (run from experiments/exp_datasets/):
@@ -57,7 +57,7 @@ a4304327f89adfc5e291d9d9483d416f10542e1488ac560d5118f17403feb8b0  baselines/ch4_
 # re-version of 3J3Q is upstream drift, not corruption (regenerate with
 # scripts/07_retrieve_hiv.py).
 # ===========================================================================
-d7d80a1771222d1ee9a64c0bb28f79cc2ec35090a67222f3b1ee339581378902  distnnp_exp_datasets_v1.tar.xz
+d7d80a1771222d1ee9a64c0bb28f79cc2ec35090a67222f3b1ee339581378902  dynamis_exp_datasets_v1.tar.xz
 b0ab0549e5ff83e1d38a8659f8b2d817cf55ddd3433938a8a971b55410910cea  protein_vacuum/1aki_vacuum_openmm.xyz
 1d354aea0f49c0535f5594ef8101951f2d0004b83248366746a7f323a2a1f9d0  protein_vacuum/2rik_vacuum_openmm.xyz
 36c4d74b06f83ad0ebd2312aeb33cf5b45a57f0d0d2024f3f400db89a36132e9  protein_vacuum/2w49_vacuum_openmm.xyz

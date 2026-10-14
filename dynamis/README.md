@@ -1,4 +1,4 @@
-# DistNNP
+# Dynamis
 
 
 ### `dynamis` (stub)

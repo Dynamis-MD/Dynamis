@@ -224,3 +224,8 @@ CMakeInit.txt
 .skbuild*
 skbuild
 build.ninja
+
+# Test and run outputs
+*.dynamis
+/results/
+dynamis/tests/fixtures/*.pt

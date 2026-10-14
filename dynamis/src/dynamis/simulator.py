@@ -149,6 +149,9 @@ class Simulator:
         run_uuid = uuid.uuid4()
         # shared by the timing registry and the trajectory writer (built in setup())
         self.run_uuid = run_uuid
+        # None until setup() builds it; a simulator driven through
+        # initialize_simulator_state() alone runs without trajectory output.
+        self.writer: Optional[TrajectoryWriter] = None
 
         # Drift watchdog: flags live in the process-wide registry so the model's
         # exchangers carry them without the model knowing (see drift_flags.py).
@@ -295,9 +298,10 @@ class Simulator:
         self.model.initialize_buffers(
             self.state.local_partition_info, device=device if device else self.device
         )
-        self.writer.update_atom_counts(
-            self.state.local_partition_info.atom_counts.to(torch.uint32)
-        )
+        if self.writer is not None:
+            self.writer.update_atom_counts(
+                self.state.local_partition_info.atom_counts.to(torch.uint32)
+            )
         self.integrator.reset()
         self._reset_drift_flags()  # state.sync_and_repartition() re-latched the reference
 
@@ -339,7 +343,7 @@ class Simulator:
         return self.model(dist_state, *args, **kwargs)
 
     def should_write_traj(self, step: int) -> bool:
-        if self.config.traj_interval == 0:
+        if self.writer is None or self.config.traj_interval == 0:
             return False
         if step % self.config.traj_interval == 0:
             return True
@@ -422,16 +426,17 @@ class Simulator:
         try:
             while total_done < self.config.total_steps:
                 Timer.set_step(total_done)
-                if self.should_rebalance(total_done):
+                # Read the drift word before a repartition resets it, so a breach
+                # on the last step is still recorded.
+                tripped = total_done > 0 and self.drift_watchdog_tripped()
+                rebalance = self.should_rebalance(total_done)
+                if rebalance:
                     self.timer.start("repartition", TimerClass.Other)
                     self.sync_and_repartition()
                     self.timer.stop()
                 # Where.Both: step() launches async CUDA work, so a host-only timer misses it.
                 self.timer.start("iteration", TimerClass.Total, Where.Both)
-                tripped = total_done > 0 and self.drift_watchdog_tripped()
-                if self.should_rebalance(total_done):
-                    self.sync_and_repartition()
-                elif tripped:
+                if tripped and not rebalance:
                     self.drift_rebuild_steps.append(total_done)
                     self.rebuild_halo()
                 energy = self.step(self.config.timestep_fs)
@@ -442,7 +447,8 @@ class Simulator:
                     )
                     self.writer.submit(total_done, self.state.local_state)
                 total_done += 1
-            self.writer.flush()
+            if self.writer is not None:
+                self.writer.flush()
         finally:
             # Runs even on exception/interrupt so timing data isn't lost.
             TimingRegistry.instance().close()

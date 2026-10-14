@@ -39,8 +39,9 @@ endif ()
 # ---------------------------------------------------------------------------
 # dynamis_state discovery
 # ---------------------------------------------------------------------------
-# Ask Python where dynamis_state is installed, so this works for a normal
-# install, an editable install, or an isolated build env alike.
+# Ask Python where dynamis_state is installed. Under pip/uv build isolation the
+# build interpreter cannot see it, so also look next to the torch install that
+# find_package(Torch) located — dynamis_state lives in the same site-packages.
 execute_process(
     COMMAND "${Python_EXECUTABLE}" -c
         "import importlib.util, os; s = importlib.util.find_spec('dynamis_state'); print(os.path.dirname(s.origin) if s and s.origin else '')"
@@ -54,6 +55,7 @@ find_path(DYNAMIS_STATE_INCLUDE_DIR
         "${DYNAMIS_STATE_PACKAGE_DIR}/include"
         "${Python_SITEARCH}/dynamis_state/include"
         "${Python_SITELIB}/dynamis_state/include"
+        "${TORCH_INSTALL_PREFIX}/../dynamis_state/include"
     NO_DEFAULT_PATH
 )
 if(NOT DYNAMIS_STATE_INCLUDE_DIR)
@@ -82,6 +84,7 @@ if(DYNAMIS_STATE_TIMING_ENABLED)
             "${DYNAMIS_STATE_PACKAGE_DIR}"
             "${Python_SITEARCH}/dynamis_state"
             "${Python_SITELIB}/dynamis_state"
+            "${TORCH_INSTALL_PREFIX}/../dynamis_state"
         NO_DEFAULT_PATH
     )
     if(NOT DYNAMIS_STATE_TIMING_LIBRARY)

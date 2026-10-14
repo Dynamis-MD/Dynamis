@@ -92,7 +92,6 @@ __all__ = [
     "DistGraphBuilder",
     "DistBuildGraphResult",
     "BuildMode",
-    "SimState",
     "Timer",
     "TimingRegistry",
     "TimerClass",

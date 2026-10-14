@@ -57,21 +57,21 @@ script, so it is distributed as a checksummed archive instead of regenerated.
 
 ## Hosting the Tier 3 archive (shared cache + GitHub Release)
 
-`download_datasets.sh` fetches `distnnp_exp_datasets_v1.tar.xz` (~23 MB, now
+`download_datasets.sh` fetches `dynamis_exp_datasets_v1.tar.xz` (~23 MB, now
 includes the HIV capsid) and verifies it against `checksums.txt`. Sources are
 tried in order, and the **first that passes the checksum wins**:
 
-1. `DISTNNP_ARCHIVE_LOCAL` — an explicit local copy (never downloaded/deleted).
-2. **Shared cache** — `DISTNNP_ARCHIVE_SHARED_DIR/<archive>`
-   (default `/projects/bcpt/public/distnnp_datasets/`). On Delta the archive
+1. `DYNAMIS_ARCHIVE_LOCAL` — an explicit local copy (never downloaded/deleted).
+2. **Shared cache** — `DYNAMIS_ARCHIVE_SHARED_DIR/<archive>`
+   (default `/projects/bcpt/public/dynamis_datasets/`). On Delta the archive
    lives here so the download happens **once for the whole team**; a fresh
    download is cached back automatically. Only a miss (or a stale copy) hits the
    network. Seed it manually with:
    ```bash
-   mkdir -p /projects/bcpt/public/distnnp_datasets
-   cp distnnp_exp_datasets_v1.tar.xz /projects/bcpt/public/distnnp_datasets/
+   mkdir -p /projects/bcpt/public/dynamis_datasets
+   cp dynamis_exp_datasets_v1.tar.xz /projects/bcpt/public/dynamis_datasets/
    ```
-3. `gh release download` — authenticated (required while `szaman19/DistNNP` is
+3. `gh release download` — authenticated (required while `Dynamis-MD/Dynamis` is
    **private**: release assets inherit repo visibility, so an unauthenticated
    wget 404s).
 4. `wget` from the Release URL — works only once the asset is public.
@@ -81,19 +81,19 @@ repo and has a stable URL, but is **not** committed to git history (so
 `git clone` stays lean). Create it once:
 
 ```bash
-gh release create datasets-v1 distnnp_exp_datasets_v1.tar.xz \
-    --title "DistNNP experiment datasets v1" \
+gh release create datasets-v1 dynamis_exp_datasets_v1.tar.xz \
+    --title "Dynamis experiment datasets v1" \
     --notes "pdbfixer/OpenMM protein/membrane + HIV capsid XYZ (Tier 3). SHA256 in checksums.txt."
 ```
 
 Override any source:
 
 ```bash
-export DISTNNP_ARCHIVE_REPO="owner/repo"       # different fork
-export DISTNNP_ARCHIVE_TAG="datasets-v2"       # different release tag
-export DISTNNP_ARCHIVE_URL="https://.../distnnp_exp_datasets_v1.tar.xz"  # full URL
-export DISTNNP_ARCHIVE_LOCAL="/path/to/distnnp_exp_datasets_v1.tar.xz"   # local copy, no download
-export DISTNNP_ARCHIVE_SHARED_DIR="/path/to/shared"   # shared cache ("" disables)
+export DYNAMIS_ARCHIVE_REPO="owner/repo"       # different fork
+export DYNAMIS_ARCHIVE_TAG="datasets-v2"       # different release tag
+export DYNAMIS_ARCHIVE_URL="https://.../dynamis_exp_datasets_v1.tar.xz"  # full URL
+export DYNAMIS_ARCHIVE_LOCAL="/path/to/dynamis_exp_datasets_v1.tar.xz"   # local copy, no download
+export DYNAMIS_ARCHIVE_SHARED_DIR="/path/to/shared"   # shared cache ("" disables)
 ```
 
 (A DOI-citable copy on Zenodo/HF is optional and only needed for paper
@@ -104,8 +104,8 @@ Rebuild the archive (if the Tier 3 inputs change) with:
 ```bash
 tar -C ../ -cf - protein_vacuum membrane/apoa1_92k_openmm.xyz \
     protein_solvated/dhfr_23k_openmm.xyz capsid \
-    | xz -9 -T0 > distnnp_exp_datasets_v1.tar.xz
-sha256sum distnnp_exp_datasets_v1.tar.xz    # update checksums.txt (+ refresh the shared cache)
+    | xz -9 -T0 > dynamis_exp_datasets_v1.tar.xz
+sha256sum dynamis_exp_datasets_v1.tar.xz    # update checksums.txt (+ refresh the shared cache)
 ```
 
 ## Dependencies

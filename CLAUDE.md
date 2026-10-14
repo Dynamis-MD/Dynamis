@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**DistNNP** is a distributed neural network potential (NNP) framework for large-scale molecular dynamics (MD) simulations on multi-GPU systems. It computes forces and energies via ML potentials, partitions atoms across GPUs, communicates boundary atoms via halo exchange over NCCL, and integrates equations of motion using CUDA kernels.
+**Dynamis** is a distributed neural network potential (NNP) framework for large-scale molecular dynamics (MD) simulations on multi-GPU systems. It computes forces and energies via ML potentials, partitions atoms across GPUs, communicates boundary atoms via halo exchange over NCCL, and integrates equations of motion using CUDA kernels.
 
 This repository is a monorepo of four installable sub-packages, built from a working reference implementation (`baseline/`, not tracked in this repo).
 
@@ -64,11 +64,11 @@ Key types (in `include/dynamis_state/dynamis_state.hpp`):
 - `MolecularInfo` — positions, velocities, atom indices for a partition
 - `DistEnvironment` — rank, world size, GPU topology
 - `PartitionMessagePassingInfo` — partition indices + halo map + send/recv matrix
-- `DistNNPState` — aggregates the above
+- `DynamisState` — aggregates the above
 
 Partitioner interface (`include/dynamis_state/partitioner.hpp`): `AbstractPartitioner` with concrete subclasses `SimpleSpatialPartitioner`, `KDTreePartitioner`, `SFCPartitioner`.
 
-Python classes are re-exported at the top level: `from dynamis_state import MolecularInfo, DistNNPState, ...`
+Python classes are re-exported at the top level: `from dynamis_state import MolecularInfo, DynamisState, ...`
 
 Stubs are generated via `scripts/stub_gen.sh` (runs `pybind11-stubgen`).
 
@@ -77,11 +77,11 @@ C++/CUDA extension. Advances positions and velocities by one timestep.
 
 Interface (`include/dynamis_integrator/integrator.hpp`):
 ```
-AbstractDistNNPIntegrator.step(positions, velocities, forces, masses, dt)
+AbstractDynamisIntegrator.step(positions, velocities, forces, masses, dt)
 ```
 Currently implemented: `EulerIntegrator` (CUDA kernel in `src/csrc/euler_integrator.cu`).
 
-To add a new integrator: subclass `AbstractDistNNPIntegrator` in the header → implement `.cu` kernel → add source to `python_add_library` in `CMakeLists.txt` → bind in `src/dynamis_integrator_bindings.cpp` → re-export from `__init__.py`. See `dynamis_integrator/README.md` for the full walkthrough.
+To add a new integrator: subclass `AbstractDynamisIntegrator` in the header → implement `.cu` kernel → add source to `python_add_library` in `CMakeLists.txt` → bind in `src/dynamis_integrator_bindings.cpp` → re-export from `__init__.py`. See `dynamis_integrator/README.md` for the full walkthrough.
 
 Tests live in `dynamis_integrator/tests/test_euler.py`.
 
@@ -90,10 +90,10 @@ Pure Python (C++ extension stub present but empty). Defines the model interface.
 
 `DynamisModel` ABC (`src/dynamis_model/potential.py`):
 ```python
-__call__(distributed_state: DistNNPState) -> Tuple[energy, forces]
+__call__(distributed_state: DynamisState) -> Tuple[energy, forces]
 ```
 
-Design: each GPU (1) fetches halo atoms from neighbours according to `DistNNPState`, (2) evaluates the NNP locally to get a scalar energy, (3) calls `energy.backward()` to obtain forces via autograd (`F = -dE/dx`). For GNN-based NNPs, halo atoms must be re-fetched once per message-passing layer since updated embeddings on one partition are inputs to the next layer on a neighbouring partition.
+Design: each GPU (1) fetches halo atoms from neighbours according to `DynamisState`, (2) evaluates the NNP locally to get a scalar energy, (3) calls `energy.backward()` to obtain forces via autograd (`F = -dE/dx`). For GNN-based NNPs, halo atoms must be re-fetched once per message-passing layer since updated embeddings on one partition are inputs to the next layer on a neighbouring partition.
 
 ### `dynamis` (stub)
 Empty entry point. Will orchestrate the other sub-packages.

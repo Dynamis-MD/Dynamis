@@ -1,6 +1,6 @@
 # dynamis_integrator
 
-`dynamis_integrator` provides time integration algorithms for the DistNNP molecular dynamics framework. Each integrator advances atomic positions and velocities by one timestep given the forces computed by `distnnp_forces`. Integrators are written as CUDA kernels for GPU execution and exposed to Python via pybind11.
+`dynamis_integrator` provides time integration algorithms for the Dynamis molecular dynamics framework. Each integrator advances atomic positions and velocities by one timestep given the forces computed by `dynamis_model`. Integrators are written as CUDA kernels for GPU execution and exposed to Python via pybind11.
 
 Currently implemented: **`EulerIntegrator`** — a first-order explicit integrator that updates velocities and positions according to:
 
@@ -72,7 +72,7 @@ python -m build --wheel
 
 | Path | Role |
 |---|---|
-| `include/dynamis_integrator/integrator.hpp` | `AbstractDistNNPIntegrator` ABC and all concrete integrator declarations |
+| `include/dynamis_integrator/integrator.hpp` | `AbstractDynamisIntegrator` ABC and all concrete integrator declarations |
 | `include/dynamis_integrator/macros.hpp` | CUDA error-checking macros (`CUDACHECK`, `CHECK_INPUT`, …) |
 | `src/csrc/<name>.cu` | CUDA kernel implementation for each integrator |
 | `src/dynamis_integrator_bindings.cpp` | pybind11 bindings (`PYBIND11_MODULE`) |
@@ -82,17 +82,17 @@ python -m build --wheel
 
 ## Contributing: Adding a New Integrator
 
-All integrators inherit from `AbstractDistNNPIntegrator` and override a single `step()` method. The steps below walk through adding a new one end-to-end.
+All integrators inherit from `AbstractDynamisIntegrator` and override a single `step()` method. The steps below walk through adding a new one end-to-end.
 
 ### Step 1 — Declare in `integrator.hpp`
 
-Subclass `AbstractDistNNPIntegrator` and declare `step()`:
+Subclass `AbstractDynamisIntegrator` and declare `step()`:
 
 ```cpp
 // include/dynamis_integrator/integrator.hpp
 namespace dynamis_integrator {
 
-  class VelocityVerletIntegrator : public AbstractDistNNPIntegrator
+  class VelocityVerletIntegrator : public AbstractDynamisIntegrator
   {
   public:
     void step(torch::Tensor &positions,
