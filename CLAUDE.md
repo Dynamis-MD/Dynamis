@@ -13,10 +13,11 @@ This repository is a monorepo of four installable sub-packages, built from a wor
 From the repository root:
 
 ```bash
-pip install -r requirements-dev.txt
+uv pip install torch pytest scipy scikit-build-core pybind11
+uv pip install --no-build-isolation -e ./dynamis_state -e ./dynamis_integrator -e ./dynamis_model -e ./dynamis
 ```
 
-This installs PyTorch, pytest, and all sub-packages in editable mode. Each sub-package must be individually reinstalled after C++ or CUDA changes:
+See `README.md` for details (plain pip works too). Each sub-package must be individually reinstalled after C++ or CUDA changes:
 
 ```bash
 pip install -e ./dynamis_state
@@ -51,7 +52,6 @@ Dynamis/                        # repository root
 ├── experiments/                # paper experiments and dataset generation
 ├── post_processing/            # trajectory rendering, timing summaries
 ├── refs/                       # git submodules: nvalchemi, batmobile
-├── requirements-dev.txt        # installs all sub-packages in editable mode
 └── pytest.ini
 ```
 
