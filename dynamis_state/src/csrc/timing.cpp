@@ -1,6 +1,6 @@
 #include "dynamis_state/timing.hpp"
 
-#ifdef DISTNNP_TIMING
+#ifdef DYNAMIS_TIMING
 
 #include <c10/cuda/CUDAStream.h>
 
@@ -914,4 +914,4 @@ void Timer::stop()
 
 } // namespace dynamis_state
 
-#endif // DISTNNP_TIMING
+#endif // DYNAMIS_TIMING

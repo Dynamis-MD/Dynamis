@@ -5,7 +5,7 @@ MolecularInfo = dynamis_state_impl.MolecularInfo
 DistEnvironment = dynamis_state_impl.DistEnvironment
 SimulationConfig = dynamis_state_impl.SimulationConfig
 PartitionMessagePassingInfo = dynamis_state_impl.PartitionMessagePassingInfo
-DistNNPState = dynamis_state_impl.DistNNPState
+DynamisState = dynamis_state_impl.DynamisState
 
 # C++ partitioners (partition + build_halo_maps are both methods)
 SimpleSpatialPartitioner = dynamis_state_impl.SimpleSpatialPartitioner
@@ -79,7 +79,7 @@ __all__ = [
     "DistEnvironment",
     "SimulationConfig",
     "PartitionMessagePassingInfo",
-    "DistNNPState",
+    "DynamisState",
     "SimpleSpatialPartitioner",
     "KDTreePartitioner",
     "SFCPartitioner",

@@ -15,7 +15,7 @@ ABSTRACT_PARTITIONERS = Union[
 
 class TorchDistEnv:
     """Helper class to initialize distributed environment and set device.
-    This is used by SimState but can also be used by users directly if they want to create their own DistNNPState outside of SimState.
+    This is used by SimState but can also be used by users directly if they want to create their own DynamisState outside of SimState.
     """
 
     def __init__(self, is_distributed: bool = True, **kwargs) -> None:

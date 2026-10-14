@@ -6,13 +6,13 @@ from dynamis_integrator._data_check import (
     check_mass_shape,
     check_shapes_match,
 )
-from dynamis_integrator.integrator import DistNNPIntegrator
-from dynamis_state import DistNNPState
+from dynamis_integrator.integrator import DynamisIntegrator
+from dynamis_state import DynamisState
 from dynamis_model import DynamisModel
 from dynamis_integrator.masses import TORCH_MASSES
 
 
-class Langevin(DistNNPIntegrator):
+class Langevin(DynamisIntegrator):
     def __init__(self, dt: float, gamma: float, kT: float) -> None:
         super().__init__()
         self.dt = dt
@@ -79,12 +79,12 @@ class Langevin(DistNNPIntegrator):
         check_shapes_match(vel, frc, noise)
         self.cpp_integrator.halfstep2(vel, frc, mass, noise, self.gamma, self.kT, dt)
 
-    def step(self, dist_state: DistNNPState, model: DynamisModel, dt=None):
+    def step(self, dist_state: DynamisState, model: DynamisModel, dt=None):
         """
         Update positions and velocities based on the Langevin integration method (BBK scheme).
 
         Args:
-            state (DistNNPState): The current state of the system, containing positions, velocities, forces, and masses.
+            state (DynamisState): The current state of the system, containing positions, velocities, forces, and masses.
             model (DynamisModel): The potential model used to compute forces based on the current state.
             dt (float, optional): Optional override for the time step size.
         """

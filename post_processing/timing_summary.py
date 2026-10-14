@@ -1,4 +1,4 @@
-"""Summarize DistNNP timing_rank*.jsonl files.
+"""Summarize Dynamis timing_rank*.jsonl files.
 
 Reads the per-rank JSONL files written by dynamis_state's TimingRegistry
 (see dynamis_state/include/dynamis_state/timing.hpp) and prints:

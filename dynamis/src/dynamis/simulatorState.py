@@ -1,5 +1,5 @@
 from dynamis_state import (
-    DistNNPState,
+    DynamisState,
     DistEnvironment,
     SimulationConfig,
     PartitionMessagePassingInfo,
@@ -52,7 +52,7 @@ class SimState:
 
         self.global_molecular_info = molecular_system
 
-        self._state = DistNNPState()
+        self._state = DynamisState()
         self._state.dist_env = self.dist_env_obj
         self._state.sim_config = simulation_config
         self._state.global_molecular_info = molecular_system

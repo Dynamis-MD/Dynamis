@@ -16,7 +16,7 @@ _py() { python "$SCRIPT_DIR/$@"; }
 _sh() { bash "$SCRIPT_DIR/$@"; }
 
 echo "======================================================"
-echo "  DistNNP exp_datasets full rebuild"
+echo "  Dynamis exp_datasets full rebuild"
 echo "  Scripts: $SCRIPT_DIR"
 echo "======================================================"
 echo ""

@@ -6,13 +6,13 @@ from dynamis_integrator._data_check import (
     check_mass_shape,
     check_shapes_match,
 )
-from dynamis_integrator.integrator import DistNNPIntegrator
-from dynamis_state import DistNNPState
+from dynamis_integrator.integrator import DynamisIntegrator
+from dynamis_state import DynamisState
 from dynamis_model import DynamisModel
 from dynamis_integrator.masses import TORCH_MASSES
 
 
-class Euler(DistNNPIntegrator):
+class Euler(DynamisIntegrator):
     def __init__(self, dt: float) -> None:
         super().__init__()
         self.dt = dt
@@ -47,12 +47,12 @@ class Euler(DistNNPIntegrator):
     def reset(self) -> None:
         pass
 
-    def step(self, state: DistNNPState, model: DynamisModel, dt=None):
+    def step(self, state: DynamisState, model: DynamisModel, dt=None):
         """
         Update positions and velocities based on the Euler integration method.
 
         Args:
-            state (DistNNPState): The current state of the system, containing positions, velocities, forces, and masses.
+            state (DynamisState): The current state of the system, containing positions, velocities, forces, and masses.
             model (DynamisModel): The potential model used to compute forces based on the current state.
         """
         molecular_info = state.local_molecular_info

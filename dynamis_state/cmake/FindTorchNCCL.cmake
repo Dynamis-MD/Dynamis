@@ -10,7 +10,7 @@ string(JSON _nccl_static           GET "${_nccl_json}" static)
 if(_nccl_static)
   message(FATAL_ERROR
     "This PyTorch install has NCCL linked statically (no libnccl.so found).\n"
-    "DistNNP only supports PyTorch's bundled *shared* NCCL. Install a pip "
+    "Dynamis only supports PyTorch's bundled *shared* NCCL. Install a pip "
     "wheel of torch (which depends on nvidia-nccl-cu12) and rebuild.")
 endif()
 

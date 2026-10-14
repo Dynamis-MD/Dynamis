@@ -1,6 +1,6 @@
 import functools
 from abc import ABC, abstractmethod
-from dynamis_state import DistNNPState, Timer, TimerClass, Where
+from dynamis_state import DynamisState, Timer, TimerClass, Where
 import torch
 from typing import Tuple
 
@@ -21,11 +21,11 @@ def _timed_integrator_step(fn):
         finally:
             timer.stop()
 
-    wrapper._distnnp_timed = True
+    wrapper._dynamis_timed = True
     return wrapper
 
 
-class DistNNPIntegrator(ABC):
+class DynamisIntegrator(ABC):
     def __init__(self) -> None:
         self._timer = Timer()
 
@@ -33,26 +33,26 @@ class DistNNPIntegrator(ABC):
         super().__init_subclass__(**kwargs)
         # Wraps step() here so new integrators are timed by construction, not convention.
         step = cls.__dict__.get("step")
-        if step is None or getattr(step, "_distnnp_timed", False):
+        if step is None or getattr(step, "_dynamis_timed", False):
             return
         cls.step = _timed_integrator_step(step)
 
     @abstractmethod
     def step(
-        self, state: DistNNPState, *args, **kwargs
+        self, state: DynamisState, *args, **kwargs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Update positions and velocities based on the specific integration method.
 
         This method should be implemented by subclasses to perform the actual integration step.
 
-        Subclasses do not need to add timing: DistNNPIntegrator.__init_subclass__ wraps
+        Subclasses do not need to add timing: DynamisIntegrator.__init_subclass__ wraps
         this method so every call emits an `integrator_step` record.
         """
         raise NotImplementedError("Subclasses must implement the step method.")
 
     def _compute_force(
-        self, dist_state: DistNNPState, model
+        self, dist_state: DynamisState, model
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Evaluate the potential model on the current state and return energy and forces.
@@ -62,7 +62,7 @@ class DistNNPIntegrator(ABC):
         measured too.
 
         Args:
-            dist_state (DistNNPState): The current state of the system.
+            dist_state (DynamisState): The current state of the system.
             model (DynamisModel): The potential model used to compute forces.
         """
         return model(dist_state)

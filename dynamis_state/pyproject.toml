@@ -5,7 +5,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "dynamis_state"
 version = "0.1.0"
-description = "C++ extension for distnnp state management"
+description = "C++ extension for dynamis state management"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["torch"]

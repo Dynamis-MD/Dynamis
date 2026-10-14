@@ -61,16 +61,16 @@ PYBIND11_MODULE(dynamis_state_impl, m)
                            &dynamis_state::PartitionMessagePassingInfo::edge_index_halo)
             .def_readwrite("atom_counts", &dynamis_state::PartitionMessagePassingInfo::atom_counts);
 
-    py::class_<dynamis_state::DistNNPState>(m, "DistNNPState")
+    py::class_<dynamis_state::DynamisState>(m, "DynamisState")
             .def(py::init<>())
-            .def_readwrite("dist_env", &dynamis_state::DistNNPState::dist_env)
-            .def_readwrite("sim_config", &dynamis_state::DistNNPState::sim_config)
+            .def_readwrite("dist_env", &dynamis_state::DynamisState::dist_env)
+            .def_readwrite("sim_config", &dynamis_state::DynamisState::sim_config)
             .def_readwrite("global_molecular_info",
-                           &dynamis_state::DistNNPState::global_molecular_info)
+                           &dynamis_state::DynamisState::global_molecular_info)
             .def_readwrite("local_molecular_info",
-                           &dynamis_state::DistNNPState::local_molecular_info)
+                           &dynamis_state::DynamisState::local_molecular_info)
             .def_readwrite("local_partition_info",
-                           &dynamis_state::DistNNPState::local_partition_info);
+                           &dynamis_state::DynamisState::local_partition_info);
 
     py::class_<dynamis_state::KDTreePartitioner>(m, "KDTreePartitioner")
             .def(py::init<>())
@@ -173,7 +173,7 @@ PYBIND11_MODULE(dynamis_state_impl, m)
             // The denominator the others are a fraction of, not a partition member.
             .value("Total", dynamis_state::TimerClass::Total);
 
-#ifdef DISTNNP_TIMING
+#ifdef DYNAMIS_TIMING
     m.attr("TIMING_ENABLED") = true;
 #else
     m.attr("TIMING_ENABLED") = false;

@@ -60,7 +60,7 @@ struct PartitionMessagePassingInfo {
                                // for trajectory writing
 };
 
-struct DistNNPState {
+struct DynamisState {
     // Distributed environment information
     DistEnvironment dist_env;
 
