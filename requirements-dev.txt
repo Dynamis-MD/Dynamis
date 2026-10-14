@@ -1,0 +1,10 @@
+# Install external dependencies
+torch>=2.0.0
+pytest
+scipy
+
+# Install local components in editable mode
+-e ./dynamis_state
+-e ./dynamis_model[all]
+-e ./dynamis_integrator
+-e ./dynamis
