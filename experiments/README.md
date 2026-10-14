@@ -1,4 +1,4 @@
-# DistNNP Performance Experiments
+# Dynamis Performance Experiments
 
 ## Directory Structure
 

@@ -1,6 +1,6 @@
 # dynamis_state Design Document
 
-`dynamis_state` is the foundational sub-package of DistNNP. It defines the data structures shared across all other sub-packages, the algorithms for partitioning atoms across GPUs, and the infrastructure for building the halo communication maps that enable boundary atom exchange. All types are defined in `include/dynamis_state/` and exposed to Python via pybind11.
+`dynamis_state` is the foundational sub-package of Dynamis. It defines the data structures shared across all other sub-packages, the algorithms for partitioning atoms across GPUs, and the infrastructure for building the halo communication maps that enable boundary atom exchange. All types are defined in `include/dynamis_state/` and exposed to Python via pybind11.
 
 ---
 
@@ -81,12 +81,12 @@ The primary output of the partitioner pipeline. Each rank holds one of these, po
 
 **`global_send_recv_matrix` semantics:** After `build_halo_maps()`, `row[rank]` of this matrix is updated with the number of halo atoms sent to each neighbour. The diagonal entry `[rank, rank]` is set to `num_local` (not a halo count). The full matrix view requires an all-reduce across ranks (not performed here; left to the caller).
 
-### `DistNNPState`
+### `DynamisState`
 
 Top-level aggregate passed into `dynamis_model` and `dynamis_integrator` at every timestep.
 
 ```cpp
-struct DistNNPState {
+struct DynamisState {
     DistEnvironment              dist_env;               // MPI/NCCL layout
     MolecularInfo                global_molecular_info;  // full system (all atoms)
     PartitionMessagePassingInfo  local_partition_info;   // this rank's view
@@ -138,7 +138,7 @@ info = partitioner.partition(global_mol_info, dist_env, sim_config)  # auto-weig
 partitioner.build_halo_maps(info, global_mol_info, dist_env, sim_config)
 
 # Assemble top-level state
-state = DistNNPState()
+state = DynamisState()
 state.dist_env = dist_env
 state.global_molecular_info = global_mol_info
 state.local_partition_info = info
@@ -187,7 +187,7 @@ SFCPartitioner(SFCCurveType ct = SFCCurveType::Morton);
 
 On CUDA, key computation and sort are done by `sfc_partition_cuda()`. CPU fallbacks are implemented directly in `sfc_partitioner.cpp` using ATen bit-manipulation ops.
 
-**SFC vs KDTree tradeoff:** SFC is faster (one GPU sort vs recursive bisection) and tends to produce rounder partition shapes. KDTree adapts better to highly anisotropic distributions (e.g., a slab geometry). In practice on the DistNNP benchmark systems, both produce similar edge imbalance when auto-weighted.
+**SFC vs KDTree tradeoff:** SFC is faster (one GPU sort vs recursive bisection) and tends to produce rounder partition shapes. KDTree adapts better to highly anisotropic distributions (e.g., a slab geometry). In practice on the Dynamis benchmark systems, both produce similar edge imbalance when auto-weighted.
 
 ### `build_halo_maps()` — algorithm
 
@@ -312,5 +312,5 @@ SimulationConfig
    └── global_send_recv_matrix (row[rank] filled)
          │
          ▼
- DistNNPState (passed to dynamis_model and dynamis_integrator)
+ DynamisState (passed to dynamis_model and dynamis_integrator)
 ```

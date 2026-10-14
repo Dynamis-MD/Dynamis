@@ -16,12 +16,19 @@ from dynamis_state import (
 )
 from dynamis_state.masses import TORCH_ATOMIC_MASSES
 
+# Fixture files live next to this module; resolve them here so the tests pass
+# from any working directory (repo root or dynamis_state/).
+_TESTS_DIR = pathlib.Path(__file__).resolve().parent
+XYZ_FILE = str(_TESTS_DIR / "xyz.xyz")
+EXTENDED_XYZ_FILE = str(_TESTS_DIR / "extended_xyz.xyz")
+MULTI_FRAME_XYZ_FILE = str(_TESTS_DIR / "multi_frame.xyz")
+
 # ─── TrajectoryReader.read() ───────────────────────────────────────────────
 
 
 def test_xyz_extended_io():
     """Extended xyz test"""
-    env, cell, pbc = TrajectoryReader.read("tests/extended_xyz.xyz")
+    env, cell, pbc = TrajectoryReader.read(EXTENDED_XYZ_FILE)
     values = torch.arange(0, 9, 1)
 
     positions = torch.concat((values, values), dim=0)
@@ -89,7 +96,7 @@ def test_xyz_momenta_column_divided_by_mass(tmp_path):
 
 def test_xyz_io():
     """Regular xyz test"""
-    env, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
+    env, cell, pbc = TrajectoryReader.read(XYZ_FILE)
     values = torch.arange(0, 9, 1)
 
     positions = torch.concat((values, values), dim=0)
@@ -120,43 +127,43 @@ def _multi_frame_positions(step):
 
 def test_xyz_multi_frame_explicit_indices():
     for step in (0, 1, 2):
-        env, cell, pbc = TrajectoryReader.read("tests/multi_frame.xyz", step)
+        env, cell, pbc = TrajectoryReader.read(MULTI_FRAME_XYZ_FILE, step)
         assert torch.equal(_MULTI_FRAME_TYPES, env.atom_types)
         assert torch.equal(_multi_frame_positions(step), env.atom_positions)
 
-    env0, cell0, pbc0 = TrajectoryReader.read("tests/multi_frame.xyz", 0)
+    env0, cell0, pbc0 = TrajectoryReader.read(MULTI_FRAME_XYZ_FILE, 0)
     assert torch.equal(torch.zeros([3, 3]), env0.atom_velocities)
     assert torch.equal(torch.zeros(3, 3), cell0)
     assert torch.equal(torch.zeros(3, dtype=torch.uint8), pbc0)
 
-    env1, cell1, pbc1 = TrajectoryReader.read("tests/multi_frame.xyz", 1)
+    env1, cell1, pbc1 = TrajectoryReader.read(MULTI_FRAME_XYZ_FILE, 1)
     assert torch.equal(torch.ones([3, 3]), env1.atom_velocities)
     assert torch.equal(torch.eye(3) * 10.0, cell1)
     assert torch.equal(torch.ones(3, dtype=torch.uint8), pbc1)
 
-    env2, cell2, pbc2 = TrajectoryReader.read("tests/multi_frame.xyz", 2)
+    env2, cell2, pbc2 = TrajectoryReader.read(MULTI_FRAME_XYZ_FILE, 2)
     assert torch.equal(torch.zeros([3, 3]), env2.atom_velocities)
     assert torch.equal(torch.eye(3) * 20.0, cell2)
     assert torch.equal(torch.tensor([0, 0, 1], dtype=torch.uint8), pbc2)
 
 
 def test_xyz_multi_frame_default_is_last():
-    env, cell, pbc = TrajectoryReader.read("tests/multi_frame.xyz")
+    env, cell, pbc = TrajectoryReader.read(MULTI_FRAME_XYZ_FILE)
     assert torch.equal(_multi_frame_positions(2), env.atom_positions)
     assert torch.equal(torch.eye(3) * 20.0, cell)
 
 
 def test_xyz_multi_frame_negative_index():
-    env, cell, pbc = TrajectoryReader.read("tests/multi_frame.xyz", -2)
+    env, cell, pbc = TrajectoryReader.read(MULTI_FRAME_XYZ_FILE, -2)
     assert torch.equal(_multi_frame_positions(1), env.atom_positions)
     assert torch.equal(torch.eye(3) * 10.0, cell)
 
 
 def test_xyz_frame_index_out_of_range_raises():
     with pytest.raises(RuntimeError):
-        TrajectoryReader.read("tests/multi_frame.xyz", 3)
+        TrajectoryReader.read(MULTI_FRAME_XYZ_FILE, 3)
     with pytest.raises(RuntimeError):
-        TrajectoryReader.read("tests/multi_frame.xyz", -4)
+        TrajectoryReader.read(MULTI_FRAME_XYZ_FILE, -4)
 
 
 def test_xyz_natoms_mismatch_raises(tmp_path):
@@ -254,7 +261,7 @@ def test_reader_missing_file_raises():
 
 def test_reader_reads_xyz_directly():
     """read() should transparently handle a .xyz source, not just .dynamis."""
-    result, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
+    result, cell, pbc = TrajectoryReader.read(XYZ_FILE)
 
     assert result.num_atoms == 6
     assert torch.equal(
@@ -263,7 +270,7 @@ def test_reader_reads_xyz_directly():
 
 
 def test_reader_accepts_pathlike():
-    result, cell, pbc = TrajectoryReader.read(pathlib.Path("tests/xyz.xyz"))
+    result, cell, pbc = TrajectoryReader.read(pathlib.Path(XYZ_FILE))
     assert result.num_atoms == 6
 
 
@@ -271,7 +278,7 @@ def test_reader_accepts_pathlike():
 
 
 def test_write_front_matter():
-    source, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
+    source, cell, pbc = TrajectoryReader.read(XYZ_FILE)
     TrajectoryWriter(
         0, b"1234", "author", "./", "trajectory.dynamis", source, cell, pbc, 1.0, 1
     ).flush()
@@ -325,8 +332,8 @@ def test_write_front_matter():
 
 def test_write_frame():
     """Testing 2 objects writing to the same file"""
-    env1, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
-    env2, _, _ = TrajectoryReader.read("tests/xyz.xyz")
+    env1, cell, pbc = TrajectoryReader.read(XYZ_FILE)
+    env2, _, _ = TrajectoryReader.read(XYZ_FILE)
 
     base_writer = TrajectoryWriter(
         0, b"1234", "author", "./", "trajectory.dynamis", env1, cell, pbc, 1.0, 1
@@ -414,7 +421,7 @@ def test_write_frame():
 def test_submit_cell_pbc_roundtrip_and_carry_forward():
     """cell/pbc passed to submit() are persisted per-frame and carried
     forward (without re-passing) on subsequent submit() calls."""
-    env, source_cell, source_pbc = TrajectoryReader.read("tests/xyz.xyz")
+    env, source_cell, source_pbc = TrajectoryReader.read(XYZ_FILE)
     with TrajectoryWriter(
         0,
         b"1234",
@@ -456,7 +463,7 @@ def test_submit_cell_pbc_roundtrip_and_carry_forward():
 
 def test_submit_distinct_cells_per_frame():
     """Two frames written with different cells must not collide."""
-    env, source_cell, source_pbc = TrajectoryReader.read("tests/xyz.xyz")
+    env, source_cell, source_pbc = TrajectoryReader.read(XYZ_FILE)
     with TrajectoryWriter(
         0,
         b"1234",
@@ -504,7 +511,7 @@ def test_opts_reduced_fields_round_trip():
     values = torch.arange(0, 9, 1).to(torch.float32)
     positions = torch.concat((values, values), dim=0).reshape([6, 3]).to(torch.float32)
 
-    env, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
+    env, cell, pbc = TrajectoryReader.read(XYZ_FILE)
     with TrajectoryWriter(
         0,
         b"1234",
@@ -543,7 +550,7 @@ def test_opts_reduced_fields_round_trip():
 def test_opts_missing_indices_assumes_sequential_order():
     """Writing without "indices" should read back as sequential [0, num_atoms)."""
 
-    env, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
+    env, cell, pbc = TrajectoryReader.read(XYZ_FILE)
     with TrajectoryWriter(
         0,
         b"1234",
@@ -567,7 +574,7 @@ def test_opts_missing_indices_assumes_sequential_order():
 
 def test_opts_positions_required_on_write():
     """opts that exclude "positions" should be rejected."""
-    env, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
+    env, cell, pbc = TrajectoryReader.read(XYZ_FILE)
     with pytest.raises(RuntimeError):
         TrajectoryWriter(
             0,
@@ -585,7 +592,7 @@ def test_opts_positions_required_on_write():
 
 
 def test_opts_unknown_option_rejected():
-    env, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
+    env, cell, pbc = TrajectoryReader.read(XYZ_FILE)
     with pytest.raises(RuntimeError):
         TrajectoryWriter(
             0,
@@ -605,7 +612,7 @@ def test_opts_unknown_option_rejected():
 def test_writer_reader_round_trip():
     """Writing then reading a MolecularInfo through a .dynamis file should
     round-trip all fields intact."""
-    source, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
+    source, cell, pbc = TrajectoryReader.read(XYZ_FILE)
 
     with TrajectoryWriter(
         0, b"1234", "author", "./", "io_round_trip.dynamis", source, cell, pbc, 1.0, 1
@@ -625,7 +632,7 @@ def test_writer_reader_round_trip():
 def test_writer_reader_round_trip_with_opts():
     """opts=["positions"] should drop indices/velocities from the write; reader
     should synthesize sequential indices and zero-filled velocities."""
-    source, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
+    source, cell, pbc = TrajectoryReader.read(XYZ_FILE)
 
     with TrajectoryWriter(
         0,
@@ -654,7 +661,7 @@ def test_writer_reader_round_trip_with_opts():
 
 def test_writer_accepts_pathlike():
     """Both output_dir and output_file should accept pathlib.Path."""
-    source, cell, pbc = TrajectoryReader.read("tests/xyz.xyz")
+    source, cell, pbc = TrajectoryReader.read(XYZ_FILE)
 
     out_dir = pathlib.Path(".")
     out_file = pathlib.Path("io_pathlike.dynamis")
@@ -744,7 +751,7 @@ def _run_distributed_write(
                 rank,
                 output_dir,
                 filename,
-                "tests/xyz.xyz",
+                XYZ_FILE,
                 atom_counts,
                 opts or [],
                 num_frames,
@@ -922,7 +929,7 @@ def test_distributed_multi_rank_write_read_round_trip_reduced_opts():
 
 
 def _write_multiframe_dynamis(path, num_frames=3, opts=None):
-    source, _, _ = TrajectoryReader.read("tests/xyz.xyz")
+    source, _, _ = TrajectoryReader.read(XYZ_FILE)
     cell = torch.eye(3) * 12.0
     pbc = torch.tensor([True, False, True])
 

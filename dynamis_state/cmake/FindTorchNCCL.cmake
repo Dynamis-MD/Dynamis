@@ -1,5 +1,6 @@
 execute_process(
   COMMAND ${Python_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/torch_nccl_paths.py"
+          "${TORCH_INSTALL_PREFIX}"
   OUTPUT_VARIABLE _nccl_json OUTPUT_STRIP_TRAILING_WHITESPACE
   COMMAND_ERROR_IS_FATAL ANY)
 

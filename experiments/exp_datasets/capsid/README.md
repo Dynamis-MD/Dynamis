@@ -1,7 +1,7 @@
 # HIV-1 Capsid (PDB 3J3Q)
 
 The full HIV-1 capsid cryo-EM structure — a **real, non-synthetic ~2.4 M-atom**
-system used as the large-scale end-to-end DistNNP benchmark (partitioning, halo
+system used as the large-scale end-to-end Dynamis benchmark (partitioning, halo
 exchange, LJ forces, Langevin NVT across many GPUs).
 
 | File | Atoms | Extent (Å) | Description |
