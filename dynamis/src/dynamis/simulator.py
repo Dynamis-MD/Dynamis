@@ -51,11 +51,12 @@ def check_integrator(integrator):
         )
 
 
-@dataclass
+@dataclass(kw_only=True)
 class SimulatorConfig:
     # Physical parameters
     timestep_fs: float = 0.5  # Integration timestep in femtoseconds
     total_steps: int = 1000  # Total number of MD steps to run
+    initial_temperature_K: float  # Kelvin; velocities are sampled at it if all zero
 
     # Spatial decomposition
     side_length_angstrom: float = (
@@ -96,6 +97,9 @@ class SimulatorConfig:
     Args:
         timestep_fs (float): Integration timestep in femtoseconds.
         total_steps (int): Total number of MD steps to run.
+        initial_temperature_K (float): Required. Temperature in Kelvin to sample
+            Maxwell-Boltzmann velocities at when the input's velocities are all
+            zero (or missing). 0.0 keeps a zero-velocity start.
         cutoff_angstrom (float): NNP neighbour cutoff radius in Ångstroms.
         ghost_buffer_angstrom (float): Extra radius for ghost atom selection in Ångstroms.
         partition_algorithm (str): Algorithm for spatial partitioning ("sfc_morton", "sfc_hilbert", "kdtree", "simple").

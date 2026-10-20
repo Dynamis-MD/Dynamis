@@ -130,6 +130,7 @@ def simulation_factory(request):
         # Constants are fairly arbitrary
         # Not sure if the partition algo should be adjusted
         config = SimulatorConfig(
+            initial_temperature_K=0.0,
             cutoff_angstrom=3.5,
             ghost_buffer_angstrom=0.5,
             side_length_angstrom=8.0,

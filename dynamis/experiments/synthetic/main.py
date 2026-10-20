@@ -48,6 +48,7 @@ def create_and_run_experiment(num_atoms: int):
         torch_distributed_env.barrier()
 
     sim_config = SimulatorConfig(
+        initial_temperature_K=0.0,
         timestep_fs=0.5,
         total_steps=1000,
         cutoff_angstrom=6.0,
