@@ -154,6 +154,12 @@ PYBIND11_MODULE(dynamis_state_impl, m)
     m.def("mass_table", &dynamis_state::mass_table,
           "float32 [119] atomic masses (amu) indexed by atomic number, index 0 is 0");
 
+    m.def("sample_maxwell_boltzmann", &dynamis_state::sample_maxwell_boltzmann,
+          "Maxwell-Boltzmann velocities (A/fs, float32 [N, 3]) for atom_types at "
+          "temperature_K (K) with zero total momentum, drawn on the CPU from seed so "
+          "every rank gets the same values",
+          py::arg("atom_types"), py::arg("temperature_K"), py::arg("seed") = 0);
+
     m.def("radius_graph_pbc", &radius_graph_pbc,
           "CUDA cell-list radius graph with selective PBC tiling", py::arg("pos"), py::arg("cell"),
           py::arg("pbc"), py::arg("radius"), py::arg("max_num_neighbors"),

@@ -6,6 +6,9 @@
 
 namespace dynamis_state {
 
+// Boltzmann constant in amu * A^2 / (fs^2 * K)
+constexpr double kBoltzmann = 8.314462618e-7;
+
 // Atomic number and mass (amu) for one element
 struct Element {
     uint8_t number;
@@ -71,5 +74,12 @@ inline const std::unordered_map<uint8_t, std::string> &reverse_periodic_table()
 
 // float32 [119] masses (amu) indexed by atomic number; index 0 is 0
 torch::Tensor mass_table();
+
+// Maxwell-Boltzmann velocities (A/fs) at temperature_K with the centre-of-mass
+// momentum removed. Returns float32 [N, 3] on atom_types' device; sampling is on
+// the CPU from seed alone, so every rank and device draws the same values.
+// Throws std::invalid_argument on a negative temperature or an unknown atom type.
+torch::Tensor sample_maxwell_boltzmann(const torch::Tensor &atom_types, double temperature_K,
+                                       uint64_t seed);
 
 } // namespace dynamis_state

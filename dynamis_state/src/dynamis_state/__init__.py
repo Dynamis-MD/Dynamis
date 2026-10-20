@@ -15,6 +15,7 @@ SFCCurveType = dynamis_state_impl.SFCCurveType
 
 # Atomic masses (amu) indexed by atomic number, built once from the C++ table
 ATOMIC_MASSES = dynamis_state_impl.mass_table()
+sample_maxwell_boltzmann = dynamis_state_impl.sample_maxwell_boltzmann
 
 # CUDA radius graph with PBC
 from dynamis_state.radius_graph_pbc_cuda import radius_graph_pbc_cuda
@@ -88,6 +89,7 @@ __all__ = [
     "SFCPartitioner",
     "SFCCurveType",
     "ATOMIC_MASSES",
+    "sample_maxwell_boltzmann",
     "TrajectoryReader",
     "TrajectoryWriter",
     "translate_dynamis_to_xyz",
