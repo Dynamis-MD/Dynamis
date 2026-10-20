@@ -253,11 +253,10 @@ class Simulator:
             molecular_info = system_input
             cell, pbc = torch.zeros(3, 3), torch.zeros(3, dtype=torch.uint8)
 
-        # TODO figure out what author should be
         self.writer: TrajectoryWriter = TrajectoryWriter(
             dist_env.global_rank,
             self.run_uuid.bytes,
-            "author",
+            "Dynamis-v0.0.0-alpha",
             self.config.output_dir,
             self.config.traj_file,
             molecular_info,
