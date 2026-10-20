@@ -9,12 +9,12 @@ import torch.multiprocessing as mp
 import pytest
 
 from dynamis_state import (
+    ATOMIC_MASSES,
     MolecularInfo,
     TrajectoryReader,
     TrajectoryWriter,
     translate_dynamis_to_xyz,
 )
-from dynamis_state.masses import TORCH_ATOMIC_MASSES
 
 # ─── TrajectoryReader.read() ───────────────────────────────────────────────
 
@@ -73,7 +73,7 @@ def test_xyz_momenta_column_divided_by_mass(tmp_path):
 
     env, _, _ = TrajectoryReader.read(str(xyz))
 
-    carbon, hydrogen = TORCH_ATOMIC_MASSES[6], TORCH_ATOMIC_MASSES[1]
+    carbon, hydrogen = ATOMIC_MASSES[6], ATOMIC_MASSES[1]
     expected = torch.tensor(
         [
             [0.5 / carbon, 1.5 / carbon, 2.5 / carbon],

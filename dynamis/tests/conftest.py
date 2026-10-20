@@ -70,7 +70,7 @@ def _make_global_state(
     state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long)
     state.atom_positions = torch.rand(num_atoms, 3) * 8.0
     state.atom_velocities = torch.randn(num_atoms, 3) * 0.1
-    # Argon — atomic number 18; TORCH_MASSES is indexed by atomic number,
+    # Argon — atomic number 18; ATOMIC_MASSES is indexed by atomic number,
     # and index 0 is a 0.0 placeholder that would give infinite acceleration.
     state.atom_types = torch.full((num_atoms,), 18, dtype=torch.long)
 
@@ -130,6 +130,7 @@ def simulation_factory(request):
         # Constants are fairly arbitrary
         # Not sure if the partition algo should be adjusted
         config = SimulatorConfig(
+            initial_temperature_K=0.0,
             cutoff_angstrom=3.5,
             ghost_buffer_angstrom=0.5,
             side_length_angstrom=8.0,

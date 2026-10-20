@@ -35,8 +35,8 @@ from dynamis.simulator import Simulator, SimulatorConfig
 from dynamis_integrator.euler import Euler
 from dynamis_integrator.verlet import Verlet
 from dynamis_integrator.langevin import Langevin
-from dynamis_integrator.masses import TORCH_MASSES
 from dynamis_state import (
+    ATOMIC_MASSES,
     MolecularInfo,
     DistEnvironment,
 )
@@ -61,7 +61,7 @@ def _make_global_state(
     state.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.long)
     state.atom_positions = torch.rand(num_atoms, 3) * 8.0
     state.atom_velocities = torch.randn(num_atoms, 3) * 0.1
-    # Argon — atomic number 18; TORCH_MASSES is indexed by atomic number,
+    # Argon — atomic number 18; ATOMIC_MASSES is indexed by atomic number,
     # and index 0 is a 0.0 placeholder that would give infinite acceleration.
     state.atom_types = torch.full((num_atoms,), 18, dtype=torch.long)
 
@@ -91,6 +91,7 @@ def _build_simulator(molecular_info, env, integrator, device):
     # Constants are fairly arbitrary
     # Not sure if the partition algo should be adjusted
     config = SimulatorConfig(
+        initial_temperature_K=0.0,
         cutoff_angstrom=3.5,
         ghost_buffer_angstrom=0.5,
         side_length_angstrom=8.0,
@@ -152,7 +153,7 @@ def generate_reference(integrator_name: str, device: torch.device) -> None:
                 energy, _ = simulator.step(integrator.dt)
                 if step > N_EQUIL:
                     local = simulator.state.local_state
-                    local_masses = TORCH_MASSES.to(local.atom_positions.device)[
+                    local_masses = ATOMIC_MASSES.to(local.atom_positions.device)[
                         local.atom_types.reshape(-1)
                     ]
                     ke = (

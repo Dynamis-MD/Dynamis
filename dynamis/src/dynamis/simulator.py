@@ -6,6 +6,7 @@ from dynamis_state import (
     DistEnvironment,
     MolecularInfo,
     SimulationConfig,
+    sample_maxwell_boltzmann,
     TrajectoryReader,
     TrajectoryWriter,
     TorchDistEnv,
@@ -51,11 +52,13 @@ def check_integrator(integrator):
         )
 
 
-@dataclass
+@dataclass(kw_only=True)
 class SimulatorConfig:
     # Physical parameters
     timestep_fs: float = 0.5  # Integration timestep in femtoseconds
     total_steps: int = 1000  # Total number of MD steps to run
+    initial_temperature_K: float  # Kelvin; velocities are sampled at it if all zero
+    velocity_seed: int = 0  # Seed for that sampling, shared by all ranks
 
     # Spatial decomposition
     side_length_angstrom: float = (
@@ -96,6 +99,12 @@ class SimulatorConfig:
     Args:
         timestep_fs (float): Integration timestep in femtoseconds.
         total_steps (int): Total number of MD steps to run.
+        initial_temperature_K (float): Required. Temperature in Kelvin to sample
+            Maxwell-Boltzmann velocities at when the input's velocities are all
+            zero (or missing). Non-zero input velocities are kept.
+            0.0 keeps a zero-velocity start.
+        velocity_seed (int): Seed for that sampling. Every rank samples the whole
+            system from it, so all ranks agree regardless of world size.
         cutoff_angstrom (float): NNP neighbour cutoff radius in Ångstroms.
         ghost_buffer_angstrom (float): Extra radius for ghost atom selection in Ångstroms.
         partition_algorithm (str): Algorithm for spatial partitioning ("sfc_morton", "sfc_hilbert", "kdtree", "simple").
@@ -128,6 +137,18 @@ class SimulatorConfig:
         writer_buffer_size (int): Maximum number of snapshots held in memory before submit() blocks.
         backend (str): PyTorch distributed backend to use ("nccl" or "gloo").
     """
+
+
+def _initialize_velocities(
+    molecular_info: MolecularInfo, temperature_K: float, seed: int
+) -> None:
+    """Samples Maxwell-Boltzmann velocities in place unless the input carries
+    non-zero ones, which win over the configured temperature."""
+    if molecular_info.atom_velocities.any():
+        return
+    molecular_info.atom_velocities = sample_maxwell_boltzmann(
+        molecular_info.atom_types, temperature_K, seed
+    )
 
 
 class Simulator:
@@ -253,6 +274,12 @@ class Simulator:
             molecular_info = system_input
             cell, pbc = torch.zeros(3, 3), torch.zeros(3, dtype=torch.uint8)
 
+        _initialize_velocities(
+            molecular_info,
+            self.config.initial_temperature_K,
+            self.config.velocity_seed,
+        )
+
         # TODO figure out what author should be
         self.writer: TrajectoryWriter = TrajectoryWriter(
             dist_env.global_rank,
@@ -286,8 +313,6 @@ class Simulator:
 
         # (3) Repartition if needed and update writer atom-count metadata.
         self.sync_and_repartition(device=self.device)
-
-        # TODO if velocities are all 0, initialize from Maxwell-Boltzmann dist
 
     def sync_and_repartition(self, device: Optional[torch.device] = None) -> None:
         self.state.sync_and_repartition()

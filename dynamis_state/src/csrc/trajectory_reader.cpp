@@ -1,4 +1,5 @@
 #include "dynamis_state/trajectory_reader.hpp"
+#include "dynamis_state/physics.hpp"
 #include "dynamis_state/trajectory_format.hpp"
 #include <cctype>
 #include <cerrno>
