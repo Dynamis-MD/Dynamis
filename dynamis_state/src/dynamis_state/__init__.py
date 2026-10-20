@@ -13,6 +13,9 @@ KDTreePartitioner = dynamis_state_impl.KDTreePartitioner
 SFCPartitioner = dynamis_state_impl.SFCPartitioner
 SFCCurveType = dynamis_state_impl.SFCCurveType
 
+# Atomic masses (amu) indexed by atomic number, built once from the C++ table
+ATOMIC_MASSES = dynamis_state_impl.mass_table()
+
 # CUDA radius graph with PBC
 from dynamis_state.radius_graph_pbc_cuda import radius_graph_pbc_cuda
 from dynamis_state.state_wrapper import TorchDistEnv
@@ -84,6 +87,7 @@ __all__ = [
     "KDTreePartitioner",
     "SFCPartitioner",
     "SFCCurveType",
+    "ATOMIC_MASSES",
     "TrajectoryReader",
     "TrajectoryWriter",
     "translate_dynamis_to_xyz",

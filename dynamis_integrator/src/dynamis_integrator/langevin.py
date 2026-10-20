@@ -7,9 +7,8 @@ from dynamis_integrator._data_check import (
     check_shapes_match,
 )
 from dynamis_integrator.integrator import DynamisIntegrator
-from dynamis_state import DynamisState
+from dynamis_state import ATOMIC_MASSES, DynamisState
 from dynamis_model import DynamisModel
-from dynamis_integrator.masses import TORCH_MASSES
 
 
 class Langevin(DynamisIntegrator):
@@ -97,7 +96,7 @@ class Langevin(DynamisIntegrator):
 
         # Langevin requires normally distributed noise for thermal kicks
         noise1 = torch.randn_like(state.atom_velocities)
-        atom_masses = TORCH_MASSES.to(state.atom_positions.device)[
+        atom_masses = ATOMIC_MASSES.to(state.atom_positions.device)[
             state.atom_types.reshape(-1).to(torch.long)
         ]
 
