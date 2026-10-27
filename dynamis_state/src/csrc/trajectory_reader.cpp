@@ -499,9 +499,10 @@ parse_xyz_block(std::ifstream &xyz_file, const std::string &path, uint64_t block
                 throw std::runtime_error("'" + path + "': malformed velocity in frame " +
                                          std::to_string(block_index) + ": '" + line + "'");
             }
-            // MolecularInfo stores velocities, so a momenta column has to be
-            // divided back through by this atom's mass (v = p / m).
-            float scale = velocity_is_momenta ? 1.0f / it->second.mass : 1.0f;
+            // MolecularInfo stores velocities in A/fs. A momenta column is ASE's
+            // p = m*v in amu * sqrt(eV / amu): divide by this atom's mass, then
+            // convert ASE's time unit to fs.
+            float scale = velocity_is_momenta ? kAseFs / it->second.mass : 1.0f;
             velocities.emplace_back(std::stof(xstr) * scale);
             velocities.emplace_back(std::stof(ystr) * scale);
             velocities.emplace_back(std::stof(zstr) * scale);

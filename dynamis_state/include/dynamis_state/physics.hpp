@@ -9,6 +9,10 @@ namespace dynamis_state {
 // Boltzmann constant in amu * A^2 / (fs^2 * K)
 constexpr double kBoltzmann = 8.314462618e-7;
 
+// One femtosecond in ASE's time unit, A * sqrt(amu / eV) (ase.units.fs).
+// ASE momenta are amu * sqrt(eV / amu), so (p / m) * kAseFs is in A / fs.
+constexpr double kAseFs = 0.09822694788464063;
+
 // Atomic number and mass (amu) for one element
 struct Element {
     uint8_t number;
