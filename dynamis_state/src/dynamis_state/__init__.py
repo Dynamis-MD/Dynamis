@@ -1,3 +1,7 @@
+# torch must be loaded before the extension: mass_table() below returns a tensor at
+# import time, which segfaults if torch's Python bindings are not yet initialized.
+import torch  # noqa: F401
+
 import dynamis_state.dynamis_state_impl as dynamis_state_impl
 
 # C++ structs
