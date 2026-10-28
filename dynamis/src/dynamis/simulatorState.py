@@ -4,6 +4,8 @@ from dynamis_state import (
     SimulationConfig,
     PartitionMessagePassingInfo,
     MolecularInfo,
+    deform_state,
+    set_state_cell,
     SFCPartitioner,
     SimpleSpatialPartitioner,
     KDTreePartitioner,
@@ -68,6 +70,14 @@ class SimState:
         # an elementwise difference against this snapshot.
         self._ref_positions: Optional[torch.Tensor] = None
         self._prev_velocities: Optional[torch.Tensor] = None
+        # Inverse of the cell the halo was built with (float64, on device): the
+        # watchdog needs the affine map A = h_ref^-1 h_now to tell a deformation
+        # of the box from motion of the atoms.
+        self._ref_cell_inv: Optional[torch.Tensor] = None
+        # Upper bound, in ||A - I||_F, on how much the cell may still change during
+        # the next step. A barostat sets it so the watchdog's one-step look-ahead
+        # covers its own box update; 0 for a fixed cell.
+        self.cell_change_bound_per_step: float = 0.0
         self.snapshot_reference_positions()
 
     def setup_mass_and_forces(self, partition_info, molecular_system):
@@ -132,6 +142,17 @@ class SimState:
     @property
     def local_partition_info(self) -> PartitionMessagePassingInfo:
         return self._state.local_partition_info
+
+    def deform(self, transform: torch.Tensor) -> None:
+        """Apply ``x -> x A`` to the local positions and ``h -> h A`` to the cell.
+        See :func:`dynamis_state.deform_state`; the halo stays valid through the
+        drift watchdog, and repartitioning stays on its own schedule."""
+        deform_state(self._state, transform)
+
+    def set_cell(self, cell: torch.Tensor) -> None:
+        """Overwrite the cell without moving atoms (see
+        :func:`dynamis_state.set_state_cell`)."""
+        set_state_cell(self._state, cell)
 
     def sync_and_repartition(
         self,
@@ -253,6 +274,8 @@ class SimState:
         info = self._state.local_molecular_info
         self._ref_positions = info.atom_positions.detach().clone()
         self._prev_velocities = info.atom_velocities.detach().clone()
+        cell = self._state.sim_config.cell.detach().reshape(3, 3)
+        self._ref_cell_inv = torch.linalg.inv(cell.to(torch.float64))
 
     def write_local_drift_flag(
         self, flag: torch.Tensor, threshold: float, dt: float
@@ -260,19 +283,37 @@ class SimState:
         """Write this rank's 2-bit drift word into ``flag`` (int32 [1]); device-only.
 
         Called on the positions the model is about to push, i.e. the positions this
-        step's graph is built on. With d_i = |x_i - x_i^ref| (L2, since the last halo
-        build) and the next step's motion bounded per atom by
-        dt * (|v_i| + |v_i - v_i^prev|) (velocity plus its change over the last call,
-        standing in for the force update):
+        step's graph is built on. With u_i the displacement of atom i since the last
+        halo build *after removing the affine map of the cell* (below), and the next
+        step's motion bounded per atom by dt * (|v_i| + |v_i - v_i^prev|) (velocity
+        plus its change over the last call, standing in for the force update):
 
-          bit 0 (DRIFT_TRIP):   max_i d_i + dt * (|v_i| + |v_i - v_i^prev|) >= threshold
+          bit 0 (DRIFT_TRIP):   max_i u_i + dt * (|v_i| + |v_i - v_i^prev|) + cell
+                                look-ahead >= budget
                                 -> the next step's graph could exceed it: rebuild first
-          bit 1 (DRIFT_BREACH): max_i d_i > threshold
+          bit 1 (DRIFT_BREACH): max_i u_i > budget
                                 -> THIS step's graph is built past the guarantee
 
-        With threshold = skin / 2, no edge can be missing while no rank sets bit 1.
-        Positions are never wrapped (not by the integrator, the models or the exchanger),
-        so the raw difference is the true displacement: no minimum-image fold."""
+        With a fixed cell, u_i = |x_i - x_i^ref| and budget = threshold = skin / 2, and
+        no edge can be missing while no rank sets bit 1. Positions are never wrapped
+        (not by the integrator, the models or the exchanger), so the raw difference is
+        the true displacement: no minimum-image fold.
+
+        When the cell has changed since the halo build, A = h_ref^-1 h_now maps the
+        build-time lattice to the current one, and a pair vector (periodic image
+        included) evolves as r(t) = A r(0) + (u_j - u_i), where x_i(t) = A x_i^ref + u_i.
+        So u_i = |x_i - x_i^ref A| is the displacement beyond the affine part, and
+        |r(0)| <= |A^-1| (cutoff + 2 max u). Using |A^-1| <= 1 / (1 - delta) with
+        delta = ||A - I||_F (>= ||A - I||_2), no edge within the cutoff can lie outside
+        the ghost radius (cutoff + skin) while
+
+            max u < budget = threshold - delta * (cutoff + skin) / 2.
+
+        This is also what catches a cell change that leaves the atoms in place, which a
+        plain displacement test cannot see: neighbours across a periodic boundary move
+        closer by the change of the lattice vector. ``cell_change_bound_per_step`` adds a
+        look-ahead for the box update the integrator may still apply before the next
+        graph: it enters the TRIP test only."""
         info = self._state.local_molecular_info
         cur = info.atom_positions.detach()
         ref = self._ref_positions
@@ -283,11 +324,24 @@ class SimState:
             flag.zero_()
             return
         vel = info.atom_velocities.detach()
-        disp = (cur - ref).norm(dim=1)
+
+        config = self._state.sim_config
+        halo_radius = config.cutoff + config.ghost_cutoff_buffer
+        cell = config.cell.detach().reshape(3, 3).to(torch.float64)
+        affine = self._ref_cell_inv.to(cell.device) @ cell - torch.eye(
+            3, dtype=torch.float64, device=cell.device
+        )  # A - I, ~1e-16 for an unchanged cell
+        delta = affine.norm()
+        budget = threshold - 0.5 * halo_radius * delta
+
+        # beyond-affine displacement: x - x_ref A, with the identity part cancelled
+        moved = cur - ref - ref @ affine.to(device=cur.device, dtype=cur.dtype)
+        disp = moved.norm(dim=1)
         reach = disp + dt * (
             vel.norm(dim=1) + (vel - self._prev_velocities).norm(dim=1)
         )
-        word = (reach.max() >= threshold).to(torch.int32) * DRIFT_TRIP
-        word += (disp.max() > threshold).to(torch.int32) * DRIFT_BREACH
+        look_ahead = 0.5 * halo_radius * self.cell_change_bound_per_step
+        word = (reach.max() + look_ahead >= budget).to(torch.int32) * DRIFT_TRIP
+        word += (disp.max() > budget).to(torch.int32) * DRIFT_BREACH
         flag.copy_(word)
         self._prev_velocities.copy_(vel)
