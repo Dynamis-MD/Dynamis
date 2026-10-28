@@ -51,9 +51,7 @@ class DynamisIntegrator(ABC):
         """
         raise NotImplementedError("Subclasses must implement the step method.")
 
-    def _compute_force(
-        self, dist_state: DynamisState, model
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _compute_force(self, dist_state: DynamisState, model, **model_kwargs):
         """
         Evaluate the potential model on the current state and return energy and forces.
 
@@ -64,8 +62,10 @@ class DynamisIntegrator(ABC):
         Args:
             dist_state (DynamisState): The current state of the system.
             model (DynamisModel): The potential model used to compute forces.
+            **model_kwargs: Forwarded to the model, e.g. ``compute_stress=True`` (the
+                result then carries the stress as a third element).
         """
-        return model(dist_state)
+        return model(dist_state, **model_kwargs)
 
     def reset(self) -> None:
         pass

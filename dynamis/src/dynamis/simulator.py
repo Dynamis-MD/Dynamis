@@ -23,6 +23,7 @@ from dynamis_integrator import (
     Euler,
     Verlet,
     Langevin,
+    NPT,
     DynamisIntegrator,
     AVALIABLE_INTEGRATORS,
 )
@@ -34,7 +35,7 @@ import torch.distributed as dist
 import uuid
 import warnings
 
-POSSIBLE_INTEGRATOR_TYPES = Union[Euler, Verlet, Langevin]
+POSSIBLE_INTEGRATOR_TYPES = Union[Euler, Verlet, Langevin, NPT]
 
 POSSIBLE_PARTITIONERS_TYPES = Union[
     SimpleSpatialPartitioner, KDTreePartitioner, SFCPartitioner
@@ -45,7 +46,7 @@ VALID_PARTITION_ALGORITHMS = ["simple", "kdtree", "sfc_morton", "sfc_hilbert"]
 
 # Typing check if integrator is one of the available integrators
 def check_integrator(integrator):
-    if type(integrator) not in [Euler, Verlet, Langevin]:
+    if type(integrator) not in [Euler, Verlet, Langevin, NPT]:
         raise ValueError(
             f"Integrator {integrator} is not available. Choose from {AVALIABLE_INTEGRATORS}."
         )
@@ -316,6 +317,11 @@ class Simulator:
         self.state = state
 
     def step(self, step_size: Optional[float] = None):
+        # An integrator that changes the box (NPT) declares how much it may change per
+        # step, so the drift watchdog looks ahead over its own update.
+        self.state.cell_change_bound_per_step = getattr(
+            self.integrator, "cell_change_bound_per_step", 0.0
+        )
         if self._drift_flags is None:
             out = self.integrator.step(self.state._state, self.model, step_size)
         else:
@@ -439,7 +445,14 @@ class Simulator:
                     self.state.local_state.atom_vertex_numbers = (
                         self.state.local_partition_info.partition_indices
                     )
-                    self.writer.submit(total_done, self.state.local_state)
+                    # the box the dynamics actually used: constant for NVT, changing
+                    # under a barostat (the writer's header cell/pbc are only a seed)
+                    self.writer.submit(
+                        total_done,
+                        self.state.local_state,
+                        cell=self.state.sim_config.cell,
+                        pbc=self.state.sim_config.pbc,
+                    )
                 total_done += 1
             self.writer.flush()
         finally:
