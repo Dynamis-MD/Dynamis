@@ -269,8 +269,10 @@ void TrajectoryWriterImpl::submit(uint32_t step, MolecularInfo state,
     if (front_matter_size == 0)
         throw std::runtime_error("submit() called before front matter was written");
 
-    uint32_t offset =
-            front_matter_size + (step * (kPbcCellBlockSize + total_atoms * bytes_per_atom));
+    // 64-bit throughout: a single frame of a large system times the step
+    // index easily exceeds 4 GiB
+    const uint64_t frame_size = kPbcCellBlockSize + total_atoms * bytes_per_atom;
+    const uint64_t offset = front_matter_size + static_cast<uint64_t>(step) * frame_size;
 
     if (rank == 0) {
         std::vector<uint8_t> pbc_cell_buf(kPbcCellBlockSize, 0);
@@ -279,39 +281,40 @@ void TrajectoryWriterImpl::submit(uint32_t step, MolecularInfo state,
         torch::Tensor pbc_cpu = current_pbc.contiguous();
         memcpy(pbc_cell_buf.data() + 9 * sizeof(float), pbc_cpu.data_ptr(), 3 * sizeof(uint8_t));
 
-        ssize_t written = pwrite(fd, pbc_cell_buf.data(), kPbcCellBlockSize, offset);
+        ssize_t written = pwrite(fd, pbc_cell_buf.data(), kPbcCellBlockSize,
+                                 static_cast<off_t>(offset));
         CHECK_WRITE(written, kPbcCellBlockSize);
     }
 
-    uint32_t atom_block_offset = offset + kPbcCellBlockSize;
+    uint64_t atom_block_offset = offset + kPbcCellBlockSize;
 
     uint64_t atom_count = 0;
     for (uint32_t i = 0; i < rank; i++) {
         atom_count += rank_atom_counts.at(i);
     }
 
-    auto write_tensor = [&](torch::Tensor t, uint32_t off) {
+    auto write_tensor = [&](torch::Tensor t, uint64_t off) {
         torch::Tensor cpu_tensor = t.to(torch::kCPU).contiguous();
         size_t tensor_bytes = cpu_tensor.numel() * cpu_tensor.element_size();
-        ssize_t written = pwrite(fd, cpu_tensor.data_ptr(), tensor_bytes, off);
+        ssize_t written = pwrite(fd, cpu_tensor.data_ptr(), tensor_bytes, static_cast<off_t>(off));
         CHECK_WRITE(written, tensor_bytes);
     };
 
     // doing sizeof here to be more explicit about the calculations; atom data
     // starts after the pbc_cell block, at atom_block_offset
-    uint32_t cursor = atom_block_offset;
+    uint64_t cursor = atom_block_offset;
     if (has_indices) {
-        uint32_t field_offset = cursor + (atom_count * sizeof(int64_t));
+        uint64_t field_offset = cursor + (atom_count * sizeof(int64_t));
         write_tensor(state.atom_vertex_numbers, field_offset);
         cursor += total_atoms * sizeof(int64_t);
     }
     if (has_positions) {
-        uint32_t field_offset = cursor + (atom_count * 3 * sizeof(float));
+        uint64_t field_offset = cursor + (atom_count * 3 * sizeof(float));
         write_tensor(state.atom_positions, field_offset);
         cursor += total_atoms * 3 * sizeof(float);
     }
     if (has_velocities) {
-        uint32_t field_offset = cursor + (atom_count * 3 * sizeof(float));
+        uint64_t field_offset = cursor + (atom_count * 3 * sizeof(float));
         write_tensor(state.atom_velocities, field_offset);
         cursor += total_atoms * 3 * sizeof(float);
     }
