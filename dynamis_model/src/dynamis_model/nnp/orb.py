@@ -19,6 +19,7 @@ from dynamis_state import DynamisState, radius_graph_pbc_cuda
 from dynamis_model.comm.feature_push import FeaturePushToExchange
 from dynamis_model.comm.exchanger import GPUDirectExchanger
 
+from dynamis_model.strain import apply_strain, stress_from_strain_grad, zero_strain
 from dynamis_model.units import EV_PER_A_TO_AMU_A_PER_FS2
 
 # Re-exported under the historical private name so existing
@@ -140,15 +141,37 @@ class ORBModel(DynamisModel, nn.Module):
             half_supercell=False,
         )
 
-    def __call__(self, distributed_state: DynamisState, *args, **kwargs):
-
+    def __call__(
+        self,
+        distributed_state: DynamisState,
+        *args,
+        compute_stress: bool = False,
+        **kwargs,
+    ):
+        """Return ``(energy, forces)``, or ``(energy, forces, stress)`` when
+        ``compute_stress`` is set. Stress is the strain derivative of the total
+        energy over the cell volume, summed over ranks (``dynamis_model.strain``)."""
         prev_local_positions = distributed_state.local_molecular_info.atom_positions
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
         local_atom_types = distributed_state.local_molecular_info.atom_types
         n_local_atoms = local_positions.shape[0]
 
+        sim_config = distributed_state.sim_config
+        # The strain is applied before the exchange so ghosts carry their owner's
+        # strained coordinates, and to the cell used for the periodic shifts.
+        strain = (
+            zero_strain(local_positions.device, local_positions.dtype)
+            if compute_stress
+            else None
+        )
+        strained_positions, cell = local_positions, sim_config.cell
+        if strain is not None:
+            strained_positions, cell = apply_strain(
+                local_positions, sim_config.cell, strain, sim_config.pbc
+            )
+
         positions = FeaturePushToExchange.apply(
-            local_positions, distributed_state, self._feature_exchanger
+            strained_positions, distributed_state, self._feature_exchanger
         )
         atom_types = (
             FeaturePushToExchange.apply(
@@ -161,7 +184,6 @@ class ORBModel(DynamisModel, nn.Module):
         )
 
         n_atoms = positions.shape[0]
-        sim_config = distributed_state.sim_config
 
         # Detached from autograd, graph topology is not differentiable
         with torch.no_grad():
@@ -186,9 +208,7 @@ class ORBModel(DynamisModel, nn.Module):
             _dbg_cell_offsets_full = cell_offsets
 
         def _displacement(ei, co):  # lattice-vector → Cartesian conversion
-            shifts = torch.mm(
-                co.to(positions.dtype), sim_config.cell.squeeze(0).to(positions.dtype)
-            )
+            shifts = torch.mm(co.to(positions.dtype), cell.squeeze(0).to(positions.dtype))
             return positions[ei[1]] - positions[ei[0]] - shifts
 
         #  Orb's AttentionInteractionNetwork does segment_sum over senders and receivers, so message passing is effectively undirected
@@ -217,7 +237,7 @@ class ORBModel(DynamisModel, nn.Module):
             senders,
             receivers,
             displacement_vectors,
-            sim_config.cell,
+            cell,
             sim_config.cutoff,
             self.device,
         )
@@ -285,7 +305,7 @@ class ORBModel(DynamisModel, nn.Module):
             n_edge=torch.tensor([0], device=self.device),
             node_features={"atomic_numbers": local_atom_types},
             edge_features={"vectors": displacement_vectors.new_zeros((0, 3))},
-            system_features={"cell": sim_config.cell.unsqueeze(0).to(positions.dtype)},
+            system_features={"cell": cell.unsqueeze(0).to(positions.dtype)},
             node_targets={},
             edge_targets={},
             system_targets={},
@@ -340,7 +360,7 @@ class ORBModel(DynamisModel, nn.Module):
                 zbl_edge_index[0],
                 zbl_edge_index[1],
                 zbl_displacement,
-                sim_config.cell,
+                cell,
                 sim_config.cutoff,
                 self.device,
             )
@@ -406,12 +426,20 @@ class ORBModel(DynamisModel, nn.Module):
                 flush=True,
             )
 
-        (grad_local_positions,) = torch.autograd.grad(
+        if strain is None:
+            (grad_local_positions,) = torch.autograd.grad(
+                local_energy,
+                local_positions,
+                create_graph=False,
+                retain_graph=False,
+            )
+            return local_energy.detach(), (-grad_local_positions).detach()
+
+        grad_local_positions, strain_grad = torch.autograd.grad(
             local_energy,
-            local_positions,
+            [local_positions, strain],
             create_graph=False,
             retain_graph=False,
         )
-        local_forces = -grad_local_positions
-
-        return local_energy.detach(), local_forces.detach()
+        stress = stress_from_strain_grad(strain_grad.detach(), sim_config.cell)
+        return local_energy.detach(), (-grad_local_positions).detach(), stress
