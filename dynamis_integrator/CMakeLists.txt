@@ -145,11 +145,11 @@ target_compile_options(dynamis_integrator_impl PRIVATE $<$<COMPILE_LANGUAGE:CXX>
 set_target_properties(dynamis_integrator_impl
     PROPERTIES
     FILE_SET HEADERS
-    CXX_STANDARD 17
+    CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
 
-    CUDA_STANDARD 17
+    CUDA_STANDARD 20
     CUDA_STANDARD_REQUIRED ON
     CUDA_EXTENSIONS OFF
 
