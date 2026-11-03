@@ -84,8 +84,8 @@ def balance_channels_batched(
 class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Initialize exchanger with dummy values, will be updated later
-        self._feature_exchangers = []
+        # Initialize exchanger with None, will be updated in initialize_buffers
+        self._feature_exchanger: Exchanger | None = None
         self._distributed_state = None
         self.num_local = 0
         self.profiler = None  # CUDAEventProfiler for detailed timing
@@ -372,21 +372,10 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                 wigner_inv_envelope,
                 data_dict["gp_node_offset"],
             )
-            if self._feature_exchangers:
-                exchanger = self._feature_exchangers[-1]
-                n_local = self.num_local
-                orig_shape = (
-                    x_message.shape
-                )  # [n_atoms, sph_feature_size, sphere_channels]
-                feat_dim = orig_shape[1] * orig_shape[2]
-                x_local_flat = x_message[:n_local].reshape(n_local, feat_dim)
-
-                x_full_flat = FeaturePushToExchange.apply(
-                    x_local_flat, self._distributed_state, exchanger
+            if self._feature_exchanger is not None:
+                x_message = self._feature_exchanger.push(
+                    x_message[: self.num_local], self._distributed_state
                 )
-
-                n_full = x_full_flat.shape[0]
-                x_message = x_full_flat.reshape(n_full, orig_shape[1], orig_shape[2])
         if self.profiler:
             self.profiler.stop("edge_embedding")
 
@@ -555,21 +544,10 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             # === Feature exchange ===
             if self.profiler:
                 self.profiler.start(f"feature_exchange_{i}")
-            if self._feature_exchangers:
-                exchanger = self._feature_exchangers[i]
-                n_local = _local_count_for_exchange
-                orig_shape = (
-                    x_message.shape
-                )  # [n_atoms, sph_feature_size, sphere_channels]
-                feat_dim = orig_shape[1] * orig_shape[2]
-                x_local_flat = x_message[:n_local].reshape(n_local, feat_dim)
-
-                x_full_flat = FeaturePushToExchange.apply(
-                    x_local_flat, self._distributed_state, exchanger
+            if self._feature_exchanger is not None:
+                x_message = self._feature_exchanger.push(
+                    x_message[:_local_count_for_exchange], self._distributed_state
                 )
-
-                n_full = x_full_flat.shape[0]
-                x_message = x_full_flat.reshape(n_full, orig_shape[1], orig_shape[2])
             if self.profiler:
                 self.profiler.stop(f"feature_exchange_{i}")
         # Final layer norm
@@ -631,7 +609,7 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
         new_model.load_state_dict(self.state_dict())
 
         # Preserve distributed components
-        new_model._feature_exchangers = self._feature_exchangers
+        new_model._feature_exchanger = self._feature_exchanger
         new_model._distributed_state = self._distributed_state
         new_model.enable_overlap = getattr(self, "enable_overlap", False)
         new_model.differentiable_exchange = getattr(
@@ -742,26 +720,31 @@ class UMAModel(DynamisModel):
         )
 
         self.num_layers = self.main_model.backbone.num_layers
+        self.max_feature_dim = max(
+            3,
+            int(
+                self.main_model.backbone.sph_feature_size
+                * self.main_model.backbone.sphere_channels
+            ),
+        )
 
-        # `exchanger` may be:
-        #   None                 -> a fresh GPUDirectExchanger per slot (default)
-        #   an Exchanger subclass -> a fresh instance of it per slot
-        #                            (use this for PythonNCCLExchanger on
-        #                             multi-node runs, where CUDA-IPC has no
-        #                             cross-node peer)
-        #   an Exchanger instance -> that one instance, shared across slots
-        #                            (back-compat; only safe for stateless-setup
-        #                             exchangers)
         if exchanger is None:
-            make_exchanger = GPUDirectExchanger
+            self.exchanger: Exchanger = GPUDirectExchanger(
+                max_feature_dim=self.max_feature_dim
+            )
         elif isinstance(exchanger, type):
-            make_exchanger = exchanger
+            self.exchanger = exchanger(max_feature_dim=self.max_feature_dim)
         else:
-            make_exchanger = lambda: exchanger  # noqa: E731  (shared instance)
+            self.exchanger = exchanger
+        self.main_model.backbone._feature_exchanger = self.exchanger
 
-        self.position_exchanger = make_exchanger()
-        self.atom_type_exchanger = make_exchanger()
-        self.feature_exchangers = [make_exchanger() for _ in range(self.num_layers + 1)]
+    @property
+    def position_exchanger(self) -> Exchanger:
+        return self.exchanger
+
+    @property
+    def atom_type_exchanger(self) -> Exchanger:
+        return self.exchanger
 
     def initialize_buffers(
         self,
@@ -769,25 +752,12 @@ class UMAModel(DynamisModel):
         device: Literal["cuda", "cpu"] | None = None,
     ) -> None:
         device = device or self.device
-        self.position_exchanger.setup_exchanger(
-            feature_dim=3, partition_info=partition_info, device=device
+        self.exchanger.setup_exchanger(
+            feature_dim=self.max_feature_dim,
+            partition_info=partition_info,
+            device=device,
         )
-        self.atom_type_exchanger.setup_exchanger(
-            feature_dim=1, partition_info=partition_info, device=device
-        )
-
-        total_feature_dim = (
-            self.main_model.backbone.sph_feature_size
-            * self.main_model.backbone.sphere_channels
-        )
-        for feature_exchanger in self.feature_exchangers:
-            feature_exchanger.setup_exchanger(
-                feature_dim=total_feature_dim,
-                partition_info=partition_info,
-                device=device,
-            )
-
-        self.main_model.backbone._feature_exchangers = self.feature_exchangers
+        self.main_model.backbone._feature_exchanger = self.exchanger
 
     def predict(
         self, data: AtomicData, undo_element_references: bool = True
@@ -893,19 +863,13 @@ class UMAModel(DynamisModel):
         if self.global_rank is None:
             self.global_rank = distributed_state.dist_env.global_rank
 
-        positions = FeaturePushToExchange.apply(
-            local_mol_info.atom_positions, distributed_state, self.position_exchanger
+        positions = self.exchanger.push(
+            local_mol_info.atom_positions, distributed_state
         )
 
-        atom_types = (
-            FeaturePushToExchange.apply(
-                local_mol_info.atom_types.float().unsqueeze(-1),
-                distributed_state,
-                self.atom_type_exchanger,
-            )
-            .squeeze(-1)
-            .long()
-        )
+        atom_types = self.exchanger.push(
+            local_mol_info.atom_types, distributed_state
+        ).long()
 
         num_global = global_mol_info.num_atoms
         num_atoms = positions.shape[0]
@@ -964,10 +928,7 @@ class UMAModel(DynamisModel):
         forces = pred[f"{datasets}_forces"] * _EV_PER_A_TO_AMU_A_PER_FS2
 
         dummy_local = torch.zeros((num_local, 3), device=device, requires_grad=True)
-        dummy_full = FeaturePushToExchange.apply(
-            dummy_local, distributed_state, self.position_exchanger
-        )
+        dummy_full = self.exchanger.push(dummy_local, distributed_state)
         dummy_full.backward(forces)
         local_forces = dummy_local.grad
         return energy.detach(), local_forces.detach()
-        return energy.detach(), forces.detach()
