@@ -52,7 +52,7 @@ _DATA = os.path.abspath(os.path.join(_HERE, "..", "..", "data"))
 
 CUTOFF, GHOST = 6.0, 0.5
 R_SKIN = CUTOFF + GHOST
-MAX_NBRS = 1000
+MAX_NBRS = 0  # no per-target cap, like DistGraphBuilder's default
 
 # timing / verify default systems: ch4 + solvated proteins + membrane + water
 DEFAULT_SYSTEMS = [

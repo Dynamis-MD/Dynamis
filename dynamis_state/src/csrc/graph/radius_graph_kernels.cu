@@ -2,7 +2,9 @@
 //
 // Stage A: Selective PBC replication (only boundary atoms near cell faces)
 // Stage B: Cell-list construction + two-pass neighbor search
-// Stage C: Max-neighbors mask (per-atom top-K by distance)
+//          (B3.5: per-target max_num_neighbors threshold, only when max_num_neighbors > 0)
+
+#include "dynamis_state/radius_graph.hpp"
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -11,6 +13,26 @@
 #include <tuple>
 
 static constexpr int BLOCK_SIZE = 256;
+
+// Squared target–source distance. Every kernel that tests a pair (B3 count, B3.5 select,
+// B4 write) goes through this one function with explicit round-to-nearest ops, so the
+// compiler cannot contract them differently per kernel: a pair kept by the B3.5 threshold
+// is counted and written identically by B3/B4 (the edge buffer is sized from those counts).
+__device__ __forceinline__ float pair_dist_sq(float tx, float ty, float tz,
+                                              float sx, float sy, float sz)
+{
+    float dx = tx - sx;
+    float dy = ty - sy;
+    float dz = tz - sz;
+    return __fmaf_rn(dz, dz, __fmaf_rn(dy, dy, __fmul_rn(dx, dx)));
+}
+
+// Pair predicate shared by all kernels: within the cutoff, not the atom itself, and within
+// the per-target max_num_neighbors threshold (tau = +inf when no truncation applies).
+__device__ __forceinline__ bool is_neighbor(float d2, float radius_sq, float tau)
+{
+    return d2 <= radius_sq && d2 > 1e-8f && d2 <= tau;
+}
 
 // ===== Stage A: Selective PBC Tiling =====
 
@@ -207,6 +229,7 @@ __global__ void count_neighbors_kernel(
     int padding_size,
     float radius_sq,
     int N,
+    const float* __restrict__ thresholds,   // [N] per-target tau, or nullptr (no truncation)
     int* __restrict__ neighbor_counts       // [N]
 ) {
     int tidx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -220,6 +243,7 @@ __global__ void count_neighbors_kernel(
     int tcy = target_cell_y[tidx];
     int tcz = target_cell_z[tidx];
 
+    float tau = thresholds ? thresholds[tidx] : INFINITY;
     int count = 0;
 
     for (int dz = -padding_size; dz <= padding_size; dz++) {
@@ -237,17 +261,10 @@ __global__ void count_neighbors_kernel(
                 int end = cell_end[cell_id];
 
                 for (int s = start; s < end; s++) {
-                    float sx = source_pos[s * 3 + 0];
-                    float sy = source_pos[s * 3 + 1];
-                    float sz = source_pos[s * 3 + 2];
-
-                    float dx2 = tx - sx;
-                    float dy2 = ty - sy;
-                    float dz2 = tz - sz;
-                    float dist_sq = dx2 * dx2 + dy2 * dy2 + dz2 * dz2;
-
-                    // Check within radius and not self (same original atom at image (0,0,0))
-                    if (dist_sq <= radius_sq && dist_sq > 1e-8f) {
+                    float dist_sq = pair_dist_sq(tx, ty, tz, source_pos[s * 3 + 0],
+                                                 source_pos[s * 3 + 1], source_pos[s * 3 + 2]);
+                    // Within radius (and tau), not self (same original atom at image (0,0,0))
+                    if (is_neighbor(dist_sq, radius_sq, tau)) {
                         count++;
                     }
                 }
@@ -302,7 +319,8 @@ __device__ __forceinline__ void emit_edge(
     edge_cell_shift_out[out * 3 + 2] = source_cell_shift[s * 3 + 2] + tfz - sfz;
 }
 
-// Kernel B4: warp-per-atom neighbor write (max_num_neighbors == 0).
+// Kernel B4: warp-per-atom neighbor write. With a per-target threshold (B3.5 or caller
+// supplied) only pairs with d2 <= tau are written; nullptr thresholds = no truncation.
 //
 // One warp (32 threads) handles one target atom, striding lanes through each of the
 // (2*padding+1)^3 neighbor cells (s = cell_start + it*32 + lane), so active lanes load
@@ -333,7 +351,8 @@ write_neighbors_kernel(
     int padding_size,
     float radius_sq,
     int N,
-    const int*     __restrict__ neighbor_counts,    // collect Phase-C count (== degree); unused when !USE_SHM
+    const float*   __restrict__ thresholds,         // [N] per-target tau, or nullptr (no truncation)
+    const int*     __restrict__ neighbor_counts,    // per-target edge count from B3/B3.5 (== produced)
     const int64_t* __restrict__ neighbor_offsets,
     const int64_t* __restrict__ target_sort_perm,   // sorted_idx → original atom id
     const float*   __restrict__ frac_floor,         // [N_orig, 3] PBC wrap correction
@@ -369,7 +388,9 @@ write_neighbors_kernel(
     float tfy = frac_floor[tgt_orig * 3 + 1];
     float tfz = frac_floor[tgt_orig * 3 + 2];
 
+    float   tau      = thresholds ? thresholds[warp_id] : INFINITY;
     int64_t base     = neighbor_offsets[warp_id];
+    int     out_count = neighbor_counts[warp_id];  // slots reserved for this target
     int     produced = 0;   // running count of neighbors found by this warp so far
 
     // Phase A: scan the (2*padding+1)^3 neighbor cells.
@@ -393,11 +414,9 @@ write_neighbors_kernel(
                     float d2 = 0.0f;
                     bool is_nbr = false;
                     if (s < ce) {
-                        float sx = source_pos[s * 3 + 0];
-                        float sy = source_pos[s * 3 + 1];
-                        float sz = source_pos[s * 3 + 2];
-                        d2 = (tx-sx)*(tx-sx) + (ty-sy)*(ty-sy) + (tz-sz)*(tz-sz);
-                        is_nbr = (d2 <= radius_sq) && (d2 > 1e-8f);
+                        d2 = pair_dist_sq(tx, ty, tz, source_pos[s * 3 + 0],
+                                          source_pos[s * 3 + 1], source_pos[s * 3 + 2]);
+                        is_nbr = is_neighbor(d2, radius_sq, tau);
                     }
                     uint32_t mask = __ballot_sync(0xFFFFFFFFu, is_nbr);
                     if (is_nbr) {
@@ -409,7 +428,10 @@ write_neighbors_kernel(
                                 s_dist[store_pos] = d2;
                                 s_src[store_pos]  = s;
                             }
-                        } else {
+                        } else if (produced + local < out_count) {
+                            // B3/B3.5 and this scan use the same predicate, so the guard never
+                            // fires; it only keeps a disagreement from writing into the next
+                            // target's slots.
                             emit_edge(base + produced + local, s, tgt_orig, d2,
                                       tfx, tfy, tfz, source_orig_idx, source_cell_shift,
                                       frac_floor, edge_src, edge_tgt,
@@ -431,13 +453,246 @@ write_neighbors_kernel(
         __syncwarp();
 
         // Phase C: stride-32 write → all 32 lanes active per iteration → fully coalesced.
-        int out_count = neighbor_counts[warp_id];  // == produced (B3 and Phase A agree)
-        for (int i = lane; i < out_count; i += 32) {
+        // out_count == produced (B3/B3.5 and Phase A use the same predicate); the min only
+        // keeps a disagreement from reading unwritten shm slots.
+        int n_write = min(min(out_count, produced), MAX_NEIGHBORS_BUF_COLLECT);
+        for (int i = lane; i < n_write; i += 32) {
             emit_edge(base + i, s_src[i], tgt_orig, s_dist[i],
                       tfx, tfy, tfz, source_orig_idx, source_cell_shift,
                       frac_floor, edge_src, edge_tgt,
                       edge_cell_shift_out, edge_dist_sq);
         }
+    }
+}
+
+// ===== Stage B3.5: per-target max_num_neighbors threshold =====
+//
+// For every target whose full degree (from B3) exceeds k, find the threshold tau on the
+// squared distance such that the kept neighbors are exactly {d2 <= tau}:
+//
+//   strict     (Orb, hard cap): tau = midpoint of the k-th and (k+1)-th smallest d2, so the
+//              k nearest are kept. tau sits between two atoms rather than on the k-th one:
+//              a rank that receives tau for a ghost compares its own d2 for that pair, which
+//              is bit-identical today (per-atom wrap/image), but the margin keeps the k-th
+//              edge stable if that ever changes. (No margin when the two are adjacent floats:
+//              tau = k-th value.)
+//              If the k-th and (k+1)-th are tied, tau = that value and all ties are kept.
+//   non-strict (UMA / fairchem get_max_neighbors_mask): tau = (k+1)-th smallest d2 +
+//              MAX_NEIGHBORS_DEGENERACY_TOL, keeping near-degenerate neighbors together.
+//
+// Targets with degree <= k get tau = +inf (keep all). The kernel overwrites
+// neighbor_counts[t] with the kept count, which B4 relies on for its exact-size slots.
+//
+// The (k+1)-th smallest d2 is found per warp by one of two selectors:
+//   WARP_TOPK (k <= 31): the warp keeps the k+1 smallest d2 seen so far in registers, sorted
+//              ascending, one per lane (lane i = (i+1)-th smallest). A candidate below the
+//              current (k+1)-th value is inserted with one shuffle; a single scan suffices.
+//   radix     (any k): radix select on the float bits (non-negative floats order like their
+//              uint32 bits), 8 bits per pass with a per-warp 256-bin shared histogram.
+//              4 scans. Used for UMA's k=300, where truncation rarely triggers at all.
+// Both finish with one more scan when the kept count is not already known (ties, or the
+// non-strict tolerance window).
+
+static constexpr float MAX_NEIGHBORS_DEGENERACY_TOL = 0.01f;  // Å², fairchem default
+static constexpr int   WARP_TOPK_MAX_K            = 31;     // k+1 values in 32 lanes
+static constexpr int   WARPS_PER_BLOCK_SELECT     = 4;
+static constexpr int   BLOCK_SIZE_SELECT          = 32 * WARPS_PER_BLOCK_SELECT;
+static constexpr int   RADIX_BINS                 = 256;
+
+// Warp-cooperative scan over the target's neighbor cells. Calls f(is_nbr, d2) once per
+// 32-candidate batch on every lane (so f may use warp collectives); is_nbr is false for
+// padding lanes and for pairs outside the cutoff.
+template <typename F>
+__device__ __forceinline__ void warp_scan_candidates(
+    const float* __restrict__ source_pos,
+    const int* __restrict__ cell_start, const int* __restrict__ cell_end,
+    int tcx, int tcy, int tcz, int grid_nx, int grid_ny, int grid_nz, int padding_size,
+    float tx, float ty, float tz, float radius_sq, int lane, F&& f)
+{
+    for (int dz = -padding_size; dz <= padding_size; dz++) {
+        int nz = tcz + dz;
+        if (nz < 0 || nz >= grid_nz) continue;
+        for (int dy = -padding_size; dy <= padding_size; dy++) {
+            int ny = tcy + dy;
+            if (ny < 0 || ny >= grid_ny) continue;
+            for (int dx = -padding_size; dx <= padding_size; dx++) {
+                int nx_val = tcx + dx;
+                if (nx_val < 0 || nx_val >= grid_nx) continue;
+
+                int cell_id = nx_val + ny * grid_nx + nz * grid_nx * grid_ny;
+                int cs = cell_start[cell_id];
+                int ce = cell_end[cell_id];
+                int iters = (ce - cs + 31) >> 5;
+                for (int it = 0; it < iters; it++) {
+                    int s = cs + (it << 5) + lane;
+                    float d2 = INFINITY;
+                    bool is_nbr = false;
+                    if (s < ce) {
+                        d2 = pair_dist_sq(tx, ty, tz, source_pos[s * 3 + 0],
+                                          source_pos[s * 3 + 1], source_pos[s * 3 + 2]);
+                        is_nbr = is_neighbor(d2, radius_sq, INFINITY);
+                    }
+                    f(is_nbr, d2);
+                }
+            }
+        }
+    }
+}
+
+template <bool WARP_TOPK>
+__global__ void __launch_bounds__(BLOCK_SIZE_SELECT)
+select_threshold_kernel(
+    const float* __restrict__ target_pos,
+    const float* __restrict__ source_pos,
+    const int*   __restrict__ target_cell_x,
+    const int*   __restrict__ target_cell_y,
+    const int*   __restrict__ target_cell_z,
+    const int*   __restrict__ cell_start,
+    const int*   __restrict__ cell_end,
+    int grid_nx, int grid_ny, int grid_nz,
+    int padding_size,
+    float radius_sq,
+    int N,
+    int k,
+    bool strict,
+    int*   __restrict__ neighbor_counts,  // in: full degree (B3); out: kept count
+    float* __restrict__ thresholds        // out: tau per target
+) {
+    // 64-bit before the shift: blockIdx.x * blockDim.x overflows int past ~67M targets.
+    int warp_id = (int)(((int64_t)blockIdx.x * blockDim.x + threadIdx.x) >> 5);
+    int lane    = threadIdx.x & 31;
+    if (warp_id >= N) return;
+
+    int deg = neighbor_counts[warp_id];
+    if (deg <= k) {
+        if (lane == 0) thresholds[warp_id] = INFINITY;
+        return;
+    }
+
+    float tx = target_pos[warp_id * 3 + 0];
+    float ty = target_pos[warp_id * 3 + 1];
+    float tz = target_pos[warp_id * 3 + 2];
+    int tcx = target_cell_x[warp_id];
+    int tcy = target_cell_y[warp_id];
+    int tcz = target_cell_z[warp_id];
+
+    auto scan = [&](auto&& f) {
+        warp_scan_candidates(source_pos, cell_start, cell_end, tcx, tcy, tcz,
+                             grid_nx, grid_ny, grid_nz, padding_size,
+                             tx, ty, tz, radius_sq, lane, f);
+    };
+
+    float v;              // (k+1)-th smallest d2 (deg > k, so it exists)
+    float a = 0.0f;       // k-th smallest d2 (WARP_TOPK only)
+    if constexpr (WARP_TOPK) {
+        float list = INFINITY;  // lane i: (i+1)-th smallest seen so far
+        scan([&](bool is_nbr, float d2) {
+            float cand = is_nbr ? d2 : INFINITY;
+            float kth1 = __shfl_sync(0xFFFFFFFFu, list, k);
+            uint32_t pending = __ballot_sync(0xFFFFFFFFu, cand < kth1);
+            while (pending) {
+                int src = __ffs(pending) - 1;
+                pending &= pending - 1;
+                float x = __shfl_sync(0xFFFFFFFFu, cand, src);
+                // Insert x into the ascending list: lanes holding values > x shift up by one.
+                float prev = __shfl_up_sync(0xFFFFFFFFu, list, 1);
+                if (lane == 0) prev = -INFINITY;
+                if (list > x) list = fmaxf(prev, x);
+                kth1 = __shfl_sync(0xFFFFFFFFu, list, k);
+                pending &= __ballot_sync(0xFFFFFFFFu, cand < kth1);
+            }
+        });
+        v = __shfl_sync(0xFFFFFFFFu, list, k);
+        a = __shfl_sync(0xFFFFFFFFu, list, k - 1);
+        if (strict && a < v) {
+            // k values strictly below v → exactly the k nearest are kept; no count scan.
+            float tau = a + 0.5f * (v - a);
+            if (tau >= v) tau = a;  // a, v adjacent floats
+            if (lane == 0) {
+                thresholds[warp_id] = tau;
+                neighbor_counts[warp_id] = k;
+            }
+            return;
+        }
+    } else {
+        __shared__ int s_hist[WARPS_PER_BLOCK_SELECT][RADIX_BINS];
+        int* hist = s_hist[threadIdx.x >> 5];
+        uint32_t prefix = 0;
+        int rank = k + 1;  // 1-based rank of the wanted value among the remaining candidates
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            for (int b = lane; b < RADIX_BINS; b += 32) hist[b] = 0;
+            __syncwarp();
+            uint32_t hi_mask = (shift == 24) ? 0u : (0xFFFFFFFFu << (shift + 8));
+            scan([&](bool is_nbr, float d2) {
+                uint32_t bits = __float_as_uint(d2);
+                if (is_nbr && ((bits ^ prefix) & hi_mask) == 0)
+                    atomicAdd(&hist[(bits >> shift) & 0xFF], 1);
+            });
+            __syncwarp();
+            // Each lane owns 8 consecutive bins; find the bin where the running count reaches rank.
+            int lane_sum = 0;
+            for (int b = 0; b < 8; b++) lane_sum += hist[lane * 8 + b];
+            int incl = lane_sum;
+            for (int off = 1; off < 32; off <<= 1) {
+                int t = __shfl_up_sync(0xFFFFFFFFu, incl, off);
+                if (lane >= off) incl += t;
+            }
+            int owner = __ffs(__ballot_sync(0xFFFFFFFFu, incl >= rank)) - 1;
+            int bin = 0, below = 0;
+            if (lane == owner) {
+                int running = incl - lane_sum;
+                for (int b = 0; b < 8; b++) {
+                    int c = hist[lane * 8 + b];
+                    if (running + c >= rank) { bin = lane * 8 + b; break; }
+                    running += c;
+                }
+                below = running;
+            }
+            bin   = __shfl_sync(0xFFFFFFFFu, bin, owner);
+            below = __shfl_sync(0xFFFFFFFFu, below, owner);
+            prefix |= (uint32_t)bin << shift;
+            rank -= below;
+            __syncwarp();  // all lanes done reading hist before the next pass clears it
+        }
+        v = __uint_as_float(prefix);
+    }
+
+    // Final scan: count / bound the values around v.
+    float tau_ns = v + MAX_NEIGHBORS_DEGENERACY_TOL;
+    int n_less = 0, n_eq = 0, n_le_ns = 0;
+    float max_below = -INFINITY;
+    scan([&](bool is_nbr, float d2) {
+        if (!is_nbr) return;
+        if (d2 < v) { n_less++; max_below = fmaxf(max_below, d2); }
+        if (d2 == v) n_eq++;
+        if (d2 <= tau_ns) n_le_ns++;
+    });
+    for (int off = 16; off > 0; off >>= 1) {
+        n_less    += __shfl_xor_sync(0xFFFFFFFFu, n_less, off);
+        n_eq      += __shfl_xor_sync(0xFFFFFFFFu, n_eq, off);
+        n_le_ns   += __shfl_xor_sync(0xFFFFFFFFu, n_le_ns, off);
+        max_below  = fmaxf(max_below, __shfl_xor_sync(0xFFFFFFFFu, max_below, off));
+    }
+
+    float tau;
+    int kept;
+    if (!strict) {
+        tau  = tau_ns;
+        kept = n_le_ns;
+    } else if (n_less == k) {
+        // v is (k+1)-th and exactly k values lie below it: keep those k.
+        a = max_below;
+        tau = a + 0.5f * (v - a);
+        if (tau >= v) tau = a;
+        kept = k;
+    } else {
+        // k-th and (k+1)-th tied at v: keep every tie.
+        tau  = v;
+        kept = n_less + n_eq;
+    }
+    if (lane == 0) {
+        thresholds[warp_id] = tau;
+        neighbor_counts[warp_id] = kept;
     }
 }
 
@@ -470,13 +725,20 @@ struct StageClock {
 // at those indices are used as targets (sources still come from full `pos` + PBC).
 // Output edge endpoints use global atom indices regardless.
 //
+// Truncation (max_num_neighbors): with `thresholds` (caller-supplied tau per target, in
+// target order) only pairs with d2 <= tau are kept; otherwise, if max_num_neighbors > 0,
+// B3.5 computes tau from each target's full neighborhood. See select_threshold_kernel.
+//
 // Returns:
 //   edge_index[2, E]            COO, global atom ids
 //   cell_shifts[E, 3]           PBC image shifts per edge
 //   num_neighbors_image[1]      int64, total edges
-//   neighbor_counts[N_target]   int32, per-target degree (in target_indices order if provided,
-//                               else atom-id order)
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+//   neighbor_counts[N_target]   int32, per-target kept degree (in target_indices order if
+//                               provided, else atom-id order)
+//   thresholds[N_target]        float32 tau per target (same order); undefined when nothing
+//                               is truncated (max_num_neighbors == 0 and no thresholds given)
+// CountsOnly / SelectOnly return empty placeholders for the three edge outputs.
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 radius_graph_pbc_cuda_impl_ex(
     at::Tensor pos,       // [N, 3] float32 CUDA
     at::Tensor cell,      // [3, 3] float32
@@ -485,7 +747,8 @@ radius_graph_pbc_cuda_impl_ex(
     int64_t max_num_neighbors,
     bool enforce_max_strictly,
     c10::optional<at::Tensor> target_indices,  // [N_target] int64, nullopt = all atoms
-    bool counts_only
+    c10::optional<at::Tensor> thresholds,      // [N_target] float32, nullopt = compute if k > 0
+    RadiusGraphStage stage
 ) {
     at::cuda::CUDAGuard device_guard(pos.device());
     auto stream = at::cuda::getCurrentCUDAStream();
@@ -504,7 +767,10 @@ radius_graph_pbc_cuda_impl_ex(
             at::empty({2, 0}, opts_long),
             at::empty({0, 3}, opts_float),
             at::zeros({1}, opts_long),
-            at::zeros({N_target}, opts_int)
+            at::zeros({N_target}, opts_int),
+            thresholds.has_value() ? thresholds.value()
+            : max_num_neighbors > 0 ? at::full({N_target}, INFINITY, opts_float)
+                                    : at::Tensor()
         );
     }
 
@@ -630,7 +896,10 @@ radius_graph_pbc_cuda_impl_ex(
             at::empty({2, 0}, opts_long),
             at::empty({0, 3}, opts_float),
             at::zeros({1}, opts_long),
-            at::zeros({N_target}, opts_int)
+            at::zeros({N_target}, opts_int),
+            thresholds.has_value() ? thresholds.value()
+            : max_num_neighbors > 0 ? at::full({N_target}, INFINITY, opts_float)
+                                    : at::Tensor()
         );
     }
 
@@ -771,10 +1040,16 @@ radius_graph_pbc_cuda_impl_ex(
     // B3: Count neighbors (one thread per target atom — more efficient than warp-per-atom
     // for sparse systems where most cells have < 1 atom on average, as warp-per-atom
     // would require 32× more GPU waves for the same compute).
-    // No truncation: every neighbor within the cutoff is counted and emitted
-    // (max_num_neighbors == 0 for all current callers).
+    // With caller-supplied thresholds the count is already the kept count (d2 <= tau);
+    // otherwise it is the full degree, which B3.5 then reduces when max_num_neighbors > 0.
     int padding_size = (int)std::floor(radius / grid_resolution) + 1;
     float radius_sq = radius * radius;
+
+    // Per-target tau in sorted-target order (undefined = no truncation).
+    at::Tensor thresholds_sorted;
+    if (thresholds.has_value()) {
+        thresholds_sorted = thresholds.value().index_select(0, sort_perm_in_subset).contiguous();
+    }
 
     auto neighbor_counts = at::empty({N_target}, opts_int);
     {
@@ -790,23 +1065,58 @@ radius_graph_pbc_cuda_impl_ex(
             cell_end_t.data_ptr<int>(),
             grid_nx, grid_ny, grid_nz,
             padding_size, radius_sq, N_target,
+            thresholds_sorted.defined() ? thresholds_sorted.data_ptr<float>() : nullptr,
             neighbor_counts.data_ptr<int>()
         );
     }
     clk.lap(stream.stream());  // B3: count_neighbors (single-thread)
 
-    // ===== Counts-only fast path =====
+    // B3.5: per-target threshold for max_num_neighbors (warp per target; targets with
+    // degree <= k exit at once). Overwrites neighbor_counts with the kept count.
+    if (!thresholds.has_value() && max_num_neighbors > 0) {
+        thresholds_sorted = at::empty({N_target}, opts_float);
+        int k = (int)std::min<int64_t>(max_num_neighbors, INT32_MAX);
+        int gs = (N_target + WARPS_PER_BLOCK_SELECT - 1) / WARPS_PER_BLOCK_SELECT;
+        auto launch = [&](auto kernel) {
+            kernel<<<gs, BLOCK_SIZE_SELECT, 0, stream>>>(
+                pos_wrapped.contiguous().data_ptr<float>(),
+                sorted_source_pos.data_ptr<float>(),
+                target_cell_x.data_ptr<int>(),
+                target_cell_y.data_ptr<int>(),
+                target_cell_z.data_ptr<int>(),
+                cell_start_t.data_ptr<int>(),
+                cell_end_t.data_ptr<int>(),
+                grid_nx, grid_ny, grid_nz,
+                padding_size, radius_sq, N_target,
+                k, enforce_max_strictly,
+                neighbor_counts.data_ptr<int>(),
+                thresholds_sorted.data_ptr<float>()
+            );
+        };
+        if (k <= WARP_TOPK_MAX_K) launch(select_threshold_kernel<true>);
+        else                      launch(select_threshold_kernel<false>);
+        clk.lap(stream.stream());  // B3.5: select_threshold
+    }
+
+    // Un-sort per-target outputs: kernels write in sorted-target order; the caller expects
+    // value i to belong to target_indices[i] (or atom i in legacy mode).
+    auto inverse_perm = sort_perm_in_subset.argsort();
+    auto to_user_order = [&](const at::Tensor& t) {
+        return t.defined() ? t.index_select(0, inverse_perm) : t;
+    };
+
+    // ===== Counts-only / select-only fast path =====
     // Skip prefix-sum / CPU sync / edge buffer / B4 write kernel entirely.
-    // Used by Mode A refresh: only per-target degree is needed; edges get
-    // built later by Mode B at radius r.
-    if (counts_only) {
-        auto inverse_perm = sort_perm_in_subset.argsort();
-        auto neighbor_counts_user = neighbor_counts.index_select(0, inverse_perm);
+    // CountsOnly: Mode A refresh / partition weights need only the per-target degree.
+    // SelectOnly: the first pass of a distributed build, whose tau is exchanged for ghosts.
+    // (The cell-list stages above still sync for sizes; only the edge-count sync is skipped.)
+    if (stage != RadiusGraphStage::Full) {
         return std::make_tuple(
             at::empty({2, 0}, opts_long),
             at::empty({0, 3}, opts_float),
             at::zeros({1}, opts_long),
-            neighbor_counts_user
+            to_user_order(neighbor_counts),
+            to_user_order(thresholds_sorted)
         );
     }
 
@@ -826,16 +1136,14 @@ radius_graph_pbc_cuda_impl_ex(
     clk.lap(stream.stream());  // prefix-sum + CPU sync
 
     if (total_edges == 0) {
-        // Un-sort neighbor_counts so the i-th value corresponds to target_indices[i]
-        // (or atom i if target_indices not provided). It's all zeros here, but keep
-        // the convention consistent with the non-empty path.
-        auto inverse_perm = sort_perm_in_subset.argsort();
-        auto neighbor_counts_user = neighbor_counts.index_select(0, inverse_perm);
+        // neighbor_counts is all zeros here, but keep the ordering convention consistent
+        // with the non-empty path.
         return std::make_tuple(
             at::empty({2, 0}, opts_long),
             at::empty({0, 3}, opts_float),
             at::zeros({1}, opts_long),
-            neighbor_counts_user
+            to_user_order(neighbor_counts),
+            to_user_order(thresholds_sorted)
         );
     }
 
@@ -885,6 +1193,7 @@ radius_graph_pbc_cuda_impl_ex(
             cell_end_t.data_ptr<int>(),
             grid_nx, grid_ny, grid_nz,
             padding_size, radius_sq, N_target,
+            thresholds_sorted.defined() ? thresholds_sorted.data_ptr<float>() : nullptr,
             neighbor_counts.data_ptr<int>(),
             neighbor_offsets.data_ptr<int64_t>(),
             target_sort_perm.data_ptr<int64_t>(),
@@ -908,6 +1217,7 @@ radius_graph_pbc_cuda_impl_ex(
             cell_end_t.data_ptr<int>(),
             grid_nx, grid_ny, grid_nz,
             padding_size, radius_sq, N_target,
+            thresholds_sorted.defined() ? thresholds_sorted.data_ptr<float>() : nullptr,
             neighbor_counts.data_ptr<int>(),
             neighbor_offsets.data_ptr<int64_t>(),
             target_sort_perm.data_ptr<int64_t>(),
@@ -925,12 +1235,8 @@ radius_graph_pbc_cuda_impl_ex(
     auto edge_index = at::stack({edge_src, edge_tgt}, 0);
     auto num_neighbors_image = at::tensor({total_edges}, opts_long);
 
-    // Un-sort neighbor_counts: kernel wrote in sorted-target order; user expects
-    // neighbor_counts[i] = degree of target_indices[i] (or atom i in legacy mode).
-    auto inverse_perm = sort_perm_in_subset.argsort();
-    auto neighbor_counts_user = neighbor_counts.index_select(0, inverse_perm);
-
-    return std::make_tuple(edge_index, edge_cell_shift_out, num_neighbors_image, neighbor_counts_user);
+    return std::make_tuple(edge_index, edge_cell_shift_out, num_neighbors_image,
+                           to_user_order(neighbor_counts), to_user_order(thresholds_sorted));
 }
 
 // Legacy 3-tuple wrapper: forwards to _ex without target_indices, discards neighbor_counts.
@@ -945,6 +1251,6 @@ radius_graph_pbc_cuda_impl(
 ) {
     auto result = radius_graph_pbc_cuda_impl_ex(
         pos, cell, pbc, radius, max_num_neighbors, enforce_max_strictly,
-        c10::nullopt, /*counts_only=*/false);
+        c10::nullopt, c10::nullopt, RadiusGraphStage::Full);
     return std::make_tuple(std::get<0>(result), std::get<1>(result), std::get<2>(result));
 }
