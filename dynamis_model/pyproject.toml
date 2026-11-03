@@ -22,7 +22,9 @@ mace-cueq = [
     "cuequivariance-ops-torch-cu12==0.9.1"
 ]
 uma = [
-    "fairchem-core"
+    # Dynamis's vendored UMA backbone targets the fairchem API up to 2.21; 2.22
+    # changed tf32_context_manager and the graph-parallel node_offset plumbing.
+    "fairchem-core<2.22"
 ]
 
 orb = [

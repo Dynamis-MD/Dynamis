@@ -16,6 +16,7 @@ SFCCurveType = dynamis_state_impl.SFCCurveType
 # CUDA radius graph with PBC
 from dynamis_state.radius_graph_pbc_cuda import radius_graph_pbc_cuda
 from dynamis_state.state_wrapper import TorchDistEnv
+from dynamis_state.deform import deform_state, set_state_cell
 
 # Phase 5: graph-aware distributed halo builder (no NCCL halo exchange)
 from dynamis_state.dist_graph_builder import (

@@ -25,6 +25,12 @@ import torch
 from dynamis_model.comm.exchanger import GPUDirectExchanger
 from dynamis_model.comm.feature_push import FeaturePushToExchange
 from dynamis_model.potential import DynamisModel
+from dynamis_model.strain import (
+    apply_strain,
+    strain_cell,
+    stress_from_strain_grad,
+    zero_strain,
+)
 from dynamis_model.units import EV_PER_A_TO_AMU_A_PER_FS2
 from dynamis_state import (
     DynamisState,
@@ -555,7 +561,9 @@ class MACEModel(DynamisModel):
         }
         self._static_cache_ready = True
 
-    def _build_structural_view(self, state: DynamisState) -> MACEStructuralView:
+    def _build_structural_view(
+        self, state: DynamisState, strain: Optional[torch.Tensor] = None
+    ) -> MACEStructuralView:
         self._build_static_partition_cache(state)
         local_positions = (
             state.local_molecular_info.atom_positions.detach()
@@ -563,14 +571,24 @@ class MACEModel(DynamisModel):
             .clone()
             .requires_grad_(True)
         )
+        # The strain is applied before the exchange so ghosts carry their
+        # owner's strained coordinates; forces still differentiate the leaf.
+        strained_positions = local_positions
+        if strain is not None:
+            strained_positions, _ = apply_strain(
+                local_positions,
+                state.sim_config.cell,
+                strain,
+                state.sim_config.pbc,
+            )
         if self.exchange_enabled:
             exchanged_positions = FeaturePushToExchange.apply(
-                local_positions,
+                strained_positions,
                 state,
                 self.position_exchanger,
             )
         else:
-            exchanged_positions = local_positions
+            exchanged_positions = strained_positions
         expected_total = int(self._static_cache["expected_total"].item())
         if exchanged_positions.shape[0] != expected_total:
             raise ValueError("Structural rows disagree with Dynamis recv metadata.")
@@ -597,7 +615,10 @@ class MACEModel(DynamisModel):
         return edge_index.long(), -cell_offsets
 
     def _build_owned_graph(
-        self, view: MACEStructuralView, state: DynamisState
+        self,
+        view: MACEStructuralView,
+        state: DynamisState,
+        strain: Optional[torch.Tensor] = None,
     ) -> MACEOwnedGraph:
         edge_index, unit_shifts = self._radius_graph(view.exchanged_positions, state)
         pre_filter_edge_count = int(edge_index.shape[1])
@@ -605,6 +626,8 @@ class MACEModel(DynamisModel):
         edge_index = edge_index[:, owned_destination].contiguous()
         unit_shifts = unit_shifts[owned_destination].to(dtype=COMPUTE_DTYPE)
         cell = state.sim_config.cell.reshape(3, 3).to(dtype=COMPUTE_DTYPE)
+        if strain is not None:
+            cell = strain_cell(cell, strain, state.sim_config.pbc)
         shifts = torch.matmul(unit_shifts, cell)
         batch_dict = {
             "positions": view.exchanged_positions,
@@ -639,9 +662,35 @@ class MACEModel(DynamisModel):
         )
         return -local_grad
 
-    def __call__(self, state: DynamisState, *args: Any, **kwargs: Any):
-        view = self._build_structural_view(state)
-        graph = self._build_owned_graph(view, state)
+    @staticmethod
+    def _recover_forces_and_strain_grad(
+        owned_energy: torch.Tensor,
+        view: MACEStructuralView,
+        strain: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        local_grad, strain_grad = torch.autograd.grad(
+            owned_energy, [view.local_positions, strain], allow_unused=False
+        )
+        return -local_grad, strain_grad
+
+    def __call__(
+        self,
+        state: DynamisState,
+        *args: Any,
+        compute_stress: bool = False,
+        **kwargs: Any,
+    ):
+        """Return ``(energy, forces)``, or ``(energy, forces, stress)`` when
+        ``compute_stress`` is set. Stress is the full ``[3, 3]`` strain
+        derivative of the total energy over the cell volume, summed over ranks
+        and identical on all of them (see ``dynamis_model.strain``)."""
+        strain = (
+            zero_strain(state.local_molecular_info.atom_positions.device, COMPUTE_DTYPE)
+            if compute_stress
+            else None
+        )
+        view = self._build_structural_view(state, strain)
+        graph = self._build_owned_graph(view, state, strain)
         self.runtime.begin_forward(state, self.exchange_enabled)
         try:
             outputs = self.runtime(graph.batch_dict)
@@ -650,10 +699,18 @@ class MACEModel(DynamisModel):
             # scaling and the two can never fall out of step. Matches UMAModel
             # and ORBModel, which return MD units too.
             owned_energy = outputs["owned_local_energy"] * EV_PER_A_TO_AMU_A_PER_FS2
-            owned_forces = self._recover_forces(owned_energy, view)
+            if strain is None:
+                owned_forces = self._recover_forces(owned_energy, view)
+            else:
+                owned_forces, strain_grad = self._recover_forces_and_strain_grad(
+                    owned_energy, view, strain
+                )
         finally:
             self.runtime.end_forward()
-        return owned_energy.detach(), owned_forces.detach()
+        if strain is None:
+            return owned_energy.detach(), owned_forces.detach()
+        stress = stress_from_strain_grad(strain_grad.detach(), state.sim_config.cell)
+        return owned_energy.detach(), owned_forces.detach(), stress
 
 
 __all__ = [

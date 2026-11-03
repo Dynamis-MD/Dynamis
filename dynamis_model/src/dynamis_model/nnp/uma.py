@@ -22,6 +22,11 @@ try:
         InferenceSettings,
         guess_inference_settings,
     )
+    from fairchem.core.units.mlip_unit.api.inference import (
+        DEFAULT_CHARGE,
+        DEFAULT_SPIN,
+        DEFAULT_SPIN_OMOL,
+    )
     from fairchem.core.units.mlip_unit.utils import tf32_context_manager
     from fairchem.core.units.mlip_unit.single_atom_patch import (
         single_atom_prediction_from_lookup,
@@ -32,6 +37,7 @@ except ImportError as e:
 from dynamis_model.potential import DynamisModel
 from dynamis_model.comm.exchanger import Exchanger, GPUDirectExchanger
 from dynamis_model.comm.feature_push import FeaturePushToExchange
+from dynamis_model.strain import strain_grad_from_gradients, stress_from_strain_grad
 from dynamis_state import (
     DynamisState,
     PartitionMessagePassingInfo,
@@ -649,6 +655,12 @@ class MaskedHeadWrapper(nn.Module):
     def __init__(self, original_head):
         super().__init__()
         self.original_head = original_head
+        # Side channel for UMAModel.__call__(compute_stress=True). When set, the
+        # force gradient also differentiates the cell (in the same autograd call,
+        # which frees the graph), and dE/dcell lands in `cell_grad` in the
+        # network's normalised units, like the forces it is computed beside.
+        self.want_cell_grad = False
+        self.cell_grad = None
 
     def __getattr__(self, name):
         try:
@@ -689,15 +701,21 @@ class MaskedHeadWrapper(nn.Module):
 
             if data.pos.requires_grad:
                 # Calculate gradient of masked energy w.r.t all positions (local + ghost)
-                correct_forces = (
-                    -1
-                    * torch.autograd.grad(
-                        local_energy,
-                        data.pos,
-                        # create_graph=self.training, # Retain graph if training
-                        # retain_graph=True
-                    )[0]
+                wrt = [data.pos]
+                if self.want_cell_grad:
+                    assert data.cell.requires_grad, (
+                        "stress needs the cell in the autograd graph "
+                        "(regress_config.stress)"
+                    )
+                    wrt.append(data.cell)
+                grads = torch.autograd.grad(
+                    local_energy,
+                    wrt,
+                    # create_graph=self.training, # Retain graph if training
+                    # retain_graph=True
                 )
+                self.cell_grad = grads[1] if self.want_cell_grad else None
+                correct_forces = -1 * grads[0]
                 outputs[forces_key] = correct_forces
         else:
             outputs = self.original_head(data, emb)
@@ -882,7 +900,20 @@ class UMAModel(DynamisModel):
         charge: torch.Tensor | None = None,
         spin: torch.Tensor | None = None,
         device: Literal["cuda", "cpu"] | None = None,
+        *,
+        compute_stress: bool = False,
     ):
+        """Return ``(energy, forces)``, or ``(energy, forces, stress)`` when
+        ``compute_stress`` is set.
+
+        UMA's head differentiates the rank-local energy with respect to the
+        full local + ghost positions and frees the graph, so a strain leaf
+        cannot be added from outside. Stress is assembled from the virial
+        identity instead: dE/d eps = x^T dE/dx + h^T dE/dh, where dE/dx is the
+        local force after the ghost gradients have been routed to their owners
+        and dE/dh is the cell gradient from the same autograd call
+        (``dynamis_model.strain``).
+        """
         self.main_model.eval()
         device = device or self.device
         self.main_model.backbone._distributed_state = distributed_state
@@ -932,10 +963,17 @@ class UMAModel(DynamisModel):
         batch = torch.zeros(num_local, dtype=torch.long, device=device)
         datasets = self.dataset
         num_systems = int(batch.max().item()) + 1
+        # fairchem's defaults: charge 0; spin multiplicity 1 for omol, 0 otherwise
+        # (fairchem.core.units.mlip_unit.api.inference.validate_uma_atoms_data).
         if charge is None:
-            charge = torch.zeros(num_systems, dtype=torch.long, device=device)
+            charge = torch.full(
+                (num_systems,), DEFAULT_CHARGE, dtype=torch.long, device=device
+            )
         if spin is None:
-            spin = torch.ones(num_systems, dtype=torch.long, device=device)
+            default_spin = DEFAULT_SPIN_OMOL if datasets == "omol" else DEFAULT_SPIN
+            spin = torch.full(
+                (num_systems,), default_spin, dtype=torch.long, device=device
+            )
 
         data = AtomicData(
             positions,
@@ -958,7 +996,13 @@ class UMAModel(DynamisModel):
         data.to(device)
 
         self.predictor.move_to_device()
-        pred = self.predict(data)
+        head = self.main_model.output_heads["energyandforcehead"].head
+        head.want_cell_grad = compute_stress
+        head.cell_grad = None
+        try:
+            pred = self.predict(data)
+        finally:
+            head.want_cell_grad = False
 
         energy = pred[f"{datasets}_energy"] * _EV_PER_A_TO_AMU_A_PER_FS2
         forces = pred[f"{datasets}_forces"] * _EV_PER_A_TO_AMU_A_PER_FS2
@@ -969,5 +1013,24 @@ class UMAModel(DynamisModel):
         )
         dummy_full.backward(forces)
         local_forces = dummy_local.grad
+        if compute_stress:
+            assert head.cell_grad is not None, "the head did not return dE/dcell"
+            # Normalised -> eV with the energy normaliser (equal to the forces'
+            # for UMA, so forces and cell gradient stay mutually consistent),
+            # then to MD units like the forces.
+            rmsd = float(
+                self.predictor.model.module.tasks[f"{datasets}_energy"].normalizer.rmsd
+            )
+            cell_grad = head.cell_grad.detach() * (rmsd * _EV_PER_A_TO_AMU_A_PER_FS2)
+            strain_grad = strain_grad_from_gradients(
+                local_mol_info.atom_positions,
+                -local_forces.detach(),
+                sim_config.cell,
+                cell_grad,
+                sim_config.pbc,
+            )
+            stress = stress_from_strain_grad(strain_grad, sim_config.cell)
+            head.cell_grad = None
+            return energy.detach(), local_forces.detach(), stress
         return energy.detach(), local_forces.detach()
         return energy.detach(), forces.detach()

@@ -20,6 +20,19 @@ v(t + dt) = v(t + dt/2) + (F(t + dt) / 2m) * dt
 
 **`LangevinIntegrator`** — a first-order explicit integrator that updates velocities over a half timestep, the positions over a full timestep, and then the velocities over a second half timestep, while also incorporating friction and random noise to simulate a controlled heat bath according to the BBK formulation of Langevin mechanics.
 
+**`NPT`** — Langevin dynamics plus the stochastic cell-rescaling (C-rescale) barostat of Bernetti & Bussi (2020). It is pure Python on top of `Langevin` (no new kernel): each coupling draws a log-strain from the pressure error plus a noise term, scales positions and cell by `mu` and velocities by `1/mu`, and so samples the isothermal-isobaric ensemble (including the volume fluctuations that weak-coupling barostats suppress) with no piston mass. It needs a model that returns the stress (`compute_stress=True`). Units are the MD system (amu, Å, fs); `dynamis_integrator.units` provides `KB`, `GPA` and `BAR`.
+
+```python
+from dynamis_integrator import NPT
+from dynamis_integrator.units import KB, BAR
+
+integrator = NPT(
+    dt=1.0, gamma=0.01, kT=300 * KB,        # fs, 1/fs, MD energy
+    pressure=1 * BAR, tau_p=1000.0,          # target pressure, barostat time (fs)
+    compressibility=1e-6 / BAR,              # ~1e-6/bar for Si, 4.5e-5/bar for water
+)
+```
+
 ---
 
 ## Installation
