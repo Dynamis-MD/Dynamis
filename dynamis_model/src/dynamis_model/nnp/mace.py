@@ -22,7 +22,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import torch
 
-from dynamis_model.comm.exchanger import GPUDirectExchanger
+from dynamis_model.comm.exchanger import Exchanger, GPUDirectExchanger
 from dynamis_model.comm.feature_push import FeaturePushToExchange
 from dynamis_model.potential import DynamisModel
 from dynamis_model.units import EV_PER_A_TO_AMU_A_PER_FS2
@@ -203,10 +203,34 @@ class _RadiusGraphInput:
 ##===================================================
 
 
+def _infer_mace_feature_width(model: Any) -> int:
+    max_dim = 3
+    for product in getattr(model, "products", ()):
+        linear = getattr(product, "linear", None)
+        irreps_out = getattr(linear, "irreps_out", None) or getattr(
+            product, "irreps_out", None
+        )
+        dim = getattr(irreps_out, "dim", None)
+        if isinstance(dim, int) and dim > max_dim:
+            max_dim = dim
+    for readout in getattr(model, "readouts", ()):
+        for attr in ("linear", "linear_1"):
+            lin = getattr(readout, attr, None)
+            irreps_in = getattr(lin, "irreps_in", None)
+            dim = getattr(irreps_in, "dim", None)
+            if isinstance(dim, int) and dim > max_dim:
+                max_dim = dim
+    return max_dim
+
+
 class MACEScaleShiftRuntime(torch.nn.Module):
     """Explicit runtime wrapper for the distributed MACE forward path."""
 
-    def __init__(self, model: torch.nn.Module) -> None:
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        exchanger: Optional[Exchanger] = None,
+    ) -> None:
         super().__init__()
         self.model = model
         self._state: Optional[DynamisState] = None
@@ -214,17 +238,21 @@ class MACEScaleShiftRuntime(torch.nn.Module):
         self._feature_partition_info: Optional[PartitionMessagePassingInfo] = None
         self._feature_device: Optional[torch.device] = None
         self._feature_width: Optional[int] = None
-        self._feature_exchanger = GPUDirectExchanger()
+        self._feature_exchanger: Exchanger = (
+            exchanger if exchanger is not None else GPUDirectExchanger()
+        )
 
     def configure_feature_exchange_runtime(
         self,
         partition_info: PartitionMessagePassingInfo,
         device: torch.device,
+        exchanger: Optional[Exchanger] = None,
     ) -> None:
         self._feature_partition_info = partition_info
         self._feature_device = device
         self._feature_width = None
-        self._feature_exchanger = GPUDirectExchanger()
+        if exchanger is not None:
+            self._feature_exchanger = exchanger
 
     def begin_forward(self, state: DynamisState, exchange_enabled: bool) -> None:
         self._state = state
@@ -248,7 +276,11 @@ class MACEScaleShiftRuntime(torch.nn.Module):
             raise ValueError(
                 "Feature exchange width changed across interaction layers."
             )
-        if self._feature_exchanger.is_ipc_setup:
+        if (
+            self._feature_exchanger.is_ipc_setup
+            and self._feature_exchanger.max_feature_dim is not None
+            and feature_width <= self._feature_exchanger.max_feature_dim
+        ):
             return
         partition_info = self._feature_partition_info or state.local_partition_info
         device = self._feature_device or node_feats.device
@@ -274,10 +306,9 @@ class MACEScaleShiftRuntime(torch.nn.Module):
         num_local = int(state.local_molecular_info.num_atoms)
         self._ensure_feature_exchanger_ready(node_feats, state)
         # The actual feature exchange point between layers
-        exchanged = FeaturePushToExchange.apply(
+        exchanged = self._feature_exchanger.push(
             node_feats[:num_local].contiguous(),
             state,
-            self._feature_exchanger,
         )
         return exchanged.to(dtype=node_feats.dtype)
 
@@ -374,6 +405,7 @@ class MACEModel(DynamisModel):
         model: torch.nn.Module,
         atomic_number_map: Optional[Mapping[int, int]] = None,
         head_name: Optional[str] = None,
+        exchanger: Optional[Exchanger] = None,
     ) -> None:
         super().__init__()
         _require_mace()
@@ -382,9 +414,16 @@ class MACEModel(DynamisModel):
         self.head_name = resolve_model_head_name(self.model, head_name)
         self.atomic_number_map = dict(atomic_number_map or {})
         self.cutoff = float(self.model.r_max.detach().cpu().item())
-        self.runtime = MACEScaleShiftRuntime(self.model)
-        self.position_exchanger = GPUDirectExchanger()
-        self.atom_type_exchanger = GPUDirectExchanger()
+        self.max_feature_dim = _infer_mace_feature_width(self.model)
+        if exchanger is None:
+            self.exchanger: Exchanger = GPUDirectExchanger(
+                max_feature_dim=self.max_feature_dim
+            )
+        elif isinstance(exchanger, type):
+            self.exchanger = exchanger(max_feature_dim=self.max_feature_dim)
+        else:
+            self.exchanger = exchanger
+        self.runtime = MACEScaleShiftRuntime(self.model, exchanger=self.exchanger)
         self.exchange_enabled = False
         self.partition_validation: Dict[str, Any] = {}
         self._partition_info_id: Optional[int] = None
@@ -392,6 +431,14 @@ class MACEModel(DynamisModel):
         self._static_cache_ready = False
         self._static_cache: Dict[str, torch.Tensor] = {}
         self._atomic_number_lookup_by_device: Dict[str, torch.Tensor] = {}
+
+    @property
+    def position_exchanger(self) -> Exchanger:
+        return self.exchanger
+
+    @property
+    def atom_type_exchanger(self) -> Exchanger:
+        return self.exchanger
 
     @staticmethod
     def _validate_model_contract(model: Any) -> None:
@@ -440,23 +487,23 @@ class MACEModel(DynamisModel):
         self.partition_validation = validate_partition_info(partition_info, world_size)
         total_send = self.partition_validation["total_send"]
         total_recv = self.partition_validation["total_recv"]
-        self.position_exchanger = GPUDirectExchanger()
-        self.atom_type_exchanger = GPUDirectExchanger()
-        self.runtime.configure_feature_exchange_runtime(partition_info, device)
+        self.runtime.configure_feature_exchange_runtime(
+            partition_info, device, exchanger=self.exchanger
+        )
         self._partition_info_id = id(partition_info)
         self._partition_device = device
         self._static_cache_ready = False
         self._static_cache = {}
         self._atomic_number_lookup_by_device = {}
         if total_send == 0 and total_recv == 0:
+            self.exchanger.reset_buffers()
             self.exchange_enabled = False
             return
         if total_send == 0 or total_recv == 0:
             raise RuntimeError(
                 "Asymmetric halo traffic cannot form a local Dynamis view."
             )
-        self.position_exchanger.setup_exchanger(3, partition_info, device)
-        self.atom_type_exchanger.setup_exchanger(1, partition_info, device)
+        self.exchanger.setup_exchanger(self.max_feature_dim, partition_info, device)
         self.exchange_enabled = True
 
     def _current_partition_is_initialized(self, state: DynamisState) -> bool:
@@ -513,15 +560,7 @@ class MACEModel(DynamisModel):
         )
         if self.exchange_enabled:
             with torch.no_grad():
-                exchanged_types = (
-                    FeaturePushToExchange.apply(
-                        local_types.float().unsqueeze(-1),
-                        state,
-                        self.atom_type_exchanger,
-                    )
-                    .squeeze(-1)
-                    .long()
-                )
+                exchanged_types = self.exchanger.push(local_types, state).long()
         else:
             exchanged_types = local_types
         mapped_atomic_numbers = self._map_atomic_numbers(exchanged_types)
@@ -564,11 +603,7 @@ class MACEModel(DynamisModel):
             .requires_grad_(True)
         )
         if self.exchange_enabled:
-            exchanged_positions = FeaturePushToExchange.apply(
-                local_positions,
-                state,
-                self.position_exchanger,
-            )
+            exchanged_positions = self.exchanger.push(local_positions, state)
         else:
             exchanged_positions = local_positions
         expected_total = int(self._static_cache["expected_total"].item())
