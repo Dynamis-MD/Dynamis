@@ -41,6 +41,15 @@ KEY FACTS (verified against orb-models source):
 
 The cleanest ground truth is orbff.predict(graph, split=False) on the full
 system, built with the SAME adapter the model ships with.
+
+Two cases:
+  * inf_omat on 20 random atoms — max_num_neighbors=120 never binds.
+  * 20_omat on a jittered 14^3 lattice (~85 neighbours within 6 A) — the
+    k=20 cap binds for every atom, so the graph is Orb's asymmetric kNN graph
+    and ranks need the ghosts' kNN thresholds (pushed with the atom types).
+    The 30.8 A box keeps every rank's local + ghost atoms short of the whole
+    system (asserted); in a smaller box each rank sees every centre's full
+    neighbourhood and the threshold exchange would not be tested at all.
 """
 
 import os
@@ -78,6 +87,44 @@ except ImportError:
     HAS_ORB = False
 
 
+# (model name, system) pairs run by the parity test; see make_system.
+PARITY_CASES = [
+    ("orb_v3_conservative_inf_omat", "random20"),
+    ("orb_v3_conservative_20_omat", "lattice2744"),
+]
+
+
+def make_system(system, device):
+    """Returns (positions, atom_types, cell_length), identical on all ranks (seeded)."""
+    torch.manual_seed(42)
+    if system == "random20":
+        total_atoms, cell_length = 20, 10.0
+        positions = torch.rand((total_atoms, 3), device=device) * cell_length
+    elif system == "lattice2744":
+        # 14^3 sites, 2.2 A apart, jittered by up to 0.5 A: no near-overlaps (ZBL stays
+        # tame), no exact distance ties, kNN sets asymmetric enough that capping per
+        # receiver instead of per sender shows up; ~85 neighbours within 6 A per atom.
+        m, a = 14, 2.2
+        cell_length = m * a
+        g = torch.arange(m, device=device, dtype=torch.float32)
+        sites = torch.stack(torch.meshgrid(g, g, g, indexing="ij"), -1).reshape(-1, 3)
+        jitter = (torch.rand(sites.shape, device=device) - 0.5) * 1.0
+        positions = (sites * a + jitter) % cell_length
+        total_atoms = positions.shape[0]
+    else:
+        raise ValueError(system)
+    atom_types = torch.randint(1, 10, (total_atoms,), device=device, dtype=torch.long)
+    return positions, atom_types, cell_length
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _teardown_process_group():
+    # One process group for all parametrized cases (see the end of the test).
+    yield
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
 def setup_distributed():
     rank = int(os.environ.get("RANK", 0))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -101,13 +148,14 @@ def setup_distributed():
 
 
 @pytest.mark.skipif(not HAS_ORB, reason="orb_models is not installed")
-def test_orb_distributed_parity():
+@pytest.mark.parametrize("model_name,system", PARITY_CASES)
+def test_orb_distributed_parity(model_name, system):
     rank, local_rank, world_size, nnodes = setup_distributed()
     if world_size < 2 and os.environ.get("ORB_ALLOW_SINGLE_RANK") != "1":
         pytest.skip("Parity test requires at least 2 GPUs. Run with torchrun.")
 
     device = "cuda"
-    MODEL_NAME = "orb_v3_conservative_inf_omat"
+    MODEL_NAME = model_name
     CUTOFF = 6.0  # orb-v3 uses a 6 A cutoff
 
     # -----------------------------------------------------------------
@@ -129,14 +177,8 @@ def test_orb_distributed_parity():
     # -----------------------------------------------------------------
     # 2. Global system — identical on all ranks (seeded)
     # -----------------------------------------------------------------
-    total_atoms = 20
-    cell_length = 10.0
-    torch.manual_seed(42)
-
-    global_positions = torch.rand((total_atoms, 3), device=device) * cell_length
-    global_atom_types = torch.randint(
-        1, 10, (total_atoms,), device=device, dtype=torch.long
-    )
+    global_positions, global_atom_types, cell_length = make_system(system, device)
+    total_atoms = global_positions.shape[0]
     global_cell = torch.eye(3, device=device) * cell_length
     global_pbc = torch.tensor([True, True, True], device=device)
 
@@ -164,6 +206,8 @@ def test_orb_distributed_parity():
     sim_config.pbc = global_pbc
     sim_config.cutoff = CUTOFF
     sim_config.ghost_cutoff_buffer = 0.5
+    sim_config.max_num_neighbors = dist_model.max_num_neighbors
+    sim_config.enforce_max_strictly = dist_model.enforce_max_strictly
 
     partitioner = KDTreePartitioner()
     partition_info = partitioner.partition(global_mol, env)
@@ -171,6 +215,13 @@ def test_orb_distributed_parity():
 
     if dist.is_initialized() and dist.get_world_size() > 1:
         dist.all_reduce(partition_info.global_send_recv_matrix, op=dist.ReduceOp.SUM)
+
+    n_seen = partition_info.partition_indices.numel() + partition_info.recv_ghost_indices.numel()
+    if world_size > 1 and dist_model.max_num_neighbors < total_atoms:
+        assert n_seen < total_atoms, (
+            f"rank {rank} sees all {total_atoms} atoms (local + ghost): the box is too small "
+            "for the kNN threshold exchange to matter"
+        )
 
     local_mol = MolecularInfo()
     local_mol.atom_positions = global_mol.atom_positions[
@@ -306,8 +357,8 @@ def test_orb_distributed_parity():
     assert torch.isfinite(local_forces).all(), "local_forces has NaN/Inf"
     if rank == 0:
         print("Sanity checks passed")
-
-    dist.destroy_process_group()
+    # The process group stays up for the next parametrized case: tearing it down and
+    # re-initialising in the same process races NCCL's bootstrap between ranks.
 
 
 if __name__ == "__main__":
@@ -315,4 +366,6 @@ if __name__ == "__main__":
         print(
             "Run with: torchrun --nproc_per_node=2 dynamis_model/tests/test_orb_model.py"
         )
-    test_orb_distributed_parity()
+    for model_name, system in PARITY_CASES:
+        test_orb_distributed_parity(model_name, system)
+    dist.destroy_process_group()

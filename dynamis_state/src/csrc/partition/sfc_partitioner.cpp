@@ -13,8 +13,6 @@
 
 namespace dynamis_state {
 
-static constexpr int64_t PARTITION_MAX_NUM_NEIGHBORS = 1000;
-
 // ---------------------------------------------------------------------------
 // CPU fallback: Morton key computation (21-bit, bit-interleave loop)
 // ---------------------------------------------------------------------------
@@ -217,14 +215,21 @@ PartitionMessagePassingInfo SFCPartitioner::partition(const MolecularInfo &state
 
     // Build graph at cutoff radius (timed inside as "build_graph")
     auto graph_result =
-            radius_graph_pbc(pos.to(torch::kFloat), cell, pbc, cutoff, PARTITION_MAX_NUM_NEIGHBORS,
-                             /*enforce_max_strictly=*/false);
+            radius_graph_pbc(pos.to(torch::kFloat), cell, pbc, cutoff, config.max_num_neighbors,
+                             config.enforce_max_strictly);
     auto edge_idx = std::get<0>(graph_result); // [2, E]
 
-    // Count edges per atom (dst-based)
+    // Count edges per atom (dst-based). With max_num_neighbors the graph is truncated
+    // per dst and no longer symmetric; a model that aggregates on both edge ends (Orb) does
+    // work for in-edges too, so weight by out + in degree. Without truncation keep dst-only
+    // weights (unchanged partitions).
     auto dst = edge_idx[1]; // [E]
     auto edge_counts = torch::zeros({ N }, long_opts);
     edge_counts.scatter_add_(0, dst, torch::ones({ dst.size(0) }, long_opts));
+    if (config.max_num_neighbors > 0) {
+        auto src = edge_idx[0];
+        edge_counts.scatter_add_(0, src, torch::ones({ src.size(0) }, long_opts));
+    }
 
     // Partition using computed weights
     auto info = do_partition(state, env, edge_counts, curve_type_);

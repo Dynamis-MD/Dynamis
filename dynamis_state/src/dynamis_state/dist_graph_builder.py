@@ -15,7 +15,8 @@ Mode A (refresh, 1/K steps):
   6. radius_graph_pbc_ex(pos, r+skin, target=my_outer) → edges_at_r_skin.
   7. Locally extract recv/send/interior from edges via geometric symmetry
      (Fix 1: sort by global atom ID; no NCCL exchange).
-  8. Output edges_at_r (filter r+skin → r).
+  8. Output edges_at_r (filter r+skin → r; with max_num_neighbors > 0, build at r
+     on my_outer ∪ halo as in Mode B so the per-target cap sees the full r-shell).
 
 Mode B (steady, K-1/K steps):
   radius_graph_pbc_ex(pos[my_outer ∪ halo], r, target=my_outer).
@@ -51,7 +52,7 @@ class DistBuildGraphResult:
     my_outer_atoms: torch.Tensor  # [num_local] int64 global ids
     halo_info: _impl.PartitionMessagePassingInfo
     interior_mask: torch.Tensor  # [num_local] bool
-    full_degrees: torch.Tensor  # [N] int32 — r-degrees from last refresh
+    full_degrees: torch.Tensor  # [N] int32 — r-degrees (capped by max_num_neighbors) from last refresh
     halo_recv_global_ids: (
         torch.Tensor
     )  # [total_recv] int64, ordered by peer then atom-id
@@ -242,8 +243,14 @@ class DistGraphBuilder:
       cutoff, ghost_buffer — graph radius (r) and Verlet skin.
       env                  — DistEnvironment.
       refresh_interval     — K. Mode A every K calls (default 100).
-      max_num_neighbors    — passed to radius_graph_pbc_ex (0 = no truncation).
-      enforce_max_strictly — passed to radius_graph_pbc_ex.
+      max_num_neighbors    — per-target nearest-neighbour cap on the output edges
+                             (0 = no truncation); see radius_graph.hpp. Edges are
+                             emitted for dst ∈ my_outer only, so each target's cap is
+                             decided from its full neighbourhood (UMA-style; models that
+                             also need ghost-centred edges are not supported here).
+                             The SFC weights use the capped degree; the halo never
+                             truncates.
+      enforce_max_strictly — hard cap (True) vs fairchem degeneracy tolerance.
       drift_threshold      — if set, force early Mode A when max PBC-min-image
                              drift exceeds this value (Å). Default skin/2.
       process_group        — NCCL group (default WORLD).
@@ -352,7 +359,8 @@ class DistGraphBuilder:
             W,
         )
 
-        # 3. Local r-degrees (count-only kernel; full pos as source)
+        # 3. Local r-degrees (count-only kernel; full pos as source), capped like the
+        #    output edges so the SFC weights match the work
         if my_target_atoms.numel() > 0:
             degrees_local = _impl.radius_graph_pbc_counts_ex(
                 pos_w,
@@ -360,6 +368,8 @@ class DistGraphBuilder:
                 pbc,
                 self.cutoff,
                 my_target_atoms,
+                self.max_num_neighbors,
+                self.enforce_max_strictly,
             )
         else:
             degrees_local = torch.empty(0, dtype=torch.int32, device=device)
@@ -381,14 +391,15 @@ class DistGraphBuilder:
         )
         my_outer_atoms = torch.nonzero(pid_outer.eq(R), as_tuple=False).squeeze(-1)
 
-        # 6. Edge build at r+skin with target=my_outer (full pos as source)
+        # 6. Edge build at r+skin with target=my_outer (full pos as source). Never
+        #    truncated: the halo must cover every pair that can come within r.
         edges_at_r_skin, cell_shifts_skin, _, _ = _impl.radius_graph_pbc_ex(
             pos_w,
             cell,
             pbc,
             self.r_plus_skin,
-            self.max_num_neighbors,
-            self.enforce_max_strictly,
+            0,
+            False,
             my_outer_atoms,
         )
 
@@ -403,15 +414,6 @@ class DistGraphBuilder:
             device,
         )
 
-        # 8. Filter edges r+skin → r as Mode A's output
-        edges_outer, cell_shifts_outer = _filter_edges_to_radius(
-            edges_at_r_skin,
-            cell_shifts_skin,
-            pos_w,
-            cell,
-            self.cutoff,
-        )
-
         # Cache for K-1 Mode B steps
         self._pid_outer = pid_outer
         self._my_outer_atoms = my_outer_atoms
@@ -421,6 +423,20 @@ class DistGraphBuilder:
         self._full_degrees = full_degrees
         self._pos_w_at_refresh = pos_w.detach().clone()
         self._steps_since_refresh = 0
+
+        # 8. Mode A's output edges at r. Without truncation, filter the r+skin edges;
+        #    with it, the cap must see each target's full r-neighbourhood, so build like
+        #    Mode B (my_outer ∪ halo holds all of it).
+        if self.max_num_neighbors > 0:
+            edges_outer, cell_shifts_outer = self._build_outer_edges(pos_w, cell, pbc)
+        else:
+            edges_outer, cell_shifts_outer = _filter_edges_to_radius(
+                edges_at_r_skin,
+                cell_shifts_skin,
+                pos_w,
+                cell,
+                self.cutoff,
+            )
 
         return DistBuildGraphResult(
             edges_outer=edges_outer,
@@ -449,7 +465,27 @@ class DistGraphBuilder:
             self._steps_since_refresh = self.refresh_interval
             return self._mode_a(pos)
 
-        # Build edges at r on (my_outer ∪ halo_recv) with target=my_outer
+        edges_global, cell_shifts = self._build_outer_edges(pos_w, cell, pbc)
+
+        self._steps_since_refresh += 1
+
+        return DistBuildGraphResult(
+            edges_outer=edges_global,
+            cell_shifts_outer=cell_shifts,
+            pid_outer=self._pid_outer,
+            my_outer_atoms=self._my_outer_atoms,
+            halo_info=self._halo_info,
+            interior_mask=self._interior_mask,
+            full_degrees=self._full_degrees,
+            halo_recv_global_ids=self._halo_recv_global_ids,
+            mode=BuildMode.STEADY,
+        )
+
+    def _build_outer_edges(
+        self, pos_w: torch.Tensor, cell: torch.Tensor, pbc: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Edges at r on (my_outer ∪ halo_recv) with target=my_outer, global ids."""
+        device = pos_w.device
         my_full_set = torch.cat([self._my_outer_atoms, self._halo_recv_global_ids])
         local_pos = pos_w.index_select(0, my_full_set).contiguous()
         target_local = torch.arange(
@@ -472,20 +508,7 @@ class DistGraphBuilder:
             src_global = my_full_set.index_select(0, edges_local[0])
             tgt_global = my_full_set.index_select(0, edges_local[1])
             edges_global = torch.stack([src_global, tgt_global], dim=0)
-
-        self._steps_since_refresh += 1
-
-        return DistBuildGraphResult(
-            edges_outer=edges_global,
-            cell_shifts_outer=cell_shifts,
-            pid_outer=self._pid_outer,
-            my_outer_atoms=self._my_outer_atoms,
-            halo_info=self._halo_info,
-            interior_mask=self._interior_mask,
-            full_degrees=self._full_degrees,
-            halo_recv_global_ids=self._halo_recv_global_ids,
-            mode=BuildMode.STEADY,
-        )
+        return edges_global, cell_shifts
 
     # ── Public entry ────────────────────────────────────────────────────────
 

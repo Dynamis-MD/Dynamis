@@ -11,21 +11,37 @@ import importlib.util
 import pytest
 import torch
 
-# Directly load radius_graph_pbc module to avoid baseline's __init__.py import chain
-_RGB_PBC_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "..",
-    "..",
-    "baseline",
-    "local_fairchem",
-    "graph",
-    "radius_graph_pbc.py",
-)
-_spec = importlib.util.spec_from_file_location("_radius_graph_pbc_ref", _RGB_PBC_PATH)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-radius_graph_pbc_v2 = _mod.radius_graph_pbc_v2
+
+def _load_fairchem_radius_graph_pbc():
+    """Load fairchem's graph/radius_graph_pbc.py (the reference) as a standalone module.
+
+    Loading the file directly skips fairchem.core's heavy __init__ import chain; the file
+    itself only needs numpy + torch. Returns None if fairchem-core is not installed.
+    """
+    try:
+        spec = importlib.util.find_spec("fairchem.core")  # imports only the namespace parent
+    except ModuleNotFoundError:
+        return None
+    if spec is None or not spec.submodule_search_locations:
+        return None
+    path = os.path.join(
+        spec.submodule_search_locations[0], "graph", "radius_graph_pbc.py"
+    )
+    if not os.path.exists(path):
+        return None
+    mod_spec = importlib.util.spec_from_file_location("_radius_graph_pbc_ref", path)
+    mod = importlib.util.module_from_spec(mod_spec)
+    mod_spec.loader.exec_module(mod)
+    return mod
+
+
+_ref = _load_fairchem_radius_graph_pbc()
+if _ref is None:
+    pytest.skip(
+        "fairchem-core (reference radius_graph_pbc_v2) not installed",
+        allow_module_level=True,
+    )
+radius_graph_pbc_v2 = _ref.radius_graph_pbc_v2
 
 # Import the CUDA implementation
 import dynamis_state.dynamis_state_impl as _impl
@@ -331,12 +347,7 @@ class TestSelectiveReplication:
 
 
 class TestMaxNeighbors:
-    """Test max_num_neighbors behavior.
-
-    Note: strict truncation (max_num_neighbors > 0) is not implemented — every
-    current caller passes 0 (no limit). The former test_max_neighbors_strict was
-    removed together with the unused sort/truncation kernel.
-    """
+    """Test max_num_neighbors behavior (truncation itself: test_max_neighbors.py)."""
 
     def test_max_neighbors_no_limit(self, device):
         """max_num_neighbors=0 means no limit."""
