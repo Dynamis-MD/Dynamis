@@ -5,8 +5,20 @@ project(
     VERSION 0.1.0
     DESCRIPTION "A distributed state management library for neural network potentials"
     HOMEPAGE_URL "https://github.com/Dynamis-MD/Dynamis"
-    LANGUAGES CXX CUDA
+    LANGUAGES CXX
 )
+
+# The CUDA kernels are optional: without a CUDA compiler, skip building
+# dynamis_integrator_impl and _backend.py falls back to the Triton kernels.
+include(CheckLanguage)
+check_language(CUDA)
+if(NOT CMAKE_CUDA_COMPILER)
+    message(WARNING
+        "No CUDA compiler found: skipping the CUDA integrator kernels. "
+        "dynamis_integrator will use the Triton kernels instead.")
+    return()
+endif()
+enable_language(CUDA)
 
 # No DYNAMIS_TIMING option here: it's inherited from dynamis_state's build via
 # timing_config.hpp, so this project can't silently disagree with it.

@@ -1,5 +1,5 @@
 import torch
-from dynamis_integrator.dynamis_integrator_impl import VerletIntegrator
+from dynamis_integrator._backend import VerletIntegrator
 from dynamis_integrator._data_check import (
     check_devices,
     check_shape_2D,
@@ -16,7 +16,7 @@ class Verlet(DynamisIntegrator):
     def __init__(self, dt: float) -> None:
         super().__init__()
         self.dt = dt
-        self.cpp_integrator = VerletIntegrator()
+        self.integrator_impl = VerletIntegrator()
         self.prev_forces = None
 
     def reset(self) -> None:
@@ -45,7 +45,7 @@ class Verlet(DynamisIntegrator):
         check_shape_2D(pos)
         check_mass_shape(mass, pos)
         check_shapes_match(pos, vel, frc)
-        self.cpp_integrator.halfstep1(pos, vel, frc, mass, dt)
+        self.integrator_impl.halfstep1(pos, vel, frc, mass, dt)
 
     def halfstep2_(
         self,
@@ -69,7 +69,7 @@ class Verlet(DynamisIntegrator):
         check_mass_shape(mass, vel)
         check_shapes_match(vel, frc)
 
-        self.cpp_integrator.halfstep2(vel, frc, mass, dt)
+        self.integrator_impl.halfstep2(vel, frc, mass, dt)
 
     def step(self, dist_state: DynamisState, model: DynamisModel, dt=None):
         """
