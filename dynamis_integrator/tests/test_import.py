@@ -1,4 +1,9 @@
 def test_custom_module_import():
-    from dynamis_integrator import dynamis_integrator_impl
+    from dynamis_integrator import BACKEND
+    from dynamis_integrator._backend import (
+        EulerIntegrator,
+        VerletIntegrator,
+        LangevinIntegrator,
+    )
 
-    from dynamis_integrator.euler import EulerIntegrator
+    assert BACKEND in ("cuda", "triton")

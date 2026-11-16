@@ -13,7 +13,7 @@ This repository is a monorepo of four installable sub-packages, built from a wor
 From the repository root:
 
 ```bash
-uv pip install torch pytest scipy scikit-build-core pybind11
+uv pip install torch triton pytest scipy scikit-build-core pybind11
 uv pip install --no-build-isolation -e ./dynamis_state -e ./dynamis_integrator -e ./dynamis_model -e ./dynamis
 ```
 
@@ -45,7 +45,7 @@ Tests that require CUDA are skipped automatically when no GPU is present.
 ```
 Dynamis/                        # repository root
 ├── dynamis_state/              # C++/CUDA: atom state, partitioning, halo maps
-├── dynamis_integrator/         # C++/CUDA: MD time integration kernels
+├── dynamis_integrator/         # C++/CUDA + Triton: MD time integration kernels
 ├── dynamis_model/              # Python + C++/CUDA: distributed NNP model interface, exchangers
 ├── dynamis/                    # Python: main user-facing entry point
 ├── benchmarks/                 # standalone kernel/communication benchmarks
@@ -73,17 +73,17 @@ Python classes are re-exported at the top level: `from dynamis_state import Mole
 Stubs are generated via `scripts/stub_gen.sh` (runs `pybind11-stubgen`).
 
 ### `dynamis_integrator`
-C++/CUDA extension. Advances positions and velocities by one timestep.
+Advances positions and velocities by one timestep. Implemented: Euler, Verlet, Langevin (BBK).
 
-Interface (`include/dynamis_integrator/integrator.hpp`):
-```
-AbstractDistNNPIntegrator.step(positions, velocities, forces, masses, dt)
-```
-Currently implemented: `EulerIntegrator` (CUDA kernel in `src/csrc/euler_integrator.cu`).
+Two kernel backends with identical class/method names (`EulerIntegrator.step`, `VerletIntegrator.halfstep1/halfstep2`, `LangevinIntegrator.halfstep1/halfstep2`):
+- **CUDA** — C++ extension `dynamis_integrator_impl` (`src/csrc/*.cu`, bound in `src/dynamis_integrator_bindings.cpp`). Only built when CMake finds a CUDA compiler.
+- **Triton** — `src/dynamis_integrator/_kernels.py` (`@triton.jit`, compiled on first use).
 
-To add a new integrator: subclass `AbstractDistNNPIntegrator` in the header → implement `.cu` kernel → add source to `python_add_library` in `CMakeLists.txt` → bind in `src/dynamis_integrator_bindings.cpp` → re-export from `__init__.py`. See `dynamis_integrator/README.md` for the full walkthrough.
+`src/dynamis_integrator/_backend.py` picks CUDA if `dynamis_integrator_impl` imports, else Triton; `dynamis_integrator.BACKEND` reports which. The Python integrators (`euler.py`, `verlet.py`, `langevin.py`) import their kernel classes from `_backend`.
 
-Tests live in `dynamis_integrator/tests/test_euler.py`.
+To add a new integrator, implement it in both backends with the same class/method names (see `dynamis_integrator/README.md`).
+
+Tests live in `dynamis_integrator/tests/` and run against whichever backend is installed.
 
 ### `dynamis_model`
 Pure Python (C++ extension stub present but empty). Defines the model interface.
