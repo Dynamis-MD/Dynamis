@@ -51,13 +51,13 @@ def create_and_run_experiment(num_atoms: int):
         timestep_fs=0.5,
         total_steps=1000,
         cutoff_angstrom=6.0,
-        side_length_angstrom=20.0,
+        side_length_angstrom=60.0,
         ghost_buffer_angstrom=0.5,
         partition_algorithm="sfc_morton",
         # integrator="verlet",
         edge_weighted_partition=True,
         rebalance_interval=100,
-        output_dir="./results",
+        output_dir="./results_cuda",  # change to ./results_triton for the Triton run
         traj_file="trajectory.traj",
         traj_interval=100,
         log_interval=10,
@@ -66,7 +66,9 @@ def create_and_run_experiment(num_atoms: int):
     )
 
     global_molecular_system = generate_synthetic_dataset(
-        num_atoms=1000, box_size=20.0, device=device
+        # CPU on purpose: TrajectoryWriter memcpys atom_types without moving them
+        # off the GPU; setup() moves everything to `device` afterwards.
+        num_atoms=27000, box_size=60.0, device="cpu"
     )
 
     dist_nnp_state = create_dist_sim_state(num_atoms=num_atoms)
@@ -81,9 +83,9 @@ def create_and_run_experiment(num_atoms: int):
         config=sim_config,
         device=device,
     )
-    simulator.initialize_simulator_state(global_molecular_system, device=device)
+    simulator.setup(global_molecular_system)
     torch_distributed_env.barrier()
-    simulator.step(sim_config.timestep_fs)
+    simulator.run()
     torch_distributed_env.barrier()
 
 

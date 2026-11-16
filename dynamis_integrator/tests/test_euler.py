@@ -1,6 +1,6 @@
 import pytest
 import torch
-from dynamis_integrator.dynamis_integrator_impl import EulerIntegrator
+from dynamis_integrator._backend import EulerIntegrator
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA not available"
