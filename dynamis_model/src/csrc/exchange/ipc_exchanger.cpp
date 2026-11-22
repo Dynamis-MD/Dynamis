@@ -57,16 +57,56 @@ bool supports_fabric_handles(int device_id)
             return false;
     }
 
-#if defined(CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED) && defined(CU_MEM_HANDLE_TYPE_FABRIC)
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
+    // Cache the probe result per device — this is called repeatedly during
+    // setup() and allocate_ipc_buffer().
+    static std::mutex probe_mutex;
+    static std::unordered_map<int, bool> probe_cache;
+    {
+        std::lock_guard<std::mutex> lock(probe_mutex);
+        auto it = probe_cache.find(dev);
+        if (it != probe_cache.end())
+            return it->second;
+    }
+
+    bool ok = false;
     cuInit(0);
     int fabric_supported = 0;
     CUresult res = cuDeviceGetAttribute(&fabric_supported,
                                         CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, dev);
     if (res == CUDA_SUCCESS && fabric_supported != 0) {
-        return true;
+        // CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED only reports hardware
+        // capability. Creating a CU_MEM_HANDLE_TYPE_FABRIC allocation *also*
+        // requires the IMEX (Internode Memory Exchange) service to be provisioned
+        // for the job — without it cuMemCreate returns CUDA_ERROR_NOT_PERMITTED
+        // (800). Probe once with a minimal allocation so callers fall back to
+        // legacy CUDA IPC cleanly instead of hard-failing during setup.
+        CUmemAllocationProp prop = {};
+        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+        prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        prop.location.id = dev;
+        prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+
+        size_t granularity = 0;
+        if (cuMemGetAllocationGranularity(&granularity, &prop,
+                                          CU_MEM_ALLOC_GRANULARITY_MINIMUM) == CUDA_SUCCESS &&
+            granularity > 0) {
+            CUmemGenericAllocationHandle probe_handle;
+            if (cuMemCreate(&probe_handle, granularity, &prop, 0) == CUDA_SUCCESS) {
+                cuMemRelease(probe_handle);
+                ok = true;
+            }
+        }
     }
-#endif
+
+    {
+        std::lock_guard<std::mutex> lock(probe_mutex);
+        probe_cache[dev] = ok;
+    }
+    return ok;
+#else
     return false;
+#endif
 }
 
 bool IPCExchanger::supports_fabric_handles(int device_id)
@@ -77,10 +117,10 @@ bool IPCExchanger::supports_fabric_handles(int device_id)
 // ---------------------------------------------------------------------------
 // Thread-safe registry for locally allocated Fabric VMM buffers
 // ---------------------------------------------------------------------------
-#if defined(CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED) && defined(CU_MEM_HANDLE_TYPE_FABRIC)
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
 struct FabricAllocRecord {
     CUmemGenericAllocationHandle alloc_handle;
-    CUDA_MEM_FABRIC_HANDLE fabric_handle;
+    CUmemFabricHandle fabric_handle;
     size_t padded_size;
     int device_id;
 };
@@ -129,7 +169,7 @@ torch::Tensor IPCExchanger::allocate_ipc_buffer(int64_t rows, int64_t cols, int6
     if (num_bytes == 0)
         num_bytes = sizeof(float);
 
-#if defined(CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED) && defined(CU_MEM_HANDLE_TYPE_FABRIC)
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
     if (supports_fabric_handles(static_cast<int>(device_index))) {
         // 1. Describe allocation properties with FABRIC support
         CUmemAllocationProp prop = {};
@@ -152,7 +192,7 @@ torch::Tensor IPCExchanger::allocate_ipc_buffer(int64_t rows, int64_t cols, int6
         check_cu_call(res, "cuMemCreate failed");
 
         // 4. Export to a fabric handle (safe to serialize & send across nodes)
-        CUDA_MEM_FABRIC_HANDLE fabric_handle;
+        CUmemFabricHandle fabric_handle;
         std::memset(&fabric_handle, 0, sizeof(fabric_handle));
         res = cuMemExportToShareableHandle(&fabric_handle, alloc_handle, CU_MEM_HANDLE_TYPE_FABRIC,
                                            0);
@@ -233,11 +273,11 @@ std::vector<uint8_t> IPCExchanger::export_ipc_handle(torch::Tensor buffer)
     TORCH_CHECK(buffer.is_cuda(), "export_ipc_handle: buffer must be on CUDA device");
     TORCH_CHECK(buffer.is_contiguous(), "export_ipc_handle: buffer must be contiguous");
 
-#if defined(CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED) && defined(CU_MEM_HANDLE_TYPE_FABRIC)
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
     FabricAllocRecord record;
     if (lookup_fabric_alloc(buffer.data_ptr(), record)) {
-        std::vector<uint8_t> bytes(sizeof(CUDA_MEM_FABRIC_HANDLE));
-        std::memcpy(bytes.data(), &record.fabric_handle, sizeof(CUDA_MEM_FABRIC_HANDLE));
+        std::vector<uint8_t> bytes(sizeof(CUmemFabricHandle));
+        std::memcpy(bytes.data(), &record.fabric_handle, sizeof(CUmemFabricHandle));
         return bytes;
     }
 #endif
@@ -294,7 +334,7 @@ void IPCExchanger::setup(torch::Tensor x_buffer, torch::Tensor grad_recv_buffer,
     opened_x_ptrs_.assign(world_size, nullptr);
     opened_grad_ptrs_.assign(world_size, nullptr);
 
-#if defined(CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED) && defined(CU_MEM_HANDLE_TYPE_FABRIC)
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
     if (use_fabric_) {
         remote_x_mappings_.assign(world_size, VmmMapping{});
         remote_grad_mappings_.assign(world_size, VmmMapping{});
@@ -324,7 +364,7 @@ void IPCExchanger::setup(torch::Tensor x_buffer, torch::Tensor grad_recv_buffer,
                 size_t padded_size_x =
                         ((num_bytes_x + granularity - 1) / granularity) * granularity;
 
-                CUDA_MEM_FABRIC_HANDLE f_handle;
+                CUmemFabricHandle f_handle;
                 TORCH_CHECK(all_x_handles[r].size() == sizeof(f_handle),
                             "Invalid fabric handle size from rank ", r);
                 std::memcpy(&f_handle, all_x_handles[r].data(), sizeof(f_handle));
@@ -365,7 +405,7 @@ void IPCExchanger::setup(torch::Tensor x_buffer, torch::Tensor grad_recv_buffer,
                 size_t padded_size_grad =
                         ((num_bytes_grad + granularity - 1) / granularity) * granularity;
 
-                CUDA_MEM_FABRIC_HANDLE f_handle;
+                CUmemFabricHandle f_handle;
                 TORCH_CHECK(all_grad_handles[r].size() == sizeof(f_handle),
                             "Invalid fabric grad handle size from rank ", r);
                 std::memcpy(&f_handle, all_grad_handles[r].data(), sizeof(f_handle));
@@ -586,7 +626,7 @@ std::vector<uint8_t> IPCExchanger::create_and_export_sync_handle()
     // Clean up existing counter if present
     if (local_counter_ || local_counter_vaddr_) {
         if (sync_use_fabric_) {
-#if defined(CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED) && defined(CU_MEM_HANDLE_TYPE_FABRIC)
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
             if (local_counter_vaddr_) {
                 cuMemUnmap(local_counter_vaddr_, local_counter_padded_size_);
                 cuMemRelease(local_counter_handle_);
@@ -611,7 +651,7 @@ std::vector<uint8_t> IPCExchanger::create_and_export_sync_handle()
     TORCH_CHECK(err_dev == cudaSuccess, "cudaGetDevice failed: ", cudaGetErrorString(err_dev));
     sync_use_fabric_ = supports_fabric_handles(device_id);
 
-#if defined(CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED) && defined(CU_MEM_HANDLE_TYPE_FABRIC)
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
     if (sync_use_fabric_) {
         CUmemAllocationProp prop = {};
         prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
@@ -630,7 +670,7 @@ std::vector<uint8_t> IPCExchanger::create_and_export_sync_handle()
         res = cuMemCreate(&local_counter_handle_, padded_size, &prop, 0);
         check_cu_call(res, "cuMemCreate (sync) failed");
 
-        CUDA_MEM_FABRIC_HANDLE fabric_handle;
+        CUmemFabricHandle fabric_handle;
         std::memset(&fabric_handle, 0, sizeof(fabric_handle));
         res = cuMemExportToShareableHandle(&fabric_handle, local_counter_handle_,
                                            CU_MEM_HANDLE_TYPE_FABRIC, 0);
@@ -654,8 +694,8 @@ std::vector<uint8_t> IPCExchanger::create_and_export_sync_handle()
         TORCH_CHECK(err_set == cudaSuccess,
                     "cudaMemset (sync) failed: ", cudaGetErrorString(err_set));
 
-        std::vector<uint8_t> bytes(sizeof(CUDA_MEM_FABRIC_HANDLE));
-        std::memcpy(bytes.data(), &fabric_handle, sizeof(CUDA_MEM_FABRIC_HANDLE));
+        std::vector<uint8_t> bytes(sizeof(CUmemFabricHandle));
+        std::memcpy(bytes.data(), &fabric_handle, sizeof(CUmemFabricHandle));
         return bytes;
     }
 #endif
@@ -684,7 +724,7 @@ void IPCExchanger::setup_sync(const std::vector<std::vector<uint8_t>> &all_sync_
 
     // Close / unmap any previously opened remote counters
     if (sync_use_fabric_) {
-#if defined(CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED) && defined(CU_MEM_HANDLE_TYPE_FABRIC)
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
         for (auto &mapping : remote_sync_mappings_) {
             if (mapping.vaddr) {
                 cuMemUnmap(mapping.vaddr, mapping.padded_size);
@@ -705,7 +745,7 @@ void IPCExchanger::setup_sync(const std::vector<std::vector<uint8_t>> &all_sync_
     int device_id = 0;
     cudaGetDevice(&device_id);
 
-#if defined(CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED) && defined(CU_MEM_HANDLE_TYPE_FABRIC)
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
     if (sync_use_fabric_) {
         remote_sync_mappings_.assign(world_size_, VmmMapping{});
 
@@ -726,7 +766,7 @@ void IPCExchanger::setup_sync(const std::vector<std::vector<uint8_t>> &all_sync_
             if (r == rank_)
                 continue;
 
-            CUDA_MEM_FABRIC_HANDLE f_handle;
+            CUmemFabricHandle f_handle;
             TORCH_CHECK(all_sync_handles[r].size() == sizeof(f_handle),
                         "Invalid fabric counter handle size from rank ", r);
             std::memcpy(&f_handle, all_sync_handles[r].data(), sizeof(f_handle));
@@ -862,7 +902,7 @@ void IPCExchanger::teardown()
 {
     // Clean up generation counter
     if (sync_use_fabric_) {
-#if defined(CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED) && defined(CU_MEM_HANDLE_TYPE_FABRIC)
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
         for (auto &mapping : remote_sync_mappings_) {
             if (mapping.vaddr) {
                 cuMemUnmap(mapping.vaddr, mapping.padded_size);
@@ -904,7 +944,7 @@ void IPCExchanger::teardown()
         return;
 
     if (use_fabric_) {
-#if defined(CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED) && defined(CU_MEM_HANDLE_TYPE_FABRIC)
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
         for (auto &mapping : remote_x_mappings_) {
             if (mapping.vaddr) {
                 cuMemUnmap(mapping.vaddr, mapping.padded_size);
