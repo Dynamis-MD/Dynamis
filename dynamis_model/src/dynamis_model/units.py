@@ -2,7 +2,7 @@
 
 Dynamis's MD stack works in atomic mass units, Angstrom and femtoseconds:
 ``dynamis_integrator``'s Verlet/Langevin kernels integrate ``v += f / m * dt``
-with masses taken from ``dynamis_integrator.masses`` (amu), positions in
+with masses taken from ``dynamis_state.ATOMIC_MASSES`` (amu), positions in
 Angstrom and ``dt`` in fs. Forces handed to an integrator must therefore be
 amu * Angstrom / fs^2, and energies amu * Angstrom^2 / fs^2.
 

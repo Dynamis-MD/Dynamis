@@ -126,6 +126,7 @@ python_add_library(dynamis_state_impl
     src/csrc/graph/dist_graph_ops_kernels.cu
     src/csrc/trajectory_reader.cpp
     src/csrc/trajectory_writer.cpp
+    src/csrc/physics.cpp
 )
 
 include(CheckCXXSourceCompiles)

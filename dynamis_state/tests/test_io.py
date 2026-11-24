@@ -9,12 +9,12 @@ import torch.multiprocessing as mp
 import pytest
 
 from dynamis_state import (
+    ATOMIC_MASSES,
     MolecularInfo,
     TrajectoryReader,
     TrajectoryWriter,
     translate_dynamis_to_xyz,
 )
-from dynamis_state.masses import TORCH_ATOMIC_MASSES
 
 # ─── TrajectoryReader.read() ───────────────────────────────────────────────
 
@@ -66,15 +66,20 @@ def test_xyz_velocity_column_aliases(tmp_path, column):
     )
 
 
+# ase.units.fs: one femtosecond in ASE's time unit, A * sqrt(amu / eV)
+ASE_FS = 0.09822694788464063
+
+
 def test_xyz_momenta_column_divided_by_mass(tmp_path):
-    """A momenta column holds p = m*v, so it has to be divided back through by
-    each atom's mass to land in atom_velocities."""
+    """A momenta column holds ASE's p = m*v in amu * sqrt(eV / amu), so it has to
+    be divided back through by each atom's mass and converted to A/fs to land in
+    atom_velocities."""
     xyz = _two_atom_xyz(tmp_path / "momenta.xyz", "momenta")
 
     env, _, _ = TrajectoryReader.read(str(xyz))
 
-    carbon, hydrogen = TORCH_ATOMIC_MASSES[6], TORCH_ATOMIC_MASSES[1]
-    expected = torch.tensor(
+    carbon, hydrogen = ATOMIC_MASSES[6], ATOMIC_MASSES[1]
+    expected = ASE_FS * torch.tensor(
         [
             [0.5 / carbon, 1.5 / carbon, 2.5 / carbon],
             [3.5 / hydrogen, 4.5 / hydrogen, 5.5 / hydrogen],

@@ -16,6 +16,7 @@ import torch.distributed as dist
 from dynamis import Simulator
 from dynamis_state import TorchDistEnv
 from dynamis_integrator import Verlet
+from dynamis_model.comm.exchanger import GPUDirectExchanger, PythonNCCLExchanger
 from dynamis_model.nnp import UMAModel
 
 from md_test_common import (

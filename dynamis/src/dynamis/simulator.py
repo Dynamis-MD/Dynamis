@@ -6,6 +6,7 @@ from dynamis_state import (
     DistEnvironment,
     MolecularInfo,
     SimulationConfig,
+    sample_maxwell_boltzmann,
     TrajectoryReader,
     TrajectoryWriter,
     TorchDistEnv,
@@ -51,11 +52,13 @@ def check_integrator(integrator):
         )
 
 
-@dataclass
+@dataclass(kw_only=True)
 class SimulatorConfig:
     # Physical parameters
     timestep_fs: float = 0.5  # Integration timestep in femtoseconds
     total_steps: int = 1000  # Total number of MD steps to run
+    initial_temperature_K: float  # Kelvin; velocities are sampled at it if all zero
+    velocity_seed: int = 0  # Seed for that sampling, shared by all ranks
 
     # Spatial decomposition
     side_length_angstrom: float = (
@@ -96,6 +99,12 @@ class SimulatorConfig:
     Args:
         timestep_fs (float): Integration timestep in femtoseconds.
         total_steps (int): Total number of MD steps to run.
+        initial_temperature_K (float): Required. Temperature in Kelvin to sample
+            Maxwell-Boltzmann velocities at when the input's velocities are all
+            zero (or missing). Non-zero input velocities are kept.
+            0.0 keeps a zero-velocity start.
+        velocity_seed (int): Seed for that sampling. Every rank samples the whole
+            system from it, so all ranks agree regardless of world size.
         cutoff_angstrom (float): NNP neighbour cutoff radius in Ångstroms.
         ghost_buffer_angstrom (float): Extra radius for ghost atom selection in Ångstroms.
         partition_algorithm (str): Algorithm for spatial partitioning ("sfc_morton", "sfc_hilbert", "kdtree", "simple").
@@ -130,6 +139,18 @@ class SimulatorConfig:
     """
 
 
+def _initialize_velocities(
+    molecular_info: MolecularInfo, temperature_K: float, seed: int
+) -> None:
+    """Samples Maxwell-Boltzmann velocities in place unless the input carries
+    non-zero ones, which win over the configured temperature."""
+    if molecular_info.atom_velocities.any():
+        return
+    molecular_info.atom_velocities = sample_maxwell_boltzmann(
+        molecular_info.atom_types, temperature_K, seed
+    )
+
+
 class Simulator:
     def __init__(
         self,
@@ -149,6 +170,9 @@ class Simulator:
         run_uuid = uuid.uuid4()
         # shared by the timing registry and the trajectory writer (built in setup())
         self.run_uuid = run_uuid
+        # None until setup(); a simulator driven through initialize_simulator_state()
+        # (e.g. the tests) writes no trajectory.
+        self.writer: Optional[TrajectoryWriter] = None
 
         # Drift watchdog: flags live in the process-wide registry so the model's
         # exchangers carry them without the model knowing (see drift_flags.py).
@@ -257,6 +281,13 @@ class Simulator:
             molecular_info = system_input
             cell, pbc = torch.zeros(3, 3), torch.zeros(3, dtype=torch.uint8)
 
+        _initialize_velocities(
+            molecular_info,
+            self.config.initial_temperature_K,
+            self.config.velocity_seed,
+        )
+
+        # TODO figure out what author should be
         self.writer: TrajectoryWriter = TrajectoryWriter(
             dist_env.global_rank,
             self.run_uuid.bytes,
@@ -290,17 +321,16 @@ class Simulator:
         # (3) Repartition if needed and update writer atom-count metadata.
         self.sync_and_repartition(device=self.device)
 
-        # TODO if velocities are all 0, initialize from Maxwell-Boltzmann dist
-
     def sync_and_repartition(self, device: Optional[torch.device] = None) -> None:
         self.state.sync_and_repartition()
         # TODO: ADD appropriate barriers/synchronization if needed here
         self.model.initialize_buffers(
             self.state.local_partition_info, device=device if device else self.device
         )
-        self.writer.update_atom_counts(
-            self.state.local_partition_info.atom_counts.to(torch.uint32)
-        )
+        if self.writer is not None:
+            self.writer.update_atom_counts(
+                self.state.local_partition_info.atom_counts.to(torch.uint32)
+            )
         self.integrator.reset()
         self._reset_drift_flags()  # state.sync_and_repartition() re-latched the reference
 
@@ -425,27 +455,29 @@ class Simulator:
         try:
             while total_done < self.config.total_steps:
                 Timer.set_step(total_done)
-                if self.should_rebalance(total_done):
+                # Read the last step's drift word before repartitioning, which clears
+                # it: a breach on that step must still be recorded.
+                tripped = total_done > 0 and self.drift_watchdog_tripped()
+                rebalance = self.should_rebalance(total_done)
+                if rebalance:
                     self.timer.start("repartition", TimerClass.Other)
                     self.sync_and_repartition()
                     self.timer.stop()
                 # Where.Both: step() launches async CUDA work, so a host-only timer misses it.
                 self.timer.start("iteration", TimerClass.Total, Where.Both)
-                tripped = total_done > 0 and self.drift_watchdog_tripped()
-                if self.should_rebalance(total_done):
-                    self.sync_and_repartition()
-                elif tripped:
+                if tripped and not rebalance:  # a repartition already rebuilt the halo
                     self.drift_rebuild_steps.append(total_done)
                     self.rebuild_halo()
                 energy = self.step(self.config.timestep_fs)
                 self.timer.stop()
-                if self.should_write_traj(total_done):
+                if self.writer is not None and self.should_write_traj(total_done):
                     self.state.local_state.atom_vertex_numbers = (
                         self.state.local_partition_info.partition_indices
                     )
                     self.writer.submit(total_done, self.state.local_state)
                 total_done += 1
-            self.writer.flush()
+            if self.writer is not None:
+                self.writer.flush()
         finally:
             # Runs even on exception/interrupt so timing data isn't lost.
             TimingRegistry.instance().close()

@@ -1,3 +1,7 @@
+# torch must be loaded before the extension: mass_table() below returns a tensor at
+# import time, which segfaults if torch's Python bindings are not yet initialized.
+import torch  # noqa: F401
+
 import dynamis_state.dynamis_state_impl as dynamis_state_impl
 
 # C++ structs
@@ -12,6 +16,10 @@ SimpleSpatialPartitioner = dynamis_state_impl.SimpleSpatialPartitioner
 KDTreePartitioner = dynamis_state_impl.KDTreePartitioner
 SFCPartitioner = dynamis_state_impl.SFCPartitioner
 SFCCurveType = dynamis_state_impl.SFCCurveType
+
+# Atomic masses (amu) indexed by atomic number, built once from the C++ table
+ATOMIC_MASSES = dynamis_state_impl.mass_table()
+sample_maxwell_boltzmann = dynamis_state_impl.sample_maxwell_boltzmann
 
 # CUDA radius graph with PBC
 from dynamis_state.radius_graph_pbc_cuda import radius_graph_pbc_cuda
@@ -84,6 +92,8 @@ __all__ = [
     "KDTreePartitioner",
     "SFCPartitioner",
     "SFCCurveType",
+    "ATOMIC_MASSES",
+    "sample_maxwell_boltzmann",
     "TrajectoryReader",
     "TrajectoryWriter",
     "translate_dynamis_to_xyz",

@@ -37,6 +37,7 @@ from dynamis_model.nnp.mace import (
 # Import the shared constant rather than re-spelling it so the two can't drift.
 from dynamis_model.units import EV_PER_A_TO_AMU_A_PER_FS2 as EV_TO_MD
 from dynamis_state import (
+    ATOMIC_MASSES,
     DynamisState,
     MolecularInfo,
     SFCCurveType,
@@ -45,7 +46,6 @@ from dynamis_state import (
     TorchDistEnv,
     radius_graph_pbc_cuda,
 )
-from dynamis_state.masses import TORCH_ATOMIC_MASSES
 
 try:
     from ase.data import atomic_numbers as ASE_ATOMIC_NUMBERS
@@ -279,7 +279,7 @@ def build_state(
         torch.arange(positions.shape[0], device=device),
     )
     _assign_if_present(
-        global_mol, "atom_masses", TORCH_ATOMIC_MASSES.to(device)[numbers].float()
+        global_mol, "atom_masses", ATOMIC_MASSES.to(device)[numbers].float()
     )
 
     sim = SimulationConfig()
@@ -304,7 +304,7 @@ def build_state(
     _assign_if_present(
         local_mol,
         "atom_masses",
-        TORCH_ATOMIC_MASSES.to(device)[local_mol.atom_types].float(),
+        ATOMIC_MASSES.to(device)[local_mol.atom_types].float(),
     )
 
     state = DynamisState()

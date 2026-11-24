@@ -7,9 +7,8 @@ from dynamis_integrator._data_check import (
     check_shapes_match,
 )
 from dynamis_integrator.integrator import DynamisIntegrator
-from dynamis_state import DynamisState
+from dynamis_state import ATOMIC_MASSES, DynamisState
 from dynamis_model import DynamisModel
-from dynamis_integrator.masses import TORCH_MASSES
 
 
 class Euler(DynamisIntegrator):
@@ -64,7 +63,7 @@ class Euler(DynamisIntegrator):
         else:
             step_size = self.dt
 
-        atom_masses = TORCH_MASSES.to(molecular_info.atom_positions.device)[
+        atom_masses = ATOMIC_MASSES.to(molecular_info.atom_positions.device)[
             molecular_info.atom_types.reshape(-1).to(torch.long)
         ]
 

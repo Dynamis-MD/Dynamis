@@ -43,6 +43,7 @@ def make_simulator(tmp_path):
         sigma = torch.ones(100, dtype=torch.float32, device=device)
         model = LennardJonesPotentialModel(epsilon, sigma)
         config = SimulatorConfig(
+            initial_temperature_K=0.0,
             cutoff_angstrom=3.5,
             ghost_buffer_angstrom=0.5,
             side_length_angstrom=8.0,
@@ -81,8 +82,9 @@ def _global_max_displacement(pos: torch.Tensor, ref: torch.Tensor) -> float:
 
 
 def test_default_threshold_is_half_skin(make_simulator):
-    assert SimulatorConfig().enable_drift_watchdog is True
-    assert SimulatorConfig().drift_threshold_angstrom is None
+    config = SimulatorConfig(initial_temperature_K=0.0)
+    assert config.enable_drift_watchdog is True
+    assert config.drift_threshold_angstrom is None
     sim = make_simulator()
     assert sim._drift_threshold == pytest.approx(0.5 / 2)
 

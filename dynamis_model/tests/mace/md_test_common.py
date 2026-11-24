@@ -419,6 +419,7 @@ def make_config(
 ) -> SimulatorConfig:
     os.makedirs(output_dir, exist_ok=True)
     return SimulatorConfig(
+        initial_temperature_K=0.0,
         timestep_fs=timestep_fs,
         total_steps=N_STEPS,
         side_length_angstrom=side_length_angstrom,

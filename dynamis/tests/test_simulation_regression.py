@@ -21,7 +21,7 @@ import numpy as np
 from pathlib import Path
 from scipy.stats import ks_2samp
 import torch.distributed as dist
-from dynamis_integrator.masses import TORCH_MASSES
+from dynamis_state import ATOMIC_MASSES
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -143,7 +143,7 @@ def _langevin_run_means(sim, n_steps, n_equil):
         energy, _ = sim.step()
         if step > n_equil:
             local = sim.state.local_state
-            local_masses = TORCH_MASSES.to(local.atom_positions.device)[
+            local_masses = ATOMIC_MASSES.to(local.atom_positions.device)[
                 local.atom_types.reshape(-1)
             ]
             local_ke = (
