@@ -15,8 +15,6 @@
 
 namespace dynamis_state {
 
-static constexpr int64_t HALO_MAX_NUM_NEIGHBORS = 1000;
-
 void AbstractPartitioner::build_halo_maps(PartitionMessagePassingInfo &info,
                                           const MolecularInfo &global_state,
                                           const DistEnvironment &env,
@@ -39,8 +37,10 @@ void AbstractPartitioner::build_halo_maps(PartitionMessagePassingInfo &info,
     auto pbc = config.pbc.to(device);
 
     // --- Step 1: Build full neighbor graph (CUDA cell-list) ---
+    // Never truncated by config.max_num_neighbors: the truncated graph is asymmetric and its
+    // nearest-k sets change within the skin window, so ghosts must cover every r+skin pair.
     auto graph_result = radius_graph_pbc(pos.to(torch::kFloat), cell, pbc, ghost_cutoff,
-                                         HALO_MAX_NUM_NEIGHBORS, /*enforce_max_strictly=*/false);
+                                         /*max_num_neighbors=*/0, /*enforce_max_strictly=*/false);
     auto edge_index = std::get<0>(graph_result); // [2, E]
     auto src = edge_index[0]; // [E]
     auto dst = edge_index[1]; // [E]

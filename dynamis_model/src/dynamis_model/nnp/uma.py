@@ -742,6 +742,12 @@ class UMAModel(DynamisModel):
         )
 
         self.num_layers = self.main_model.backbone.num_layers
+        # fairchem caps each target's neighbours (max_neighbors, degeneracy-tolerant);
+        # rebuild the same graph instead of the full radius graph.
+        self.max_num_neighbors = int(self.main_model.backbone.max_neighbors)
+        self.enforce_max_strictly = bool(
+            self.main_model.backbone.enforce_max_neighbors_strictly
+        )
 
         # `exchanger` may be:
         #   None                 -> a fresh GPUDirectExchanger per slot (default)
@@ -925,8 +931,8 @@ class UMAModel(DynamisModel):
                     },
                 )(),
                 radius=sim_config.cutoff,
-                max_num_neighbors_threshold=0,
-                enforce_max_neighbors_strictly=False,
+                max_num_neighbors_threshold=self.max_num_neighbors,
+                enforce_max_neighbors_strictly=self.enforce_max_strictly,
             )
 
         batch = torch.zeros(num_local, dtype=torch.long, device=device)

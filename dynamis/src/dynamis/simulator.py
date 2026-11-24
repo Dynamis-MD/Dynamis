@@ -213,6 +213,10 @@ class Simulator:
         sim_config.ghost_cutoff_buffer = self.config.ghost_buffer_angstrom
         sim_config.cell = torch.eye(3) * self.config.side_length_angstrom
         sim_config.pbc = torch.tensor([True, True, True], dtype=torch.bool)
+        sim_config.max_num_neighbors = int(getattr(self.model, "max_num_neighbors", 0))
+        sim_config.enforce_max_strictly = bool(
+            getattr(self.model, "enforce_max_strictly", False)
+        )
 
         return sim_config
 

@@ -30,6 +30,13 @@ def _timed_model_forward(fn):
 
 
 class DynamisModel(ABC):
+    # Per-target nearest-neighbour cap of the model's graph (0 = every pair within the
+    # cutoff) and whether it is a hard cap (Orb) or fairchem's degeneracy-tolerant one
+    # (UMA); see dynamis_state's radius_graph.hpp. The simulator copies both into
+    # SimulationConfig so partition weights follow the truncated graph.
+    max_num_neighbors: int = 0
+    enforce_max_strictly: bool = False
+
     def __init__(
         self,
     ) -> None:

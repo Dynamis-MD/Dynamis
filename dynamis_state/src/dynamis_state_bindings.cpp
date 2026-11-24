@@ -36,7 +36,11 @@ PYBIND11_MODULE(dynamis_state_impl, m)
             .def_readwrite("ghost_cutoff_buffer",
                            &dynamis_state::SimulationConfig::ghost_cutoff_buffer)
             .def_readwrite("cell", &dynamis_state::SimulationConfig::cell)
-            .def_readwrite("pbc", &dynamis_state::SimulationConfig::pbc);
+            .def_readwrite("pbc", &dynamis_state::SimulationConfig::pbc)
+            .def_readwrite("max_num_neighbors",
+                           &dynamis_state::SimulationConfig::max_num_neighbors)
+            .def_readwrite("enforce_max_strictly",
+                           &dynamis_state::SimulationConfig::enforce_max_strictly);
 
     py::class_<dynamis_state::PartitionMessagePassingInfo>(m, "PartitionMessagePassingInfo")
             .def(py::init<>())
@@ -157,7 +161,19 @@ PYBIND11_MODULE(dynamis_state_impl, m)
 
     m.def("radius_graph_pbc_ex", &radius_graph_pbc_ex,
           "Extended radius graph: accepts optional target_indices subset, returns "
-          "(edge_index, cell_shifts, num_neighbors_image, neighbor_counts).",
+          "(edge_index, cell_shifts, num_neighbors_image, neighbor_counts). With "
+          "thresholds (per-target tau on the squared distance, e.g. from "
+          "radius_graph_pbc_select) only pairs with d^2 <= tau are kept and "
+          "max_num_neighbors / enforce_max_strictly are unused.",
+          py::arg("pos"), py::arg("cell"), py::arg("pbc"), py::arg("radius"),
+          py::arg("max_num_neighbors"), py::arg("enforce_max_strictly"),
+          py::arg("target_indices") = c10::optional<at::Tensor>{},
+          py::arg("thresholds") = c10::optional<at::Tensor>{});
+
+    m.def("radius_graph_pbc_select", &radius_graph_pbc_select,
+          "First pass of a max_num_neighbors-truncated build: returns (thresholds, "
+          "neighbor_counts) per target — tau on the squared distance (+inf = keep all) and "
+          "the kept degree. Requires max_num_neighbors > 0. Skips the edge buffer and its sync.",
           py::arg("pos"), py::arg("cell"), py::arg("pbc"), py::arg("radius"),
           py::arg("max_num_neighbors"), py::arg("enforce_max_strictly"),
           py::arg("target_indices") = c10::optional<at::Tensor>{});
@@ -239,10 +255,12 @@ PYBIND11_MODULE(dynamis_state_impl, m)
             .def_static("set_step", &dynamis_state::Timer::set_step, py::arg("step"));
 
     m.def("radius_graph_pbc_counts_ex", &radius_graph_pbc_counts_ex,
-          "Count-only variant: returns just neighbor_counts[N_target] int32. "
-          "Skips edge buffer + prefix-sum + B4 write kernel (~50% faster).",
+          "Count-only variant: returns just neighbor_counts[N_target] int32 (kept degree "
+          "when max_num_neighbors > 0). Skips edge buffer + prefix-sum + B4 write kernel "
+          "(~50% faster).",
           py::arg("pos"), py::arg("cell"), py::arg("pbc"), py::arg("radius"),
-          py::arg("target_indices") = c10::optional<at::Tensor>{});
+          py::arg("target_indices") = c10::optional<at::Tensor>{},
+          py::arg("max_num_neighbors") = 0, py::arg("enforce_max_strictly") = false);
 
     // ===== Distributed build_graph hot-path ops (Mode A) =====
 

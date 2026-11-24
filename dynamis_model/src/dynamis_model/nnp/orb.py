@@ -15,7 +15,8 @@ except ImportError as e:
         "orb-models must be installed to use ORBModel: "
         "pip install -e ./dynamis_model[orb]"
     ) from e
-from dynamis_state import DynamisState, radius_graph_pbc_cuda
+from dynamis_state import DynamisState
+import dynamis_state.dynamis_state_impl as _impl
 from dynamis_model.comm.feature_push import FeaturePushToExchange
 from dynamis_model.comm.exchanger import GPUDirectExchanger
 
@@ -70,6 +71,9 @@ class ORBModel(DynamisModel, nn.Module):
         self.model_max_num_neighbors = (
             adapter.max_num_neighbors
         )  # 120 for the inf family, 20 otherwise
+        # Orb keeps, per centre atom, its k nearest neighbours (hard cap).
+        self.max_num_neighbors = int(self.model_max_num_neighbors)
+        self.enforce_max_strictly = True
 
         self._feature_exchanger = GPUDirectExchanger()
         self._atom_type_exchanger = GPUDirectExchanger()
@@ -89,9 +93,9 @@ class ORBModel(DynamisModel, nn.Module):
         self._feature_exchanger.setup_exchanger(
             feature_dim=3, partition_info=partition_info, device=device
         )
-        # Atom-type exchange: dim=1
+        # Atom-type + kNN-threshold exchange: dim=2 ([type, tau], see __call__)
         self._atom_type_exchanger.setup_exchanger(
-            feature_dim=1, partition_info=partition_info, device=device
+            feature_dim=2, partition_info=partition_info, device=device
         )
         # Per-layer latent exchange: dim=hidden_dim (256, uniform across layers)
         for latent_exchanger in self._latent_exchangers:
@@ -150,36 +154,44 @@ class ORBModel(DynamisModel, nn.Module):
         positions = FeaturePushToExchange.apply(
             local_positions, distributed_state, self._feature_exchanger
         )
-        atom_types = (
-            FeaturePushToExchange.apply(
-                local_atom_types.float().unsqueeze(-1),
-                distributed_state,
-                self._atom_type_exchanger,
-            )
-            .squeeze(-1)
-            .long()
-        )
 
         n_atoms = positions.shape[0]
         sim_config = distributed_state.sim_config
+        graph_args = (
+            positions.detach(),
+            sim_config.cell,
+            sim_config.pbc.to(torch.bool),
+            float(sim_config.cutoff),
+        )
 
-        # Detached from autograd, graph topology is not differentiable
+        # Orb's graph: centre c → neighbour n iff n is among c's k nearest. An edge whose
+        # centre is a ghost but whose neighbour is local still feeds the local atom, and
+        # deciding it needs the ghost's full neighbourhood, which only its owner has. So:
+        #   pass 1 — tau (k-th-neighbour threshold on d^2) for local centres;
+        #   push tau with the atom types (the push this model already does every step);
+        #   pass 2 — build with every centre's tau, own or received.
+        # Detached from autograd, graph topology is not differentiable.
         with torch.no_grad():
-            edge_index, cell_offsets, _ = radius_graph_pbc_cuda(
-                data=type(
-                    "Data",
-                    (object,),
-                    {
-                        "pos": positions.detach(),
-                        "cell": sim_config.cell.unsqueeze(0),  # Shape [1, 3, 3]
-                        "natoms": [n_atoms],
-                        "pbc": sim_config.pbc.unsqueeze(0),  # Shape [1, 3]
-                    },
-                )(),
-                radius=sim_config.cutoff,
-                max_num_neighbors_threshold=self.model_max_num_neighbors,
-                enforce_max_neighbors_strictly=True,
+            tau_local, _ = _impl.radius_graph_pbc_select(
+                *graph_args,
+                self.max_num_neighbors,
+                self.enforce_max_strictly,
+                torch.arange(n_local_atoms, device=positions.device),
             )
+        types_tau = FeaturePushToExchange.apply(
+            torch.stack([local_atom_types.float(), tau_local], dim=1),
+            distributed_state,
+            self._atom_type_exchanger,
+        ).detach()
+        atom_types = types_tau[:, 0].long()
+        with torch.no_grad():
+            knn_edge_index, knn_cell_offsets, _, _ = _impl.radius_graph_pbc_ex(
+                *graph_args, 0, False, None, types_tau[:, 1].contiguous()
+            )
+        # The kernel caps per target (edge_index[1]); Orb caps per sender (the centre), so
+        # flip: sender = centre, receiver = neighbour, shift re-attached to the receiver.
+        edge_index = knn_edge_index.flip(0)
+        cell_offsets = -knn_cell_offsets
 
         if os.environ.get("ORB_DEBUG") == "1":
             _dbg_edge_index_full = edge_index
