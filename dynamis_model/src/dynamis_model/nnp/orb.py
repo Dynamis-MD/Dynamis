@@ -20,10 +20,10 @@ except ImportError as e:
         "orb-models must be installed to use ORBModel: "
         "pip install -e ./dynamis_model[orb]"
     ) from e
-from dynamis_state import DynamisState
+from dynamis_state import DynamisState, radius_graph_pbc_cuda
+from dynamis_model.comm.exchanger import Exchanger, GPUDirectExchanger
 import dynamis_state.dynamis_state_impl as _impl
-from dynamis_model.comm.feature_push import FeaturePushToExchange
-from dynamis_model.comm.exchanger import GPUDirectExchanger
+
 
 from dynamis_model.units import EV_PER_A_TO_AMU_A_PER_FS2
 
@@ -94,13 +94,14 @@ class ORBModel(DynamisModel, nn.Module):
         self.max_num_neighbors = int(self.model_max_num_neighbors)
         self.enforce_max_strictly = True
 
-        self._feature_exchanger = GPUDirectExchanger()
-        self._atom_type_exchanger = GPUDirectExchanger()
-        # One latent exchanger PER message-passing layer (dim=hidden_dim)
-        # gnn_stacks are 5 distinct layers
-        self._latent_exchangers = [
-            GPUDirectExchanger() for _ in range(self.num_mp_steps)
-        ]
+        exchanger = kwargs.get("exchanger", None)
+        max_dim = max(3, int(self.hidden_dim))
+        if exchanger is None:
+            self.exchanger: Exchanger = GPUDirectExchanger(max_feature_dim=max_dim)
+        elif isinstance(exchanger, type):
+            self.exchanger = exchanger(max_feature_dim=max_dim)
+        else:
+            self.exchanger = exchanger
 
     def initialize_buffers(
         self,
@@ -116,13 +117,6 @@ class ORBModel(DynamisModel, nn.Module):
         self._atom_type_exchanger.setup_exchanger(
             feature_dim=2, partition_info=partition_info, device=device
         )
-        # Per-layer latent exchange: dim=hidden_dim (256, uniform across layers)
-        for latent_exchanger in self._latent_exchangers:
-            latent_exchanger.setup_exchanger(
-                feature_dim=self.hidden_dim,
-                partition_info=partition_info,
-                device=device,
-            )
 
     def _make_atomgraph(
         self,
@@ -184,9 +178,8 @@ class ORBModel(DynamisModel, nn.Module):
         local_atom_types = distributed_state.local_molecular_info.atom_types
         n_local_atoms = local_positions.shape[0]
 
-        positions = FeaturePushToExchange.apply(
-            local_positions, distributed_state, self._feature_exchanger
-        )
+        positions = self.exchanger.push(local_positions, distributed_state)
+        atom_types = self.exchanger.push(local_atom_types, distributed_state).long()
 
         n_atoms = positions.shape[0]
         sim_config = distributed_state.sim_config
@@ -293,8 +286,8 @@ class ORBModel(DynamisModel, nn.Module):
             if i > 0:
                 local_nodes_to_push = nodes[:n_local_atoms]  # [n_local, hidden_dim]
 
-                nodes = FeaturePushToExchange.apply(
-                    local_nodes_to_push, distributed_state, self._latent_exchangers[i]
+                nodes = self.exchanger.push(
+                    local_nodes_to_push, distributed_state
                 )  # [n_local + n_ghost, hidden_dim]
 
             if os.environ.get("ORB_DEBUG") == "1" and n_atoms > n_local_atoms:

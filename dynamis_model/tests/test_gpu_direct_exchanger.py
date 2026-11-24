@@ -246,6 +246,67 @@ def _worker_backward_without_forward(rank, world_size, result_dict):
     result_dict[rank] = {"raised": raised}
 
 
+def _worker_variable_message_sizes(rank, world_size, result_dict):
+    """Worker: verify a single exchanger set up with max_feature_dim=64 handles F=1, 3, 16, 64."""
+    torch.cuda.set_device(rank)
+    device = torch.device(f"cuda:{rank}")
+
+    dist.init_process_group(
+        "nccl",
+        init_method="tcp://127.0.0.1:29503",
+        rank=rank,
+        world_size=world_size,
+    )
+
+    max_f = 64
+    n_local = N_LOCAL[rank]
+    partition_info = _build_partition_info(rank, world_size, device)
+    total_recv = int(partition_info.global_send_recv_matrix.sum(dim=0)[rank].item())
+
+    exchanger = GPUDirectExchanger(max_feature_dim=max_f)
+    exchanger.setup_exchanger(max_f, partition_info, device)
+
+    all_ok = True
+    for F in (3, 1, 16, 64, 16, 3):
+        local_features = torch.zeros(n_local, F, dtype=torch.float32, device=device)
+        for i in range(n_local):
+            local_features[i, :] = rank * 1000.0 + i + F * 0.01
+
+        output = exchanger.feature_push_forward(local_features, partition_info)
+        if output.shape != torch.Size((n_local + total_recv, F)):
+            all_ok = False
+        if not torch.allclose(output[:n_local], local_features):
+            all_ok = False
+
+        ghost = output[n_local:]
+        peer_indices = [1, 3, 5, 7, 9, 11] if rank == 0 else [0, 2, 4, 6, 8]
+        peer_rank = 1 - rank
+        expected_ghost = torch.zeros(
+            len(peer_indices), F, dtype=torch.float32, device=device
+        )
+        for i, idx in enumerate(peer_indices):
+            expected_ghost[i, :] = peer_rank * 1000.0 + idx + F * 0.01
+        if not torch.allclose(ghost, expected_ghost):
+            all_ok = False
+
+        grad_output = torch.ones(
+            n_local + total_recv, F, dtype=torch.float32, device=device
+        )
+        grad_input = exchanger.feature_push_backward(
+            grad_output, [n_local, F], partition_info
+        )
+        expected_grad = torch.ones(n_local, F, dtype=torch.float32, device=device)
+        for idx in partition_info.send_local_indices.cpu().tolist():
+            expected_grad[idx, :] = 2.0
+        if not torch.allclose(grad_input, expected_grad):
+            all_ok = False
+
+    torch.cuda.synchronize()
+    exchanger.teardown()
+    dist.destroy_process_group()
+    result_dict[rank] = {"all_ok": all_ok}
+
+
 # ---------------------------------------------------------------------------
 # Test entry points
 # ---------------------------------------------------------------------------
@@ -323,7 +384,28 @@ def test_gpu_direct_exchanger_backward_without_forward_raises_2gpu():
         ], f"Rank {rank}: expected RuntimeError when calling backward before forward"
 
 
+def test_gpu_direct_exchanger_variable_message_sizes_2gpu():
+    """A single GPUDirectExchanger set up once with max_feature_dim=64 handles F=1, 3, 16, 64."""
+    world_size = 2
+    mp.set_start_method("spawn", force=True)
+    manager = mp.Manager()
+    result_dict = manager.dict()
+
+    mp.spawn(
+        _worker_variable_message_sizes,
+        args=(world_size, result_dict),
+        nprocs=world_size,
+        join=True,
+    )
+
+    for rank in range(world_size):
+        assert result_dict[rank][
+            "all_ok"
+        ], f"Rank {rank}: multi-size exchange failed on single exchanger"
+
+
 if __name__ == "__main__":
     test_gpu_direct_exchanger_forward_backward_2gpu()
     test_gpu_direct_exchanger_reset_buffers_2gpu()
     test_gpu_direct_exchanger_backward_without_forward_raises_2gpu()
+    test_gpu_direct_exchanger_variable_message_sizes_2gpu()

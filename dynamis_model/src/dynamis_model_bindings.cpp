@@ -10,7 +10,9 @@ PYBIND11_MODULE(dynamis_model_impl, m)
           "Check if fabric handles (multi-node NVLink / NVL72) are supported",
           py::arg("device_id") = -1);
 
-    py::class_<dynamis_model::IPCExchanger>(m, "IPCExchanger")
+    py::class_<dynamis_model::CommBackend>(m, "CommBackend");
+
+    py::class_<dynamis_model::IPCExchanger, dynamis_model::CommBackend>(m, "IPCExchanger")
             .def(py::init<>())
             .def_static("supports_fabric_handles",
                         &dynamis_model::IPCExchanger::supports_fabric_handles,
@@ -53,15 +55,39 @@ PYBIND11_MODULE(dynamis_model_impl, m)
             .def("use_fabric", &dynamis_model::IPCExchanger::use_fabric);
 
     py::class_<dynamis_model::FeatureExchanger>(m, "FeatureExchanger")
-            .def(py::init<>())
-            // --- shehtab's public interface ---
-            .def("feature_push_forward", &dynamis_model::FeatureExchanger::feature_push_forward,
+            .def(py::init<const std::string &>(), py::arg("backend_type") = "ipc")
+            // --- Unified 2-step backend-agnostic setup ---
+            .def("prepare_setup", &dynamis_model::FeatureExchanger::prepare_setup,
+                 "Allocate max_feature_dim buffers and return opaque local metadata bytes",
+                 py::arg("partition_info"), py::arg("max_feature_dim"), py::arg("rank"),
+                 py::arg("world_size"), py::arg("device_index"))
+            .def("complete_setup", &dynamis_model::FeatureExchanger::complete_setup,
+                 "Connect to peers using all-gathered metadata bytes from all ranks",
+                 py::arg("all_rank_metadata"))
+            // --- Public exchange interface (1-arg and legacy 2/3-arg overloads) ---
+            .def("feature_push_forward",
+                 py::overload_cast<const torch::Tensor &>(
+                         &dynamis_model::FeatureExchanger::feature_push_forward),
+                 "Push features forward to neighbors for any width F <= max_feature_dim",
+                 py::arg("local_features"))
+            .def("feature_push_forward",
+                 py::overload_cast<const torch::Tensor &,
+                                   const dynamis_state::PartitionMessagePassingInfo &>(
+                         &dynamis_model::FeatureExchanger::feature_push_forward),
                  "Push features forward to neighbors", py::arg("local_features"),
                  py::arg("partition_info"))
-            .def("feature_push_backward", &dynamis_model::FeatureExchanger::feature_push_backward,
+            .def("feature_push_backward",
+                 py::overload_cast<const torch::Tensor &>(
+                         &dynamis_model::FeatureExchanger::feature_push_backward),
+                 "Push feature gradients backward to neighbors for any width F <= max_feature_dim",
+                 py::arg("grad_output"))
+            .def("feature_push_backward",
+                 py::overload_cast<const torch::Tensor &, const torch::IntArrayRef &,
+                                   const dynamis_state::PartitionMessagePassingInfo &>(
+                         &dynamis_model::FeatureExchanger::feature_push_backward),
                  "Push feature gradients backward to neighbors", py::arg("grad_output"),
                  py::arg("grad_input_shape"), py::arg("partition_info"))
-            // --- IPC configuration ---
+            // --- IPC configuration & legacy helpers ---
             .def_static("supports_fabric_handles",
                         &dynamis_model::FeatureExchanger::supports_fabric_handles,
                         "Check if fabric handles are supported on the device",
@@ -97,8 +123,11 @@ PYBIND11_MODULE(dynamis_model_impl, m)
             .def("clear_watchdog_flags", &dynamis_model::FeatureExchanger::clear_watchdog_flags,
                  "Stop carrying the drift-watchdog flag")
             .def("teardown", &dynamis_model::FeatureExchanger::teardown)
+            .def("is_setup", &dynamis_model::FeatureExchanger::is_setup)
             .def("is_ipc_setup", &dynamis_model::FeatureExchanger::is_ipc_setup)
             .def("use_fabric", &dynamis_model::FeatureExchanger::use_fabric)
+            .def("max_feature_dim", &dynamis_model::FeatureExchanger::max_feature_dim)
+            .def("num_local", &dynamis_model::FeatureExchanger::num_local)
             .def("set_ce_threshold_bytes", &dynamis_model::FeatureExchanger::set_ce_threshold_bytes,
                  py::arg("threshold"))
             .def("ce_threshold_bytes", &dynamis_model::FeatureExchanger::ce_threshold_bytes);

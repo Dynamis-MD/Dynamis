@@ -5,6 +5,7 @@ import torch
 import typing
 
 __all__: list[str] = [
+    "CommBackend",
     "FeatureExchanger",
     "IPCExchanger",
     "push_buffer_create",
@@ -23,7 +24,10 @@ def push_buffer_create(
     Gather rows into buffer by index
     """
 
-class IPCExchanger:
+class CommBackend:
+    pass
+
+class IPCExchanger(CommBackend):
     @staticmethod
     def supports_fabric_handles(device_id: typing.SupportsInt = -1) -> bool:
         """
@@ -79,88 +83,63 @@ class IPCExchanger:
     def wait_for_pushes(self) -> None: ...
     def set_watchdog_flags(
         self, local_flag: torch.Tensor, global_flag: torch.Tensor
-    ) -> None:
-        """
-        Carry a drift-watchdog flag word on every push: local_flag (int32 [1]) is written into
-        this rank's sync word before each push completes, and the bitwise OR over all ranks is
-        written into global_flag (int32 [1]) after each wait
-        """
-
-    def clear_watchdog_flags(self) -> None:
-        """
-        Stop carrying the drift-watchdog flag
-        """
-
+    ) -> None: ...
+    def clear_watchdog_flags(self) -> None: ...
     def teardown(self) -> None: ...
     def is_setup(self) -> bool: ...
     def use_fabric(self) -> bool: ...
 
 class FeatureExchanger:
     @staticmethod
-    def supports_fabric_handles(device_id: typing.SupportsInt = -1) -> bool:
-        """
-        Check if fabric handles are supported on the device
-        """
-
+    def supports_fabric_handles(device_id: typing.SupportsInt = -1) -> bool: ...
     @staticmethod
     def allocate_ipc_buffer(
         rows: typing.SupportsInt,
         cols: typing.SupportsInt,
         device_index: typing.SupportsInt,
-    ) -> torch.Tensor:
-        """
-        Allocate a tensor via Fabric VMM or raw cudaMalloc (required for IPC/Fabric)
-        """
-
-    def __init__(self) -> None: ...
-    def ce_threshold_bytes(self) -> int: ...
-    def create_and_export_sync_handle(self) -> list[int]:
-        """
-        Allocate IPC/Fabric sync counter and return its handle bytes
-        """
-
-    def export_ipc_handle(self, buffer: torch.Tensor) -> list[int]:
-        """
-        Export CUDA IPC or Fabric handle for a buffer as bytes
-        """
-
+    ) -> torch.Tensor: ...
+    def __init__(self, backend_type: str = "ipc") -> None: ...
+    def prepare_setup(
+        self,
+        partition_info: dynamis_state.dynamis_state_impl.PartitionMessagePassingInfo,
+        max_feature_dim: typing.SupportsInt,
+        rank: typing.SupportsInt,
+        world_size: typing.SupportsInt,
+        device_index: typing.SupportsInt,
+    ) -> list[int]: ...
+    def complete_setup(
+        self,
+        all_rank_metadata: collections.abc.Sequence[
+            collections.abc.Sequence[typing.SupportsInt]
+        ],
+    ) -> None: ...
+    @typing.overload
+    def feature_push_forward(self, local_features: torch.Tensor) -> torch.Tensor: ...
+    @typing.overload
+    def feature_push_forward(
+        self,
+        local_features: torch.Tensor,
+        partition_info: dynamis_state.dynamis_state_impl.PartitionMessagePassingInfo,
+    ) -> torch.Tensor: ...
+    @typing.overload
+    def feature_push_backward(self, grad_output: torch.Tensor) -> torch.Tensor: ...
+    @typing.overload
     def feature_push_backward(
         self,
         grad_output: torch.Tensor,
         grad_input_shape: tuple[int, ...],
         partition_info: dynamis_state.dynamis_state_impl.PartitionMessagePassingInfo,
-    ) -> torch.Tensor:
-        """
-        Push feature gradients backward to neighbors
-        """
-
-    def feature_push_forward(
-        self,
-        local_features: torch.Tensor,
-        partition_info: dynamis_state.dynamis_state_impl.PartitionMessagePassingInfo,
-    ) -> torch.Tensor:
-        """
-        Push features forward to neighbors
-        """
-
-    def is_ipc_setup(self) -> bool: ...
-    def use_fabric(self) -> bool: ...
-    def record_push_complete(self) -> None:
-        """
-        Bump sync counter on default stream after push completes
-        """
-
+    ) -> torch.Tensor: ...
+    def ce_threshold_bytes(self) -> int: ...
     def set_ce_threshold_bytes(self, threshold: typing.SupportsInt) -> None: ...
+    def create_and_export_sync_handle(self) -> list[int]: ...
+    def export_ipc_handle(self, buffer: torch.Tensor) -> list[int]: ...
     def setup_sync(
         self,
         all_sync_handles: collections.abc.Sequence[
             collections.abc.Sequence[typing.SupportsInt]
         ],
-    ) -> None:
-        """
-        Open remote IPC/Fabric sync counters for stream-level push synchronization
-        """
-
+    ) -> None: ...
     def setup_ipc(
         self,
         x_buffer: torch.Tensor,
@@ -180,27 +159,16 @@ class FeatureExchanger:
         feature_dim: typing.SupportsInt,
         rank: typing.SupportsInt,
         world_size: typing.SupportsInt,
-    ) -> None:
-        """
-        Open remote IPC/Fabric handles and build push targets
-        """
-
+    ) -> None: ...
     def teardown(self) -> None: ...
-    def wait_for_pushes(self) -> None:
-        """
-        Wait on default stream until all peers' sync counters reach current step
-        """
-
+    def is_setup(self) -> bool: ...
+    def is_ipc_setup(self) -> bool: ...
+    def use_fabric(self) -> bool: ...
+    def max_feature_dim(self) -> int: ...
+    def num_local(self) -> int: ...
+    def record_push_complete(self) -> None: ...
+    def wait_for_pushes(self) -> None: ...
     def set_watchdog_flags(
         self, local_flag: torch.Tensor, global_flag: torch.Tensor
-    ) -> None:
-        """
-        Carry a drift-watchdog flag word on every push: local_flag (int32 [1]) is written into
-        this rank's sync word before each push completes, and the bitwise OR over all ranks is
-        written into global_flag (int32 [1]) after each wait
-        """
-
-    def clear_watchdog_flags(self) -> None:
-        """
-        Stop carrying the drift-watchdog flag
-        """
+    ) -> None: ...
+    def clear_watchdog_flags(self) -> None: ...

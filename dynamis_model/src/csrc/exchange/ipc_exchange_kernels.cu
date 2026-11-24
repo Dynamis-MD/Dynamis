@@ -44,7 +44,8 @@ __global__ void gather_and_push_kernel(
     const PushTarget *__restrict__ targets,     // [W]
     int64_t total_send,
     int64_t feature_dim,
-    int64_t world_size)
+    int64_t world_size,
+    int64_t slot)
 {
     int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t total_elements = total_send * feature_dim;
@@ -66,9 +67,10 @@ __global__ void gather_and_push_kernel(
         int64_t src_atom = send_indices[atom_idx];
         float val = x[src_atom * feature_dim + feat_idx];
 
-        // Write to remote ghost region
+        // Write to remote ghost region (in active double-buffer slot)
         int64_t dst_offset = (tgt.remote_offset + local_in_segment) * feature_dim + feat_idx;
-        tgt.remote_ptr[dst_offset] = val;
+        float *dst_base = tgt.remote_ptr + slot * tgt.slot_stride;
+        dst_base[dst_offset] = val;
     }
 
     // Make NVLink writes visible to other GPU contexts (required before IPC event record)
@@ -92,7 +94,8 @@ __global__ void gather_ghost_grad_and_push_kernel(
     int64_t num_local,
     int64_t total_recv,
     int64_t feature_dim,
-    int64_t world_size)
+    int64_t world_size,
+    int64_t slot)
 {
     int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t total_elements = total_recv * feature_dim;
@@ -113,9 +116,10 @@ __global__ void gather_ghost_grad_and_push_kernel(
         // Read gradient from ghost region (contiguous)
         float val = grad[(num_local + ghost_idx) * feature_dim + feat_idx];
 
-        // Write to peer's grad_recv_buffer
+        // Write to peer's grad_recv_buffer (in active double-buffer slot)
         int64_t dst_offset = (tgt.remote_offset + local_in_segment) * feature_dim + feat_idx;
-        tgt.remote_ptr[dst_offset] = val;
+        float *dst_base = tgt.remote_ptr + slot * tgt.slot_stride;
+        dst_base[dst_offset] = val;
     }
 
     __threadfence_system();
@@ -153,6 +157,7 @@ void launch_gather_and_push(
     int64_t total_send,
     int64_t feature_dim,
     int64_t world_size,
+    int64_t slot,
     cudaStream_t stream)
 {
     if (total_send == 0)
@@ -170,7 +175,8 @@ void launch_gather_and_push(
         reinterpret_cast<const PushTarget *>(fwd_targets.data_ptr()),
         total_send,
         feature_dim,
-        world_size);
+        world_size,
+        slot);
 }
 
 void launch_gather_ghost_grad_and_push(
@@ -181,6 +187,7 @@ void launch_gather_ghost_grad_and_push(
     int64_t total_recv,
     int64_t feature_dim,
     int64_t world_size,
+    int64_t slot,
     cudaStream_t stream)
 {
     if (total_recv == 0)
@@ -198,7 +205,8 @@ void launch_gather_ghost_grad_and_push(
         num_local,
         total_recv,
         feature_dim,
-        world_size);
+        world_size,
+        slot);
 }
 
 void launch_gather_to_staging(
