@@ -52,18 +52,22 @@ endif ()
 # dynamis_state discovery
 # ---------------------------------------------------------------------------
 # Ask Python where dynamis_state is installed, so this works for a normal
-# install, an editable install, or an isolated build env alike.
+# install, an editable install, or an isolated build env alike. An editable
+# install spans several directories (the source tree plus the site-packages
+# dir holding include/ and the .so files, which may be the user site under
+# ~/.local), so take every one of them as a CMake list.
 execute_process(
     COMMAND "${Python_EXECUTABLE}" -c
-        "import importlib.util, os; s = importlib.util.find_spec('dynamis_state'); print(os.path.dirname(s.origin) if s and s.origin else '')"
-    OUTPUT_VARIABLE DYNAMIS_STATE_PACKAGE_DIR
+        "import importlib.util; s = importlib.util.find_spec('dynamis_state'); print(';'.join(s.submodule_search_locations) if s else '')"
+    OUTPUT_VARIABLE DYNAMIS_STATE_PACKAGE_DIRS
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
+list(TRANSFORM DYNAMIS_STATE_PACKAGE_DIRS APPEND "/include" OUTPUT_VARIABLE _dynamis_state_include_hints)
 
 find_path(DYNAMIS_STATE_INCLUDE_DIR
     NAMES dynamis_state/timing_config.hpp
     HINTS
-        "${DYNAMIS_STATE_PACKAGE_DIR}/include"
+        ${_dynamis_state_include_hints}
         "${Python_SITEARCH}/dynamis_state/include"
         "${Python_SITELIB}/dynamis_state/include"
     NO_DEFAULT_PATH
@@ -91,7 +95,7 @@ if(DYNAMIS_STATE_TIMING_ENABLED)
     find_library(DYNAMIS_STATE_TIMING_LIBRARY
         NAMES dynamis_state_timing
         HINTS
-            "${DYNAMIS_STATE_PACKAGE_DIR}"
+            ${DYNAMIS_STATE_PACKAGE_DIRS}
             "${Python_SITEARCH}/dynamis_state"
             "${Python_SITELIB}/dynamis_state"
         NO_DEFAULT_PATH
