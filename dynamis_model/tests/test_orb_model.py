@@ -91,6 +91,8 @@ except ImportError:
 PARITY_CASES = [
     ("orb_v3_conservative_inf_omat", "random20"),
     ("orb_v3_conservative_20_omat", "lattice2744"),
+    ("orb_v3_direct_inf_omat", "random20"),
+    ("orb_v3_direct_20_omat", "lattice2744"),
 ]
 
 
@@ -258,8 +260,8 @@ def test_orb_distributed_parity(model_name, system):
         ref_graph = atoms_adapter.from_ase_atoms(ref_atoms, device=device)
         ref_out = ref_orbff.predict(ref_graph, split=False)
 
-        ename = ref_orbff.energy_name  # "energy"
-        fname = ref_orbff.grad_forces_name  # "grad_forces"
+        ename = getattr(ref_orbff, "energy_name", "energy")
+        fname = getattr(ref_orbff, "grad_forces_name", "forces")
         print("[ref] predict keys:", list(ref_out.keys()))  # see them once
         # predict() is eV / eV per A; ORBModel returns amu*A^2/fs^2 and
         # amu*A/fs^2. Convert the reference so both sides are in MD units.
@@ -271,7 +273,7 @@ def test_orb_distributed_parity(model_name, system):
         if os.environ.get("ORB_DEBUG") == "1":
             # Compare graph construction: the reference adapter's edge count vs for a PBC/neighbor-list. (radius_graph_pbc_cuda and ORB's from_ase_atoms)
             _rg_edges = ref_graph.senders.shape[0]
-            _ehead = ref_orbff.heads[ref_orbff.energy_name]
+            _ehead = ref_orbff.heads[ename]
             _ref_term = _ehead.reference(ref_graph.atomic_numbers, ref_graph.n_node)
             _rlen = ref_graph.edge_features["vectors"].norm(dim=-1)
             print(
