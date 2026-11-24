@@ -1,6 +1,6 @@
 # dynamis_integrator
 
-`dynamis_integrator` provides time integration algorithms for the DistNNP molecular dynamics framework. Each integrator advances atomic positions and velocities by one timestep given the forces computed by `distnnp_forces`. Integrators are written as CUDA kernels for GPU execution and exposed to Python via pybind11.
+`dynamis_integrator` provides time integration algorithms for the DistNNP molecular dynamics framework. Each integrator advances atomic positions and velocities by one timestep given the forces computed by `distnnp_forces`. Each integrator has two GPU kernel implementations, CUDA and Triton, and the CUDA one is used whenever it was built (see [Backends](#backends)).
 
 Currently implemented: **`EulerIntegrator`** — a first-order explicit integrator that updates velocities and positions according to:
 
@@ -22,14 +22,31 @@ v(t + dt) = v(t + dt/2) + (F(t + dt) / 2m) * dt
 
 ---
 
+## Backends
+
+| Backend | Where | Built when |
+|---|---|---|
+| CUDA | `src/csrc/*.cu`, bound as `dynamis_integrator_impl` | CMake finds a CUDA compiler at install time |
+| Triton | `src/dynamis_integrator/_kernels.py` | Always available (compiled on first use, cached in `~/.triton/cache` or `TRITON_CACHE_DIR`) |
+
+Both expose the same classes and methods: `EulerIntegrator.step`, `VerletIntegrator.halfstep1/halfstep2` and `LangevinIntegrator.halfstep1/halfstep2`. `_backend.py` imports the CUDA classes if `dynamis_integrator_impl` exists and the Triton ones otherwise. Check which one you got with:
+
+```python
+import dynamis_integrator
+print(dynamis_integrator.BACKEND)   # "cuda" or "triton"
+```
+
+The choice is made at install time. If no CUDA compiler is found, the install prints a warning and skips the CUDA extension. When testing the fallback in an editable checkout, delete any old `src/dynamis_integrator/dynamis_integrator_impl*.so` first, or it will still be picked up.
+
+---
+
 ## Installation
 
 ### Prerequisites
 
-- Python >= 3.8 with PyTorch >= 2.0.0 installed
-- CUDA Toolkit (12.x recommended)
+- Python >= 3.12 with PyTorch and Triton installed
 - CMake >= 3.25
-- A C++17 / CUDA 17-capable compiler
+- Optional, for the CUDA backend: the CUDA Toolkit (12.x recommended) and a C++17 / CUDA 17-capable compiler
 - `scikit-build-core >= 0.5` (installed automatically by pip)
 
 ### CUDA location
@@ -50,7 +67,7 @@ From the `dynamis_integrator/` directory:
 pip install -e .
 ```
 
-The C++ extension is compiled and the `.so` placed in `build/`. CMake build artefacts go to `build/` as well. Re-run `pip install -e .` after any C++ or CUDA change.
+If a CUDA compiler is found, the C++ extension is compiled and the `.so` placed in `build/`. CMake build artefacts go to `build/` as well. Re-run `pip install -e .` after any C++ or CUDA change. Triton kernel changes need no reinstall.
 
 ### Running tests
 
@@ -76,6 +93,9 @@ python -m build --wheel
 | `include/dynamis_integrator/macros.hpp` | CUDA error-checking macros (`CUDACHECK`, `CHECK_INPUT`, …) |
 | `src/csrc/<name>.cu` | CUDA kernel implementation for each integrator |
 | `src/dynamis_integrator_bindings.cpp` | pybind11 bindings (`PYBIND11_MODULE`) |
+| `src/dynamis_integrator/_kernels.py` | Triton kernels and the Triton `EulerIntegrator` / `VerletIntegrator` / `LangevinIntegrator` classes |
+| `src/dynamis_integrator/_backend.py` | Picks the CUDA or Triton classes; sets `BACKEND` |
+| `src/dynamis_integrator/euler.py`, `verlet.py`, `langevin.py` | Python integrators used by `dynamis`; call the classes from `_backend` |
 | `src/dynamis_integrator/__init__.py` | Python re-exports |
 
 ---
@@ -153,21 +173,34 @@ py::class_<dynamis_integrator::VelocityVerletIntegrator>(m, "VelocityVerletInteg
     .def("step", &dynamis_integrator::VelocityVerletIntegrator::step);
 ```
 
-### Step 5 — Rebuild
+### Step 5 — Implement the Triton version in `_kernels.py`
+
+Add a `@triton.jit` kernel and a class with the **same class and method names** as the C++ one, so either backend can be swapped in:
+
+```python
+@triton.jit
+def velocity_verlet_kernel(...):
+    ...
+
+class VelocityVerletIntegrator:
+    def step(self, positions, velocities, forces, masses, dt):
+        ...  # launch velocity_verlet_kernel[grid](...)
+```
+
+### Step 6 — Add it to `_backend.py`
+
+Import the class in both branches of `_backend.py`, then use it from the Python integrator that wraps it:
+
+```python
+from dynamis_integrator._backend import VelocityVerletIntegrator
+```
+
+### Step 7 — Rebuild
 
 ```bash
 pip install -e .
 ```
 
-### Step 6 — Re-export from `__init__.py`
+### Step 8 — Add tests
 
-Make the new class importable directly from `dynamis_integrator`:
-
-```python
-from dynamis_integrator.dynamis_integrator_impl import VelocityVerletIntegrator
-__all__ = [..., "VelocityVerletIntegrator"]
-```
-
-### Step 7 — Add tests
-
-Add a test file under `tests/` that at minimum constructs the integrator and calls `step()` with small GPU tensors to verify it runs without error.
+Add a test file under `tests/` that imports the class from `dynamis_integrator._backend`, constructs it and calls `step()` with small GPU tensors to verify it runs without error.

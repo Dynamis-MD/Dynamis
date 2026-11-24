@@ -48,7 +48,7 @@ The dynamis project is organized into several sub-packages, each responsible for
 
 - `dynamis_state`: This sub-package contains modules and classes related to the state representation of the system. It defines how the state of the system is represented, including positions, velocities, and other relevant properties related to distribution.
 - `dynamis_model`: This sub-package focuses on the computation of forces within the system. It includes modules that calculate forces based on the state representation and other relevant parameters, specifically tailored for distribution-based neural network potentials.
-- `dynamis_integrator`: This sub-package is responsible for the integration of the equations of motion. It includes modules that implement various integration algorithms to evolve the state of the system over time, taking into account the forces computed by the `dynamis_model` sub-package.
+- `dynamis_integrator`: This sub-package is responsible for the integration of the equations of motion. It includes modules that implement various integration algorithms to evolve the state of the system over time, taking into account the forces computed by the `dynamis_model` sub-package. Its kernels are built from CUDA when a CUDA compiler is available at install time, and fall back to Triton otherwise (`dynamis_integrator.BACKEND` reports which).
 - `dynamis`: This is the main sub-package that serves as the entry point for users.
 
 ## Installation
@@ -60,7 +60,7 @@ With [uv](https://docs.astral.sh/uv/):
 ```bash
 uv venv --python 3.12
 source .venv/bin/activate
-uv pip install torch pytest scipy scikit-build-core pybind11
+uv pip install torch triton pytest scipy scikit-build-core pybind11
 uv pip install --no-build-isolation -e ./dynamis_state -e ./dynamis_integrator -e ./dynamis_model -e ./dynamis
 ```
 
@@ -68,7 +68,7 @@ With plain pip:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install torch pytest scipy scikit-build-core pybind11
+pip install torch triton pytest scipy scikit-build-core pybind11
 pip install --no-build-isolation -e ./dynamis_state -e ./dynamis_integrator -e ./dynamis_model -e ./dynamis
 ```
 

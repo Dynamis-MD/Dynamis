@@ -1,5 +1,5 @@
 import torch
-from dynamis_integrator.dynamis_integrator_impl import LangevinIntegrator
+from dynamis_integrator._backend import LangevinIntegrator
 from dynamis_integrator._data_check import (
     check_devices,
     check_shape_2D,
@@ -18,7 +18,7 @@ class Langevin(DynamisIntegrator):
         self.dt = dt
         self.gamma = gamma
         self.kT = kT
-        self.cpp_integrator = LangevinIntegrator()
+        self.integrator_impl = LangevinIntegrator()
         self.prev_forces = None
 
     def reset(self) -> None:
@@ -50,7 +50,7 @@ class Langevin(DynamisIntegrator):
         check_mass_shape(mass, pos)
         check_shapes_match(pos, vel, frc, noise)
 
-        self.cpp_integrator.halfstep1(
+        self.integrator_impl.halfstep1(
             pos, vel, frc, mass, noise, self.gamma, self.kT, dt
         )
 
@@ -77,7 +77,7 @@ class Langevin(DynamisIntegrator):
         check_shape_2D(vel)
         check_mass_shape(mass, vel)
         check_shapes_match(vel, frc, noise)
-        self.cpp_integrator.halfstep2(vel, frc, mass, noise, self.gamma, self.kT, dt)
+        self.integrator_impl.halfstep2(vel, frc, mass, noise, self.gamma, self.kT, dt)
 
     def step(self, dist_state: DynamisState, model: DynamisModel, dt=None):
         """

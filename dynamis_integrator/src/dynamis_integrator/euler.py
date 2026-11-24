@@ -1,5 +1,5 @@
 import torch
-from dynamis_integrator.dynamis_integrator_impl import EulerIntegrator
+from dynamis_integrator._backend import EulerIntegrator
 from dynamis_integrator._data_check import (
     check_devices,
     check_shape_2D,
