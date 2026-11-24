@@ -726,6 +726,11 @@ class UMAModel(DynamisModel):
                 self.main_model.backbone.sph_feature_size
                 * self.main_model.backbone.sphere_channels
             ),
+        # fairchem caps each target's neighbours (max_neighbors, degeneracy-tolerant);
+        # rebuild the same graph instead of the full radius graph.
+        self.max_num_neighbors = int(self.main_model.backbone.max_neighbors)
+        self.enforce_max_strictly = bool(
+            self.main_model.backbone.enforce_max_neighbors_strictly
         )
 
         if exchanger is None:
@@ -889,8 +894,8 @@ class UMAModel(DynamisModel):
                     },
                 )(),
                 radius=sim_config.cutoff,
-                max_num_neighbors_threshold=0,
-                enforce_max_neighbors_strictly=False,
+                max_num_neighbors_threshold=self.max_num_neighbors,
+                enforce_max_neighbors_strictly=self.enforce_max_strictly,
             )
 
         batch = torch.zeros(num_local, dtype=torch.long, device=device)

@@ -56,7 +56,7 @@ def oracle_build_halo_maps(
         cell,
         pbc,
         cutoff_plus_skin,
-        1000,
+        0,  # halo maps never truncate
         False,
         None,
     )
@@ -291,7 +291,7 @@ def oracle_build_halo_maps(pos, partition_id, cell, pbc, cutoff_plus_skin, rank,
     R = rank
     pid = partition_id.to(torch.int64)
     edges, cell_shifts, _, _ = _impl.radius_graph_pbc_ex(
-        pos, cell, pbc, cutoff_plus_skin, 1000, False, None,
+        pos, cell, pbc, cutoff_plus_skin, 0, False, None,
     )
     src, dst = edges[0], edges[1]
     needed_by = torch.zeros((N, W), dtype=torch.bool, device=device)

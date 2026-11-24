@@ -29,6 +29,10 @@ struct SimulationConfig {
     double ghost_cutoff_buffer; // Extra buffer for ghost zone (default 0.5)
     torch::Tensor cell; // [3, 3] simulation cell matrix
     torch::Tensor pbc; // [3] periodic boundary conditions (int, 0 or 1)
+    // Model graph truncation (see radius_graph.hpp): 0 = every pair within cutoff.
+    // Partitioners weight atoms by the truncated graph; halo maps never truncate.
+    int64_t max_num_neighbors = 0;
+    bool enforce_max_strictly = false;
 };
 
 struct PartitionMessagePassingInfo {
