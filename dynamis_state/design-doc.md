@@ -228,8 +228,9 @@ radius_graph_pbc(
     at::Tensor cell,                // [3, 3] float32 — simulation cell matrix
     at::Tensor pbc,                 // [3]    bool    — axis-wise PBC flags
     float      radius,              // cutoff distance (Å)
-    int64_t    max_num_neighbors,   // cap on neighbours per atom
-    bool       enforce_max_strictly // if true, error when cap exceeded; else silently truncate
+    int64_t    max_num_neighbors,   // per-target nearest-neighbour cap k (0 = no cap)
+    bool       enforce_max_strictly // true: k nearest (Orb); false: fairchem's
+                                    // d^2 <= d^2_(k+1) + 0.01 Å^2 (UMA)
 );
 // Returns: (edge_index [2, E], edge_weight [E], num_neighbors [N])
 ```
@@ -238,9 +239,11 @@ radius_graph_pbc(
 
 **Periodic image handling:** Only axes where `pbc[i] == 1` are tiled. Atoms near a periodic boundary are compared against images of neighbours across the cell, not just the primary image. The cell matrix allows non-orthogonal (triclinic) simulation boxes.
 
+**Neighbour cap:** with `max_num_neighbors = k > 0`, each target atom (`edge_index[1]`) keeps only its nearest neighbours. Internally this is a per-target threshold `tau` on the squared distance (kept iff `d^2 <= tau`), computed in a select stage between the count and write kernels. `radius_graph_pbc_select` returns `tau` and `radius_graph_pbc_ex(..., thresholds=tau)` builds with it — a rank uses this to build edges whose centre is a ghost atom with the `tau` its owner computed from the full neighbourhood (Orb's message passing needs those edges). Semantics are documented in `include/dynamis_state/radius_graph.hpp`.
+
 **Callers and their radii:**
-- `KDTreePartitioner::partition(config)` and `SFCPartitioner::partition(config)` — called at `config.cutoff` to count edges for load balancing
-- `AbstractPartitioner::build_halo_maps()` — called at `config.cutoff + config.ghost_cutoff_buffer` to build the communication maps
+- `KDTreePartitioner::partition(config)` and `SFCPartitioner::partition(config)` — called at `config.cutoff` with `config.max_num_neighbors` to count edges for load balancing (out + in degree when capped)
+- `AbstractPartitioner::build_halo_maps()` — called at `config.cutoff + config.ghost_cutoff_buffer`, never capped, to build the communication maps
 
 **Python binding:**
 ```python

@@ -54,7 +54,7 @@ private:
 
     uint64_t total_atoms{ 0 };
     uint32_t bytes_per_atom{ 0 };
-    uint32_t front_matter_size{ 0 };
+    uint64_t front_matter_size{ 0 };
 
     int fd; // fd of the output file
     uint32_t rank; // rank of the current process

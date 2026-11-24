@@ -85,54 +85,43 @@ class LennardJonesPotentialModel(DynamisModel):
         super().__init__()
         self.epsilon = epsilon
         self.sigma = sigma
-        # Always use independent exchangers for different dimensionalities (3D pos vs 1D types)
-        # to prevent IPC buffer shape mismatches.
-        self.position_exchanger = GPUDirectExchanger()
-        self.atom_type_exchanger = GPUDirectExchanger()
+        if exchanger is None:
+            self.exchanger: Exchanger = GPUDirectExchanger(max_feature_dim=3)
+        elif isinstance(exchanger, type):
+            self.exchanger = exchanger(max_feature_dim=3)
+        else:
+            self.exchanger = exchanger
+
+    @property
+    def position_exchanger(self) -> Exchanger:
+        return self.exchanger
+
+    @property
+    def atom_type_exchanger(self) -> Exchanger:
+        return self.exchanger
 
     def initialize_buffers(
         self, partition_info: PartitionMessagePassingInfo, device
     ) -> None:
-        # For this simple LJ model, we don't have any learnable parameters or buffers that depend on the partitioning
-        # However, if we wanted to, we could initialize any necessary buffers here based on the partition_info
-        self.position_exchanger.setup_exchanger(
+        self.exchanger.setup_exchanger(
             feature_dim=3, partition_info=partition_info, device=device
-        )
-        self.atom_type_exchanger.setup_exchanger(
-            feature_dim=1, partition_info=partition_info, device=device
         )
 
     def __call__(self, distributed_state: DynamisState, *args, **kwargs):
         prev_local_positions = distributed_state.local_molecular_info.atom_positions
         local_positions = prev_local_positions.clone().detach().requires_grad_(True)
-        positions: torch.Tensor = FeaturePushToExchange.apply(
-            local_positions, distributed_state, self.position_exchanger
-        )  # type: ignore
+        positions: torch.Tensor = self.exchanger.push(
+            local_positions, distributed_state
+        )
 
         local_atom_types = distributed_state.local_molecular_info.atom_types
-        # The unsqueeze/reshape pair below assumes 1-D [N] type indices. If this
-        # ever arrives as [N, 1], unsqueeze(1) makes it [N, 1, 1] and the pushed
-        # feature dim silently stops being 1.
         assert local_atom_types.dim() == 1, (
             "local_atom_types must be 1-D [n_local], got shape "
             f"{tuple(local_atom_types.shape)}"
         )
 
         with torch.no_grad():
-            # exchanger needs a 2D [N, 1] feature; the LJ energy needs 1D [N]
-            # atom-type indices. Without the reshape(-1), atom_types stays [N, 1],
-            # making sigma_ij [E, 1] and sigma_ij / distances broadcast to [E, E]
-            # -> energy (and forces) inflated ~E x, which blows positions up on the
-            # next integrator step and overflows the radius-graph grid size.
-            atom_types = (
-                FeaturePushToExchange.apply(
-                    local_atom_types.float().unsqueeze(1),
-                    distributed_state,
-                    self.atom_type_exchanger,
-                )
-                .long()
-                .reshape(-1)
-            )  # type: ignore
+            atom_types = self.exchanger.push(local_atom_types, distributed_state).long()
 
         # Construct the radius graph with PBC using the local positions (including boundary atoms)
 

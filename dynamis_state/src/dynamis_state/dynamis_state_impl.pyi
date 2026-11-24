@@ -18,6 +18,7 @@ __all__: list[str] = [
     "radius_graph_pbc",
     "radius_graph_pbc_counts_ex",
     "radius_graph_pbc_ex",
+    "radius_graph_pbc_select",
 ]
 
 class DistEnvironment:
@@ -154,7 +155,9 @@ class SimpleSpatialPartitioner:
 class SimulationConfig:
     cell: torch.Tensor
     cutoff: float
+    enforce_max_strictly: bool
     ghost_cutoff_buffer: float
+    max_num_neighbors: int
     pbc: torch.Tensor
     def __init__(self) -> None: ...
 
@@ -239,9 +242,11 @@ def radius_graph_pbc_counts_ex(
     pbc: torch.Tensor,
     radius: float,
     target_indices: torch.Tensor | None = None,
+    max_num_neighbors: int = 0,
+    enforce_max_strictly: bool = False,
 ) -> torch.Tensor:
     """
-    Count-only variant: returns just neighbor_counts[N_target] int32. Skips edge buffer + prefix-sum + B4 write kernel (~50% faster).
+    Count-only variant: returns just neighbor_counts[N_target] int32 (kept degree when max_num_neighbors > 0). Skips edge buffer + prefix-sum + B4 write kernel (~50% faster).
     """
 
 def radius_graph_pbc_ex(
@@ -252,7 +257,21 @@ def radius_graph_pbc_ex(
     max_num_neighbors: int,
     enforce_max_strictly: bool,
     target_indices: torch.Tensor | None = None,
+    thresholds: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Extended radius graph: accepts optional target_indices subset, returns (edge_index, cell_shifts, num_neighbors_image, neighbor_counts).
+    Extended radius graph: accepts optional target_indices subset, returns (edge_index, cell_shifts, num_neighbors_image, neighbor_counts). With thresholds (per-target tau on the squared distance, e.g. from radius_graph_pbc_select) only pairs with d^2 <= tau are kept and max_num_neighbors / enforce_max_strictly are unused.
+    """
+
+def radius_graph_pbc_select(
+    pos: torch.Tensor,
+    cell: torch.Tensor,
+    pbc: torch.Tensor,
+    radius: float,
+    max_num_neighbors: int,
+    enforce_max_strictly: bool,
+    target_indices: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    First pass of a max_num_neighbors-truncated build: returns (thresholds, neighbor_counts) per target — tau on the squared distance (+inf = keep all) and the kept degree. Requires max_num_neighbors > 0. Skips the edge buffer and its sync.
     """
