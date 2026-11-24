@@ -109,13 +109,10 @@ class ORBModel(DynamisModel, nn.Module):
         device: Literal["cuda", "cpu"] | None = None,
     ) -> None:
         device = device or self.device
-        # Position exchange: dim=3
-        self._feature_exchanger.setup_exchanger(
-            feature_dim=3, partition_info=partition_info, device=device
-        )
-        # Atom-type + kNN-threshold exchange: dim=2 ([type, tau], see _backbone)
-        self._atom_type_exchanger.setup_exchanger(
-            feature_dim=2, partition_info=partition_info, device=device
+        self.exchanger.setup_exchanger(
+            feature_dim=max(3, int(self.hidden_dim)),
+            partition_info=partition_info,
+            device=device,
         )
 
     def _make_atomgraph(
@@ -179,7 +176,6 @@ class ORBModel(DynamisModel, nn.Module):
         n_local_atoms = local_positions.shape[0]
 
         positions = self.exchanger.push(local_positions, distributed_state)
-        atom_types = self.exchanger.push(local_atom_types, distributed_state).long()
 
         n_atoms = positions.shape[0]
         sim_config = distributed_state.sim_config
@@ -205,10 +201,9 @@ class ORBModel(DynamisModel, nn.Module):
                 self.enforce_max_strictly,
                 torch.arange(n_local_atoms, device=positions.device),
             )
-        types_tau = FeaturePushToExchange.apply(
+        types_tau = self.exchanger.push(
             torch.stack([local_atom_types.float(), tau_local], dim=1),
             distributed_state,
-            self._atom_type_exchanger,
         ).detach()
         atom_types = types_tau[:, 0].long()
         with torch.no_grad():
