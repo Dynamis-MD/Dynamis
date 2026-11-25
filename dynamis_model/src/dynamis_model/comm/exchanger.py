@@ -429,10 +429,33 @@ class GPUDirectExchanger(Exchanger):
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 
-        resolved_device = torch.device(device) if device is not None else torch.device("cuda", rank)
+        resolved_device = (
+            torch.device(device)
+            if device is not None
+            else torch.device("cuda", torch.cuda.current_device())
+        )
         if resolved_device.type == "cuda" and resolved_device.index is None:
             resolved_device = torch.device("cuda", torch.cuda.current_device())
-        device_index = resolved_device.index if resolved_device.index is not None else rank
+        device_index = (
+            resolved_device.index
+            if resolved_device.index is not None
+            else torch.cuda.current_device()
+        )
+
+        # Ensure every rank agrees on Fabric vs. legacy IPC before exporting handles
+        # so a mixed IMEX / non-IMEX allocation fails cleanly instead of mismatching.
+        local_fabric = 1 if FeatureExchanger.supports_fabric_handles(device_index) else 0
+        min_fabric = torch.tensor([local_fabric], dtype=torch.int32, device=resolved_device)
+        max_fabric = min_fabric.clone()
+        dist.all_reduce(min_fabric, op=dist.ReduceOp.MIN)
+        dist.all_reduce(max_fabric, op=dist.ReduceOp.MAX)
+        if int(min_fabric.item()) != int(max_fabric.item()):
+            raise RuntimeError(
+                "Inconsistent CUDA Fabric (MNNVL/IMEX) support across ranks: some ranks "
+                "have IMEX/Fabric active while others do not. Ensure all nodes share an "
+                "IMEX domain, set DYNAMIS_DISABLE_FABRIC=1 for single-node legacy IPC, "
+                "or use PythonNCCLExchanger."
+            )
 
         # Step 1: Allocate 2-slot max_feature_dim buffers and pack local metadata in C++
         local_meta_bytes = self.exchanger.prepare_setup(
