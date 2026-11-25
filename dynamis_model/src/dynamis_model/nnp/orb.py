@@ -76,6 +76,7 @@ class ORBModel(DynamisModel, nn.Module):
         device: Literal["cuda", "cpu"] | None = None,
         edge_chunk_size: int | None = DEFAULT_EDGE_CHUNK_SIZE,
         mixed_precision: Literal["bf16"] | None = None,
+        use_fused_kernels: bool | Literal["auto"] = "auto",
         **kwargs,
     ):
         nn.Module.__init__(self)
@@ -89,12 +90,18 @@ class ORBModel(DynamisModel, nn.Module):
             raise ValueError(
                 f"edge_chunk_size must be >= 0 or None, got {edge_chunk_size}."
             )
+        if use_fused_kernels not in (True, False, "auto"):
+            raise ValueError(
+                f"Unsupported use_fused_kernels={use_fused_kernels!r}; expected True, False, or 'auto'."
+            )
 
         self.device = device
         self.edge_chunk_size = (
             int(edge_chunk_size) if edge_chunk_size and edge_chunk_size > 0 else None
         )
         self.mixed_precision = mixed_precision
+        self.use_fused_kernels = use_fused_kernels
+        self._fused_state = None
 
         # Let the ORB factory build the model, heads, and load weights
         factory_function = getattr(pretrained, model_name)
@@ -509,6 +516,50 @@ class ORBModel(DynamisModel, nn.Module):
             mp_offsets = (-knn_cell_offsets[mp_mask]).contiguous()
             del knn_edge_index, knn_cell_offsets, mp_mask
             cell_2d = sim_config.cell.squeeze(0).to(positions.dtype)
+            if self.use_fused_kernels is True or (
+                self.use_fused_kernels == "auto" and self.mixed_precision == "bf16"
+            ):
+                from dynamis_model.nnp import orb_fused_kernels as _fused_orb
+
+                if _fused_orb.can_use_fused_orb_direct(
+                    self.orbff,
+                    positions,
+                    mixed_precision=self.mixed_precision,
+                    use_fused_kernels=self.use_fused_kernels,
+                ):
+                    if (
+                        self._fused_state is None
+                        or self._fused_state.bessel_weights.device != positions.device
+                    ):
+                        self._fused_state = _fused_orb.prepare_orb_fused_state(
+                            self.orbff, positions.device
+                        )
+                    nodes, zbl_energy, zbl_forces = _fused_orb.run_fused_orb_backbone(
+                        orbff=self.orbff,
+                        fused=self._fused_state,
+                        exchanger=self.exchanger,
+                        distributed_state=distributed_state,
+                        positions=positions,
+                        atom_types=atom_types,
+                        senders=senders,
+                        receivers=receivers,
+                        mp_offsets=mp_offsets,
+                        cell_2d=cell_2d,
+                        n_local_atoms=n_local_atoms,
+                        model_radius=float(self.model_radius),
+                        chunk_size=self.edge_chunk_size or DEFAULT_EDGE_CHUNK_SIZE,
+                    )
+                    return _Backbone(
+                        nodes=nodes,
+                        local_positions=local_positions,
+                        local_atom_types=local_atom_types,
+                        n_local=n_local_atoms,
+                        mp_graph=None,
+                        zbl_graph=None,
+                        world_size=world_size,
+                        zbl_energy=zbl_energy,
+                        zbl_forces=zbl_forces,
+                    )
             return self._backbone_direct_chunked(
                 distributed_state=distributed_state,
                 local_positions=local_positions,

@@ -28,6 +28,10 @@ uma = [
 orb = [
     "orb-models==0.7.0"
 ]
+orb-fused = [
+    "orb-models==0.7.0",
+    "nvidia-cutlass-dsl[cu13]==4.8.1"
+]
 all = [
     "dynamis_model[uma,orb]"
 ]

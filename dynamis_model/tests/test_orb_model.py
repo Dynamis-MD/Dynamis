@@ -365,14 +365,15 @@ def test_orb_distributed_parity(model_name, system):
 
 @pytest.mark.skipif(not HAS_ORB, reason="orb_models is not installed")
 @pytest.mark.parametrize(
-    "edge_chunk_size,mixed_precision,e_rtol,f_rtol",
+    "edge_chunk_size,mixed_precision,use_fused_kernels,e_rtol,f_rtol",
     [
-        (1024, None, ENERGY_RTOL, FORCE_RTOL),
-        (1024, "bf16", 5e-4, 5e-2),
+        (1024, None, False, ENERGY_RTOL, FORCE_RTOL),
+        (1024, "bf16", False, 5e-4, 5e-2),
+        (1024, "bf16", "auto", 5e-4, 5e-2),
     ],
 )
 def test_orb_direct_edge_chunking_parity(
-    edge_chunk_size, mixed_precision, e_rtol, f_rtol
+    edge_chunk_size, mixed_precision, use_fused_kernels, e_rtol, f_rtol
 ):
     """Verify multi-chunk direct inference matches unchunked ORBModel on 2 GPUs
     and reduces peak CUDA memory when chunking across edges."""
@@ -417,6 +418,7 @@ def test_orb_direct_edge_chunking_parity(
         device=device,
         edge_chunk_size=edge_chunk_size,
         mixed_precision=mixed_precision,
+        use_fused_kernels=use_fused_kernels,
     )
 
     sim_config = SimulationConfig()
