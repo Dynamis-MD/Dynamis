@@ -67,7 +67,7 @@ def balance_channels_batched(
     )
     system_sums.index_add_(0, batch[:num_local], channels_to_balance_local)
 
-    if dist.is_initialized():
+    if dist.is_initialized() and dist.get_world_size() > 1:
         system_sums = dist_nn.all_reduce(system_sums, op=torch.distributed.ReduceOp.SUM)
 
     target_sums = (target - target_offset).unsqueeze(1).expand(-1, n_channels)
@@ -75,7 +75,13 @@ def balance_channels_batched(
     corrections = (system_sums - target_sums) / natoms_global.unsqueeze(1)
 
     channels_to_balance_all = emb[:, 0, start_idx:end_idx]
-    out_emb[:, 0, start_idx:end_idx] = channels_to_balance_all - corrections[batch]
+    if num_systems == 1:
+        # single system (every MD call): broadcast instead of corrections[batch]. Same values (batch is all 0); the
+        # advanced-indexing backward is a sort-based index_put with N duplicate indices (1.5 ms per call at 16k W=2);
+        # the broadcast backward is a plain deterministic row sum.
+        out_emb[:, 0, start_idx:end_idx] = channels_to_balance_all - corrections
+    else:
+        out_emb[:, 0, start_idx:end_idx] = channels_to_balance_all - corrections[batch]
 
     return out_emb
 
@@ -97,6 +103,16 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
     def set_profiler(self, profiler):
         """Set profiler for detailed model timing."""
         self.profiler = profiler
+
+    def on_predict_check(self, data) -> None:
+        """fairchem's merged-MOLE check compares the composition of THIS call's atoms with the one the model was merged
+        on. In a domain-decomposed run those are the [local | ghost] atoms of one rank, whose composition changes with
+        every halo rebuild / repartition (-> MergeMoleConsistencyError), while the MOLE coefficients Dynamis merges are
+        the GLOBAL composition (set_MOLE_coefficients: all_reduce), which MD never changes -> check only on a single
+        rank."""
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            return
+        return super().on_predict_check(data)
 
     def set_MOLE_coefficients(self, atomic_numbers_full, batch_full, csd_mixed_emb):
         if self.num_experts == 0:
@@ -770,6 +786,16 @@ class UMAModel(DynamisModel):
     ) -> dict[str, torch.tensor]:
         if not self.predictor.lazy_model_intialized:
             self.predictor._lazy_init(data)
+            # fairchem's prepare_for_inference binds eSCNMDMoeBackbone.on_predict_check onto the merged backbone
+            # INSTANCE (shadowing the class override) -> re-bind Dynamis' distributed-aware check
+            import types
+
+            bb = self.predictor.model.module.backbone
+            inner = getattr(bb, "_orig_mod", bb)
+            if isinstance(inner, DistributedESCNMDBackbone):
+                inner.on_predict_check = types.MethodType(DistributedESCNMDBackbone.on_predict_check, inner)
+                if inner is not bb:
+                    bb.on_predict_check = inner.on_predict_check
 
         # Handle single-atom systems (natoms==1 and pbc all False)
         # Skip this check if the model natively supports single atoms
@@ -859,7 +885,8 @@ class UMAModel(DynamisModel):
         spin: torch.Tensor | None = None,
         device: Literal["cuda", "cpu"] | None = None,
     ):
-        self.main_model.eval()
+        if self.main_model.training:  # module.train(False) walks ~1300 modules: ~2 ms host time per call
+            self.main_model.eval()
         device = device or self.device
         self.main_model.backbone._distributed_state = distributed_state
 
@@ -927,7 +954,10 @@ class UMAModel(DynamisModel):
         data["num_global"] = torch.tensor([num_global], device=device)
         data.to(device)
 
-        self.predictor.move_to_device()
+        if not getattr(self, "_moved_to_device", False):
+            # once: walking every module's _apply per call cost ~4 ms of host time at 2k atoms
+            self.predictor.move_to_device()
+            self._moved_to_device = True
         pred = self.predict(data)
 
         energy = pred[f"{datasets}_energy"] * _EV_PER_A_TO_AMU_A_PER_FS2
