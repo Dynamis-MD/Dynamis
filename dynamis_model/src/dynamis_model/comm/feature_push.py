@@ -15,6 +15,18 @@ from dynamis_model.comm.exchanger import Exchanger
 from typing import Tuple
 
 
+def _device_timing_where() -> Where:
+    """Where.Device normally; Where.Host while the current stream is being captured into a CUDA graph.
+
+    A CUDA event recorded inside a capture becomes a graph node, not a timestamp: the Timer's later deferred read
+    (cudaEventQuery / ElapsedTime on the captured events) fails with cudaErrorInvalidValue and poisons the next CUDA
+    call. During a capture nothing executes anyway, so only the host span (the time
+    spent recording) is kept; graph replays are timed by the caller's region around replay()."""
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        return Where.Host
+    return Where.Device
+
+
 class FeaturePushToExchange(Function):
     @staticmethod
     def forward(
@@ -53,7 +65,7 @@ class FeaturePushToExchange(Function):
         ctx._timing_parent_span = Timer.current_span_id()
 
         t = Timer()
-        t.start("halo_exchange", TimerClass.Comm, Where.Device)
+        t.start("halo_exchange", TimerClass.Comm, _device_timing_where())
         received_features = exchanger.feature_push_forward(
             features_to_push, partition_info
         )
@@ -84,7 +96,7 @@ class FeaturePushToExchange(Function):
         t.start(
             "halo_exchange",
             TimerClass.Comm,
-            Where.Device,
+            _device_timing_where(),
             parent_id=getattr(ctx, "_timing_parent_span", 0),
         )
         recevied_features_grad = exchanger.feature_push_backward(

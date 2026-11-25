@@ -450,6 +450,35 @@ def test_timer_reused_across_host_then_device(tmp_path):
     assert sorted(r["where"] for r in recs) == ["device", "host"]
 
 
+@requires_cuda
+def test_device_timer_inside_graph_capture_degrades_to_host(tmp_path):
+    # An event recorded during stream capture becomes a graph node, not a timestamp;
+    # reading it later fails with cudaErrorInvalidValue and poisons the next CUDA
+    # call. Timer.start(Where.Device) must record a host span while capturing.
+    init_registry(tmp_path, device_id=0)
+    x = torch.zeros(1024, device="cuda")
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        x.add_(1.0)
+    torch.cuda.current_stream().wait_stream(s)
+    torch.cuda.synchronize()
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        t = Timer()
+        t.start("captured", TimerClass.Compute, Where.Device)
+        x.add_(1.0)
+        t.stop()
+    g.replay()
+    torch.cuda.synchronize()
+
+    recs = only_recs(flush_and_read(tmp_path))
+    assert x[0].item() == 2.0   # warm-up + one replay (capture does not execute)
+    assert (torch.ones(8, device="cuda").sum().item()) == 8.0
+    assert [r["where"] for r in recs] == ["host"]
+
+
 def test_double_start_is_a_hard_error(tmp_path):
     # A misplaced stop() would otherwise produce a plausible-looking wrong number
     # and silently leak the first event pair.
