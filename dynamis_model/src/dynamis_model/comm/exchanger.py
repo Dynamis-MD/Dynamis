@@ -355,7 +355,15 @@ class PythonNCCLExchanger(Exchanger):
 
 
 class GPUDirectExchanger(Exchanger):
-    """C++-backed halo exchanger using one-sided GPUDirect / NVLink / Fabric transport."""
+    """C++-backed halo exchanger using one-sided GPUDirect / NVLink / Fabric transport.
+
+    NOT safe under CUDA-graph replay: the push's peer sync is cuStreamWriteValue32(own counter, g) +
+    cuStreamWaitValue32(peer counters >= g) with g = a HOST-side ++call_counter_. A capture freezes g into the
+    graph's stream mem-op nodes, so from the 2nd replay on the wait is already satisfied and a late peer's ghost rows
+    are read stale (measured with an injected in-graph delay, benchmarks/uma_fused/dist_capture_test.py). Whole-call
+    graphs (UMAModel(fused_graph=True), W > 1) therefore default to SymmMemExchanger
+    (dynamis_model.comm.symm_exchanger; device-side barrier) and refuse this class (docs/symm_exchanger.md).
+    """
 
     def __init__(
         self,
