@@ -123,20 +123,18 @@ void TrajectoryWriterImpl::write_front_matter(float time_per_step, uint32_t step
     // descriptor even though it isn't a per-atom field (see submit())
     const uint32_t field_count = static_cast<uint32_t>(active_fields.size()) + 1;
 
-    uint64_t front_matter_size = layout::kFieldDescriptorsOffset +
-            field_count * layout::kFieldDescriptorSize +
+    uint64_t header_unpadded = layout::kFieldDescriptorsOffset +
+            static_cast<uint64_t>(field_count) * layout::kFieldDescriptorSize +
             sizeof(uint64_t); // front_matter_size itself
 
-    // should pad the front_matter_size so this block is on a 8 byte boundary
-    uint32_t front_matter_padding = padding_to_8(front_matter_size);
-    front_matter_size += front_matter_padding;
+    // should pad the header so the atom_types block starts on an 8 byte boundary
+    uint32_t front_matter_padding = padding_to_8(header_unpadded);
+    uint64_t header_block_size = header_unpadded + front_matter_padding;
 
-    // then the atom types start at a 8 byte boundary and then
-    // I will insert padding at the end to make sure they stay on the 8 byte boundary
-
-    front_matter_size += state.num_atoms; // 8 bit unsigned ints for each atom
+    // then the atom types start at an 8 byte boundary and
+    // insert padding at the end to keep front_matter_size 8-byte aligned
     uint32_t atom_type_padding = padding_to_8(state.num_atoms);
-    front_matter_size += atom_type_padding;
+    uint64_t front_matter_size = header_block_size + state.num_atoms + atom_type_padding;
 
     // all ranks need to know front matter size, bytes per atom, and total atoms
 
@@ -153,10 +151,10 @@ void TrajectoryWriterImpl::write_front_matter(float time_per_step, uint32_t step
     if (rank != 0)
         return;
 
-    // create a buffer
-    std::vector<uint8_t> buf(front_matter_size);
+    // fixed header + field descriptors + front_matter_size + alignment padding
+    std::vector<uint8_t> buf(header_block_size);
 
-    uint32_t offset = 0;
+    size_t offset = 0;
 
     // magic
     memcpy(buf.data() + offset, kMagicBytes, sizeof(kMagicBytes));
@@ -224,22 +222,21 @@ void TrajectoryWriterImpl::write_front_matter(float time_per_step, uint32_t step
     memset(buf.data() + offset, 0, front_matter_padding);
     offset += front_matter_padding;
 
-    // tensor of atomic numbers
-    // TODO this could be large and its own separate write to the file to make things easier
-    // probably
-    auto t = state.atom_types.contiguous().toType(torch::kUInt8);
+    PWRITE_ALL(fd, buf.data(), buf.size(), 0);
 
-    size_t tensor_bytes = t.numel() * t.element_size();
-    memcpy(buf.data() + offset, t.data_ptr(), tensor_bytes);
-    offset += tensor_bytes;
+    // write atomic numbers directly without copying into the header buffer
+    auto t = state.atom_types.to(torch::kCPU).contiguous().toType(torch::kUInt8);
+    if (static_cast<uint64_t>(t.numel()) != state.num_atoms) {
+        throw std::runtime_error("TrajectoryWriter: atom_types length (" +
+                                 std::to_string(t.numel()) + ") does not match num_atoms (" +
+                                 std::to_string(state.num_atoms) + ")");
+    }
+    uint64_t tensor_bytes =
+            static_cast<uint64_t>(t.numel()) * static_cast<uint64_t>(t.element_size());
+    PWRITE_ALL(fd, t.data_ptr(), tensor_bytes, header_block_size);
 
-    // padding
-    memset(buf.data() + offset, 0, atom_type_padding);
-    offset += atom_type_padding;
-
-    // write to the file
-    ssize_t written = pwrite(fd, buf.data(), front_matter_size, 0);
-    CHECK_WRITE(written, buf.size());
+    uint8_t pad[8] = { 0 };
+    PWRITE_ALL(fd, pad, atom_type_padding, header_block_size + tensor_bytes);
 }
 
 void TrajectoryWriterImpl::submit(uint32_t step, MolecularInfo state,
@@ -281,9 +278,7 @@ void TrajectoryWriterImpl::submit(uint32_t step, MolecularInfo state,
         torch::Tensor pbc_cpu = current_pbc.contiguous();
         memcpy(pbc_cell_buf.data() + 9 * sizeof(float), pbc_cpu.data_ptr(), 3 * sizeof(uint8_t));
 
-        ssize_t written = pwrite(fd, pbc_cell_buf.data(), kPbcCellBlockSize,
-                                 static_cast<off_t>(offset));
-        CHECK_WRITE(written, kPbcCellBlockSize);
+        PWRITE_ALL(fd, pbc_cell_buf.data(), kPbcCellBlockSize, offset);
     }
 
     uint64_t atom_block_offset = offset + kPbcCellBlockSize;
@@ -295,9 +290,9 @@ void TrajectoryWriterImpl::submit(uint32_t step, MolecularInfo state,
 
     auto write_tensor = [&](torch::Tensor t, uint64_t off) {
         torch::Tensor cpu_tensor = t.to(torch::kCPU).contiguous();
-        size_t tensor_bytes = cpu_tensor.numel() * cpu_tensor.element_size();
-        ssize_t written = pwrite(fd, cpu_tensor.data_ptr(), tensor_bytes, static_cast<off_t>(off));
-        CHECK_WRITE(written, tensor_bytes);
+        uint64_t tensor_bytes = static_cast<uint64_t>(cpu_tensor.numel()) *
+                static_cast<uint64_t>(cpu_tensor.element_size());
+        PWRITE_ALL(fd, cpu_tensor.data_ptr(), tensor_bytes, off);
     };
 
     // doing sizeof here to be more explicit about the calculations; atom data

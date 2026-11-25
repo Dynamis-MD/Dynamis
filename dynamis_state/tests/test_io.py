@@ -1,5 +1,6 @@
 """Tests for io integration"""
 
+import os
 import pathlib
 import struct
 import uuid
@@ -1027,3 +1028,109 @@ def test_translate_dynamis_to_xyz_round_trip():
         assert torch.allclose(dynamis_info.atom_velocities, xyz_info.atom_velocities)
         assert torch.equal(dynamis_cell, xyz_cell)
         assert torch.equal(dynamis_pbc, xyz_pbc)
+
+
+@pytest.mark.parametrize("num_atoms", [1, 7, 8, 13])
+def test_front_matter_atom_types_alignment_round_trip(tmp_path, num_atoms):
+    """Verify front-matter padding and separate atom_types writes across
+    aligned and unaligned atom counts."""
+    info = MolecularInfo()
+    info.num_atoms = num_atoms
+    info.atom_types = torch.tensor(
+        [(i % 10) + 1 for i in range(num_atoms)], dtype=torch.int64
+    )
+    info.atom_positions = torch.arange(
+        num_atoms * 3, dtype=torch.float32
+    ).reshape(num_atoms, 3)
+    info.atom_velocities = torch.zeros((num_atoms, 3), dtype=torch.float32)
+    info.atom_vertex_numbers = torch.arange(num_atoms, dtype=torch.int64)
+
+    cell = torch.eye(3, dtype=torch.float32) * 10.0
+    pbc = torch.ones(3, dtype=torch.uint8)
+    filename = f"align_{num_atoms}.dynamis"
+
+    with TrajectoryWriter(
+        0, b"1234", "author", str(tmp_path), filename, info, cell, pbc, 1.0, 1
+    ) as writer:
+        writer.update_atom_counts(torch.tensor([num_atoms], dtype=torch.uint32))
+        writer.submit(0, info)
+
+    loaded, loaded_cell, loaded_pbc = TrajectoryReader.read(str(tmp_path / filename))
+    assert loaded.num_atoms == num_atoms
+    assert torch.equal(loaded.atom_types, info.atom_types)
+    assert torch.equal(loaded.atom_positions, info.atom_positions)
+    assert torch.equal(loaded.atom_velocities, info.atom_velocities)
+    assert torch.equal(loaded.atom_vertex_numbers, info.atom_vertex_numbers)
+    assert torch.equal(loaded_cell, cell)
+    assert torch.equal(loaded_pbc, pbc)
+
+
+def test_writer_mismatched_atom_types_length_raises(tmp_path):
+    info = MolecularInfo()
+    info.num_atoms = 6
+    info.atom_types = torch.ones(4, dtype=torch.int64)
+    cell = torch.eye(3, dtype=torch.float32)
+    pbc = torch.ones(3, dtype=torch.uint8)
+
+    with pytest.raises(RuntimeError, match="atom_types length"):
+        TrajectoryWriter(
+            0, b"1234", "author", str(tmp_path), "bad.dynamis", info, cell, pbc, 1.0, 1
+        )
+
+
+@pytest.mark.skipif(
+    os.environ.get("DYNAMIS_RUN_LARGE_IO_TESTS") != "1",
+    reason="Requires ~16 GiB RAM and ~5 GiB disk; set DYNAMIS_RUN_LARGE_IO_TESTS=1 to run",
+)
+def test_large_dynamis_exceeding_4gib_single_field_round_trip(tmp_path):
+    """360M atoms -> 4.32 GB positions block, exercising both Linux's 2 GiB
+    single-pread/pwrite cap and 64-bit block sizes (> UINT32_MAX bytes)."""
+    num_atoms = 360_000_000
+    check_indices = [0, 90_000_000, 180_000_000, 358_000_000, num_atoms - 1]
+
+    info = MolecularInfo()
+    info.num_atoms = num_atoms
+    info.atom_types = torch.full((num_atoms,), 6, dtype=torch.uint8)
+    for k, idx in enumerate(check_indices):
+        info.atom_types[idx] = k + 1
+
+    info.atom_positions = torch.zeros((num_atoms, 3), dtype=torch.float32)
+    for k, idx in enumerate(check_indices):
+        info.atom_positions[idx] = torch.tensor(
+            [float(k + 1), float(k + 2), float(k + 3)], dtype=torch.float32
+        )
+
+    cell = torch.eye(3, dtype=torch.float32) * 500.0
+    pbc = torch.ones(3, dtype=torch.uint8)
+    filename = "large_360m.dynamis"
+
+    with TrajectoryWriter(
+        0,
+        b"1234",
+        "author",
+        str(tmp_path),
+        filename,
+        info,
+        cell,
+        pbc,
+        1.0,
+        1,
+        ["positions"],
+    ) as writer:
+        writer.update_atom_counts(torch.tensor([num_atoms], dtype=torch.uint32))
+        writer.submit(0, info)
+
+    del info
+
+    loaded, loaded_cell, loaded_pbc = TrajectoryReader.read(str(tmp_path / filename))
+    assert loaded.num_atoms == num_atoms
+    assert torch.equal(loaded_cell, cell)
+    assert torch.equal(loaded_pbc, pbc)
+    for k, idx in enumerate(check_indices):
+        assert int(loaded.atom_types[idx]) == k + 1
+        expected = torch.tensor(
+            [float(k + 1), float(k + 2), float(k + 3)], dtype=torch.float32
+        )
+        assert torch.equal(loaded.atom_positions[idx], expected)
+        assert int(loaded.atom_vertex_numbers[idx]) == idx
+
