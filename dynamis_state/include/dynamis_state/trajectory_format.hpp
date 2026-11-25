@@ -1,35 +1,71 @@
 #pragma once
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 // constants shared by reader and writer
 namespace dynamis_state {
 
-// Checks the ssize_t result of a pread/pwrite call
-#define CHECK_READ(result, expected)                                                               \
-    ::dynamis_state::detail::check_io_result((result), (expected), true, __FILE__, __LINE__)
+// Max bytes per individual pread/pwrite syscall. Linux caps a single call at
+// 0x7ffff000 (~2 GiB - 4 KiB); chunking at 1 GiB stays well below that limit
+// while also handling EINTR and partial transfers cleanly.
+static constexpr uint64_t kMaxIoChunkBytes = static_cast<uint64_t>(1) << 30; // 1 GiB
 
-#define CHECK_WRITE(result, expected)                                                              \
-    ::dynamis_state::detail::check_io_result((result), (expected), false, __FILE__, __LINE__)
+#define PREAD_ALL(fd, buf, count, offset)                                                          \
+    ::dynamis_state::detail::pread_all((fd), (buf), (count), (offset), __FILE__, __LINE__)
+
+#define PWRITE_ALL(fd, buf, count, offset)                                                         \
+    ::dynamis_state::detail::pwrite_all((fd), (buf), (count), (offset), __FILE__, __LINE__)
 
 namespace detail {
-inline void check_io_result(ssize_t result, uint64_t expected, bool is_read, const char *file,
-                            int line)
+inline void pread_all(int fd, void *buf, uint64_t count, uint64_t offset, const char *file,
+                      int line)
 {
-    const char *verb = is_read ? "pread" : "pwrite";
-    if (result < 0) {
-        throw std::runtime_error(std::string(verb) + " failed at " + file + ":" +
-                                 std::to_string(line) + ": " + strerror(errno));
+    auto *dst = static_cast<uint8_t *>(buf);
+    uint64_t done = 0;
+    while (done < count) {
+        size_t chunk = static_cast<size_t>(std::min<uint64_t>(count - done, kMaxIoChunkBytes));
+        ssize_t n = ::pread(fd, dst + done, chunk, static_cast<off_t>(offset + done));
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            throw std::runtime_error(std::string("pread failed at ") + file + ":" +
+                                     std::to_string(line) + ": " + strerror(errno));
+        }
+        if (n == 0) {
+            throw std::runtime_error(std::string("short read at ") + file + ":" +
+                                     std::to_string(line) + ": expected " + std::to_string(count) +
+                                     " bytes, got " + std::to_string(done));
+        }
+        done += static_cast<uint64_t>(n);
     }
-    if (static_cast<uint64_t>(result) != expected) {
-        throw std::runtime_error(std::string(is_read ? "short read" : "short write") + " at " +
-                                 file + ":" + std::to_string(line) + ": expected " +
-                                 std::to_string(expected) + " bytes, got " +
-                                 std::to_string(result));
+}
+
+inline void pwrite_all(int fd, const void *buf, uint64_t count, uint64_t offset, const char *file,
+                       int line)
+{
+    const auto *src = static_cast<const uint8_t *>(buf);
+    uint64_t done = 0;
+    while (done < count) {
+        size_t chunk = static_cast<size_t>(std::min<uint64_t>(count - done, kMaxIoChunkBytes));
+        ssize_t n = ::pwrite(fd, src + done, chunk, static_cast<off_t>(offset + done));
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            throw std::runtime_error(std::string("pwrite failed at ") + file + ":" +
+                                     std::to_string(line) + ": " + strerror(errno));
+        }
+        if (n == 0) {
+            throw std::runtime_error(std::string("short write at ") + file + ":" +
+                                     std::to_string(line) + ": expected " + std::to_string(count) +
+                                     " bytes, got " + std::to_string(done));
+        }
+        done += static_cast<uint64_t>(n);
     }
 }
 } // namespace detail

@@ -123,18 +123,14 @@ struct DynamisHeader {
 
 DynamisHeader read_dynamis_header(int fd, const std::string &path)
 {
-    ssize_t n;
-
     uint8_t magic[8];
-    n = pread(fd, magic, sizeof(magic), layout::kMagicOffset);
-    CHECK_READ(n, sizeof(magic));
+    PREAD_ALL(fd, magic, sizeof(magic), layout::kMagicOffset);
     if (memcmp(magic, kMagicBytes, sizeof(magic)) != 0) {
         throw std::runtime_error("'" + path + "' is not a valid dynamis file (bad magic)");
     }
 
     uint32_t version;
-    n = pread(fd, &version, sizeof(version), layout::kVersionOffset);
-    CHECK_READ(n, sizeof(version));
+    PREAD_ALL(fd, &version, sizeof(version), layout::kVersionOffset);
     if (version != 1) {
         throw std::runtime_error("'" + path + "': unsupported dynamis version " +
                                  std::to_string(version) + " (only version 1 is supported)");
@@ -142,15 +138,11 @@ DynamisHeader read_dynamis_header(int fd, const std::string &path)
 
     DynamisHeader h;
 
-    n = pread(fd, &h.num_atoms, sizeof(h.num_atoms), layout::kTotalAtomsOffset);
-    CHECK_READ(n, sizeof(h.num_atoms));
-
-    n = pread(fd, &h.bytes_per_atom, sizeof(h.bytes_per_atom), layout::kBytesPerAtomOffset);
-    CHECK_READ(n, sizeof(h.bytes_per_atom));
+    PREAD_ALL(fd, &h.num_atoms, sizeof(h.num_atoms), layout::kTotalAtomsOffset);
+    PREAD_ALL(fd, &h.bytes_per_atom, sizeof(h.bytes_per_atom), layout::kBytesPerAtomOffset);
 
     uint32_t field_count;
-    n = pread(fd, &field_count, sizeof(field_count), layout::kFieldCountOffset);
-    CHECK_READ(n, sizeof(field_count));
+    PREAD_ALL(fd, &field_count, sizeof(field_count), layout::kFieldCountOffset);
 
     // Field count can never be more than 4 (pbc_cell + id + position + velocity)
     if (field_count > 4) {
@@ -161,36 +153,38 @@ DynamisHeader read_dynamis_header(int fd, const std::string &path)
     h.field_names.resize(field_count);
     for (uint32_t i = 0; i < field_count; i++) {
         char name_buf[layout::kFieldDescriptorSize] = { 0 };
-        n = pread(fd, name_buf, sizeof(name_buf),
-                  layout::kFieldDescriptorsOffset + i * layout::kFieldDescriptorSize);
-        CHECK_READ(n, sizeof(name_buf));
+        PREAD_ALL(fd, name_buf, sizeof(name_buf),
+                  layout::kFieldDescriptorsOffset +
+                          static_cast<uint64_t>(i) * layout::kFieldDescriptorSize);
         h.field_names[i] = std::string(name_buf, strnlen(name_buf, sizeof(name_buf)));
     }
 
-    n = pread(fd, &h.front_matter_size, sizeof(h.front_matter_size),
+    PREAD_ALL(fd, &h.front_matter_size, sizeof(h.front_matter_size),
               layout::kFieldDescriptorsOffset +
                       static_cast<uint64_t>(field_count) * layout::kFieldDescriptorSize);
-    CHECK_READ(n, sizeof(h.front_matter_size));
 
     // atom types sit right before the front_matter_size boundary, padded to
     // an 8-byte multiple
     uint32_t atom_type_padding = padding_to_8(h.num_atoms);
+    if (h.front_matter_size < h.num_atoms + atom_type_padding) {
+        throw std::runtime_error("'" + path + "': malformed header (front_matter_size too small)");
+    }
     uint64_t atom_types_offset = h.front_matter_size - h.num_atoms - atom_type_padding;
 
-    std::vector<uint8_t> types(h.num_atoms);
-    n = pread(fd, types.data(), types.size(), atom_types_offset);
-    CHECK_READ(n, static_cast<ssize_t>(types.size()));
-    h.atom_types =
-            torch::from_blob(types.data(), { static_cast<int64_t>(h.num_atoms) }, torch::kUInt8)
-                    .clone()
-                    .to(torch::kInt64);
+    torch::Tensor types_u8 = torch::empty({ static_cast<int64_t>(h.num_atoms) }, torch::kUInt8);
+    PREAD_ALL(fd, types_u8.data_ptr(), h.num_atoms, atom_types_offset);
+    h.atom_types = types_u8.to(torch::kInt64);
 
     h.frame_size = kPbcCellBlockSize + static_cast<uint64_t>(h.bytes_per_atom) * h.num_atoms;
     if (h.frame_size <= kPbcCellBlockSize) {
         throw std::runtime_error("'" + path + "': malformed header (empty frame size)");
     }
 
-    uint64_t file_size = static_cast<uint64_t>(lseek(fd, 0, SEEK_END));
+    off_t end_pos = lseek(fd, 0, SEEK_END);
+    if (end_pos < 0) {
+        throw std::runtime_error("lseek failed on '" + path + "': " + strerror(errno));
+    }
+    uint64_t file_size = static_cast<uint64_t>(end_pos);
     if (file_size < h.front_matter_size || (file_size - h.front_matter_size) % h.frame_size != 0) {
         throw std::runtime_error(
                 "'" + path +
@@ -207,23 +201,17 @@ DynamisHeader read_dynamis_header(int fd, const std::string &path)
 std::tuple<MolecularInfo, torch::Tensor, torch::Tensor>
 read_dynamis_frame(int fd, const DynamisHeader &h, const std::string &path, uint64_t frame_index)
 {
-    ssize_t n;
-
     MolecularInfo atoms;
     atoms.num_atoms = h.num_atoms;
     atoms.atom_types = h.atom_types;
 
     uint64_t loc = h.front_matter_size + frame_index * h.frame_size;
 
-    float cell_buf[9];
-    n = pread(fd, cell_buf, sizeof(cell_buf), loc);
-    CHECK_READ(n, sizeof(cell_buf));
-    torch::Tensor cell = torch::from_blob(cell_buf, { 3, 3 }, torch::kFloat32).clone();
+    torch::Tensor cell = torch::empty({ 3, 3 }, torch::kFloat32);
+    PREAD_ALL(fd, cell.data_ptr(), 9 * sizeof(float), loc);
 
-    uint8_t pbc_buf[3];
-    n = pread(fd, pbc_buf, sizeof(pbc_buf), loc + sizeof(cell_buf));
-    CHECK_READ(n, sizeof(pbc_buf));
-    torch::Tensor pbc = torch::from_blob(pbc_buf, { 3 }, torch::kUInt8).clone();
+    torch::Tensor pbc = torch::empty({ 3 }, torch::kUInt8);
+    PREAD_ALL(fd, pbc.data_ptr(), 3 * sizeof(uint8_t), loc + 9 * sizeof(float));
 
     uint64_t cursor = loc + kPbcCellBlockSize;
 
@@ -244,15 +232,13 @@ read_dynamis_frame(int fd, const DynamisHeader &h, const std::string &path, uint
 
     // ids: default to sequential order if not present
     if (field_offsets.count("id")) {
-        uint32_t block_size = h.num_atoms * sizeof(int64_t);
-        std::vector<int64_t> ids(h.num_atoms);
-        n = pread(fd, ids.data(), block_size, field_offsets.at("id"));
-        CHECK_READ(n, block_size);
+        uint64_t block_size = h.num_atoms * sizeof(int64_t);
         atoms.atom_vertex_numbers =
-                torch::from_blob(ids.data(), { static_cast<int64_t>(h.num_atoms) }, torch::kInt64)
-                        .clone();
+                torch::empty({ static_cast<int64_t>(h.num_atoms) }, torch::kInt64);
+        PREAD_ALL(fd, atoms.atom_vertex_numbers.data_ptr(), block_size, field_offsets.at("id"));
     } else {
-        atoms.atom_vertex_numbers = torch::arange(0, h.num_atoms, 1).to(torch::kInt64);
+        atoms.atom_vertex_numbers =
+                torch::arange(0, static_cast<int64_t>(h.num_atoms), torch::kInt64);
     }
 
     // positions: mandatory
@@ -260,24 +246,21 @@ read_dynamis_frame(int fd, const DynamisHeader &h, const std::string &path, uint
         throw std::runtime_error("'position' field missing from '" + path + "', cannot load");
     }
     {
-        uint32_t block_size = h.num_atoms * 3 * sizeof(float);
-        std::vector<float> attribs(h.num_atoms * 3);
-        n = pread(fd, attribs.data(), block_size, field_offsets.at("position"));
-        CHECK_READ(n, block_size);
+        uint64_t block_size = h.num_atoms * 3 * sizeof(float);
         atoms.atom_positions =
-                torch::from_blob(attribs.data(), { static_cast<int64_t>(h.num_atoms), 3 }).clone();
+                torch::empty({ static_cast<int64_t>(h.num_atoms), 3 }, torch::kFloat32);
+        PREAD_ALL(fd, atoms.atom_positions.data_ptr(), block_size, field_offsets.at("position"));
     }
 
     // velocities: default to zero if not present
     if (field_offsets.count("velocity")) {
-        uint32_t block_size = h.num_atoms * 3 * sizeof(float);
-        std::vector<float> attribs(h.num_atoms * 3);
-        n = pread(fd, attribs.data(), block_size, field_offsets.at("velocity"));
-        CHECK_READ(n, block_size);
+        uint64_t block_size = h.num_atoms * 3 * sizeof(float);
         atoms.atom_velocities =
-                torch::from_blob(attribs.data(), { static_cast<int64_t>(h.num_atoms), 3 }).clone();
+                torch::empty({ static_cast<int64_t>(h.num_atoms), 3 }, torch::kFloat32);
+        PREAD_ALL(fd, atoms.atom_velocities.data_ptr(), block_size, field_offsets.at("velocity"));
     } else {
-        atoms.atom_velocities = torch::zeros({ static_cast<int64_t>(h.num_atoms), 3 });
+        atoms.atom_velocities =
+                torch::zeros({ static_cast<int64_t>(h.num_atoms), 3 }, torch::kFloat32);
     }
 
     return { atoms, cell, pbc };
