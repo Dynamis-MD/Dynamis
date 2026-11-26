@@ -43,6 +43,14 @@ from dynamis_state import (
 # resolving to the one definition in dynamis_model.units.
 from dynamis_model.units import EV_PER_A_TO_AMU_A_PER_FS2
 
+import inspect as _inspect
+
+from fairchem.core.models.uma.escn_md_block import eSCNMD_Block as _eSCNMD_Block
+
+# fairchem compat: Dynamis was written against fairchem-core 2.16 (blocks / edge-degree embedding take
+# node_offset = data["gp_node_offset"]); >= 2.2x replaced it with scatter_target (local target index per edge).
+_FC_SCATTER_TARGET = "scatter_target" in _inspect.signature(_eSCNMD_Block.forward).parameters
+
 _EV_PER_A_TO_AMU_A_PER_FS2 = EV_PER_A_TO_AMU_A_PER_FS2
 
 
@@ -365,13 +373,21 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
 
             wigner_inv_envelope = wigner_inv * edge_envelope
 
-            x_message = self.edge_degree_embedding(
-                x_message,
-                x_edge,
-                graph_dict["edge_index"],
-                wigner_inv_envelope,
-                data_dict["gp_node_offset"],
-            )
+            if _FC_SCATTER_TARGET:  # fairchem >= 2.2x: (x, x_edge, scatter_target, wigner_inv_env)
+                x_message = self.edge_degree_embedding(
+                    x_message,
+                    x_edge,
+                    graph_dict["edge_index"][1],
+                    wigner_inv_envelope,
+                )
+            else:
+                x_message = self.edge_degree_embedding(
+                    x_message,
+                    x_edge,
+                    graph_dict["edge_index"],
+                    wigner_inv_envelope,
+                    data_dict["gp_node_offset"],
+                )
             if self._feature_exchanger is not None:
                 x_message = self._feature_exchanger.push(
                     x_message[: self.num_local], self._distributed_state
@@ -519,6 +535,10 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
             if self.profiler:
                 self.profiler.start(f"mp_block_{i}")
             with record_function(f"message passing {i}"):
+                if _FC_SCATTER_TARGET:
+                    offset_kw = dict(scatter_target=local_edge_index[1])
+                else:
+                    offset_kw = dict(node_offset=data_dict["gp_node_offset"])
                 x_message = self.blocks[i](
                     x_message,
                     local_x_edge_per_layer[i],
@@ -529,7 +549,7 @@ class DistributedESCNMDBackbone(eSCNMDMoeBackbone):
                         0
                     ],
                     sys_node_embedding=sys_node_embedding,
-                    node_offset=data_dict["gp_node_offset"],
+                    **offset_kw,
                 )
                 x_message = self.balance_channels(
                     x_message,
@@ -810,11 +830,12 @@ class UMAModel(DynamisModel):
             if self.predictor.model.module.backbone.regress_config.direct_forces
             else nullcontext()
         )
-        tf32_context = (
-            tf32_context_manager()
-            if self.predictor.inference_settings.tf32
-            else nullcontext()
-        )
+        if not self.predictor.inference_settings.tf32:
+            tf32_context = nullcontext()
+        elif "tf32" in _inspect.signature(tf32_context_manager).parameters:
+            tf32_context = tf32_context_manager(True)  # fairchem >= 2.2x
+        else:
+            tf32_context = tf32_context_manager()
 
         with inference_context, tf32_context:
             output = self.predictor.model(data)
