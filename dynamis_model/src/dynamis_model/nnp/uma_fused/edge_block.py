@@ -65,6 +65,8 @@ class FusedEdgeBlock:
     """One fused UMA-s edge-wise block (cap mode). ``op`` is the only entry point."""
 
     def __init__(self, w: EdgeBlockWeights, W_last, b_last, device="cuda"):
+        from dynamis_model.nnp.uma_fused import check_available
+        check_available()
         from dynamis_model.nnp.uma_fused.k0r_cute import permute_w
         from dynamis_model.nnp.uma_fused.k1_cute import K1
         from dynamis_model.nnp.uma_fused.s1_mma import S1Weights, dh_perm_weights

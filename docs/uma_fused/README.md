@@ -3,14 +3,24 @@
 Fused CUDA / CuTe-DSL kernels for the edge-wise blocks of fairchem's UMA-s (`uma-s-1p2`) and the integration that runs
 the whole UMA call (forward + forces) as one CUDA graph. Inference only, Blackwell (sm_100: B200 / GB200) only.
 
+The package itself only provides the kernels and the `FusedEdgeBlock` op; nothing imports it by default.
+`UMAModel` wires it in through two opt-in switches (added with the UMA integration):
+
+| switch | what it does |
+|---|---|
+| `fused=True` | replaces each `Edgewise` block (and the edge-degree embedding, the l=2 Wigner) with the fused ops below; the model still runs op by op (eager / `torch.compile`) |
+| `fused_graph=True` | (only together with `fused=True`) additionally captures the whole UMA call (forward + forces) as CUDA graph(s) with fixed capacities, which removes the host / launch overhead that dominates small systems |
+
 ```python
 from dynamis_model.nnp import UMAModel
 model = UMAModel("uma-s-1p2", dataset="omol", device="cuda", inference_settings=settings,
-                 fused=True, fused_graph=True)        # or env DYNAMIS_UMA_FUSED=1
+                 fused=True, fused_graph=True)
 ```
 
-`UMAModel(fused=False)` (the stock fairchem path) is the fallback on every other GPU and the reference for debugging
-the physics. `enable_fused` raises a clear error on a GPU that is not sm_100.
+**Fallback.** The fused kernels need an sm_100 GPU, the CuTe DSL (`nvidia-cutlass-dsl`), Triton and `nvcc` at run
+time. `dynamis_model.nnp.uma_fused.check_available()` (also called when a `FusedEdgeBlock` is built) raises a clear
+error naming whatever is missing; `missing_requirements()` returns the list without raising. On such systems use the
+stock fairchem path, `UMAModel(fused=False)` (the default), which is also the reference for debugging the physics.
 
 ## 1. What is replaced
 

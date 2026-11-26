@@ -134,12 +134,16 @@ def test_op_matches_fp64_reference_and_is_bitwise_repeatable(block):
 def test_neighbour_list_change_within_capacity(block):
     """a new neighbour list (fewer edges, other targets) is re-packed in place: no new capacity / generation"""
     from dynamis_model.nnp.uma_fused import edge_block as eb
-    from dynamis_model.nnp.uma_fused.dynamis_fused import new_topology
     from dynamis_model.nnp.uma_fused.edge_block import set_topology_epoch
     blk, w, W_last, b_last = block
     dev = torch.device("cuda")
     _check_vs_reference(blk, w, W_last, b_last, _graph(1, N=700, n_tgt=600))
     gen = eb._CAP[dev]["gen"]
+    epoch = iter(range(1, 100))
+
+    def new_topology():
+        set_topology_epoch(next(epoch))
+
     try:
         # epoch-declared topology (the MD driver's path: no identity / content check)
         new_topology()
