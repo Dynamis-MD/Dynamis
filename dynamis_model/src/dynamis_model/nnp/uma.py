@@ -914,7 +914,7 @@ class UMAModel(DynamisModel):
             pbc,
             torch.tensor([num_atoms], dtype=torch.long, device=device),
             edge_index,
-            -cell_offsets,
+            cell_offsets,  # fairchem convention: vec = pos[e0] - pos[e1] + off @ cell (radius_graph_pbc_cuda uses the same)
             torch.tensor([edge_index.shape[1]], dtype=torch.long, device=device),
             charge,
             spin,

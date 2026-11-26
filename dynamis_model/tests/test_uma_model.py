@@ -152,7 +152,7 @@ def test_uma_distributed_parity():
             pbc,
             torch.tensor([total_atoms], dtype=torch.long, device=device),
             global_edge_index,
-            -cell_offsets,
+            cell_offsets,
             torch.tensor([global_edge_index.shape[1]], dtype=torch.long, device=device),
             torch.zeros(1, dtype=torch.long, device=device),  # charge
             torch.ones(1, dtype=torch.long, device=device),  # spin
