@@ -726,6 +726,7 @@ class UMAModel(DynamisModel):
                 self.main_model.backbone.sph_feature_size
                 * self.main_model.backbone.sphere_channels
             ),
+        )
         # fairchem caps each target's neighbours (max_neighbors, degeneracy-tolerant);
         # rebuild the same graph instead of the full radius graph.
         self.max_num_neighbors = int(self.main_model.backbone.max_neighbors)
