@@ -48,15 +48,15 @@ redundant downloads across teammates.
 | `experiments/exp_datasets/scripts/download_zenodo.sh` | MD5-verified Zenodo record 24487955 downloader (`ch4_o2`, `li3po4`, `2w49`, `apoa1`, `CH4_*`, `RP3_1320`) |
 | `cluster.env` + `scripts/_lib.sh` | Cluster/CUDA/NCCL/MNNVL bootstrap and dataset discovery (`EXP2_DATASETS_ROOT`) |
 | `scripts/sbatch_submit.sh` | Site-policy Slurm submission wrapper |
-| `drivers/bench_common.py` | Reusable CLI base parser, `TrajectoryReader` cell/PBC loader, `ScalableHaloPartitioner`, `thermalize`, `kinetic_temperature`, `TimedLoop`, OOM/timeout watchdogs, `gather_rank_metrics`, and `BenchRecord` JSON writer |
+| `drivers/bench_common.py` | Reusable CLI base parser, `TrajectoryReader` cell/PBC loader, `ScalableHaloPartitioner`, `kinetic_temperature`, `TimedLoop`, OOM/timeout watchdogs, `gather_rank_metrics`, and `BenchRecord` JSON writer |
 | `analysis/summarize_scaling.py` | Aggregates `BenchRecord` JSONs + `TimingRegistry` JSONLs into `summary.csv`, `scaling_report.md`, `scaling_table.tex`, and strong/weak/memory/breakdown figures |
 
 ## 4. Adding a New Model Driver (UMA, MACE, ORB, …)
 
 1. Create `drivers/run_<model>_scaling.py` that imports `build_base_parser`,
-   `load_system`, `inject_cell`, `wrap_scalable_halo`, `thermalize`,
-   `kinetic_temperature`, `TimedLoop`, `capture_oom`, `gather_rank_metrics`,
-   `BenchRecord`, and `write_result` from `bench_common`.
+   `load_system`, `inject_cell`, `wrap_scalable_halo`, `kinetic_temperature`,
+   `TimedLoop`, `capture_oom`, `gather_rank_metrics`, `BenchRecord`, and
+   `write_result` from `bench_common`.
 2. Add model-specific CLI arguments to `build_base_parser(...)`, instantiate your
    model, and pass model-specific metadata via `BenchRecord(..., extra={...})`.
 3. Submit batches through `scripts/sbatch_submit.sh` (pointing `EXP2_DATA_DIR` at

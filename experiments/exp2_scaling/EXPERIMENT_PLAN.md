@@ -66,16 +66,22 @@ across models unless a deliberate ablation is being tested:
 | GPU ladder | $W \in \{1, 2, 4, 8, 16, 32\}$ (1, 1, 1, 2, 4, 8 nodes) | Run $W \in \{1, 2, 4\}$ sequentially in one 1-node allocation |
 | Exchanger | `gpudirect` (primary); optional `nccl` comparison | Verify `use_fabric=True` for all $W \ge 2$ `gpudirect` runs |
 | Partitioner | `sfc_morton`, `edge_weighted_partition=True`, `scalable_halo=True` | Uses `bench_common.wrap_scalable_halo` ($O(N/W)$ halo build) |
-| Integrator | `Langevin`, $\Delta t = 0.5\,\text{fs}$, $T = 300\,\text{K}$, $\gamma = 0.01\,\text{fs}^{-1}$ | Always call `bench_common.thermalize` at 300 K after `sim.setup()` |
+| Integrator | `Langevin`, $\Delta t = 0.5\,\text{fs}$, $T = 300\,\text{K}$, $\gamma = 0.01\,\text{fs}^{-1}$ | Set `SimulatorConfig(initial_temperature_K=300.0, velocity_seed=1234)` so Dynamis natively samples Maxwell-Boltzmann velocities whenever input velocities are zero |
 | Cutoff & ghost buffer | Model native cutoff (`6.0 Å` for ORB / UMA / MACE-MP), ghost buffer `0.5 Å` | `rebalance_interval=1000`, `drift_watchdog=False` during timing |
 | Warmup / timed steps | `10` warmup + `50` timed steps (`20` timed for $\ge 4\text{M}$ hero runs) | `Timer.set_level(Level.Off)` during warmup; `Level.Basic` during timed window |
 | Outputs | `BenchRecord` JSON + `timings/<stem>/timing_rank*.jsonl` | Summarized by `analysis/summarize_scaling.py` |
 
-> **Velocity initialization gotcha:** `TrajectoryReader.read()` converts XYZ
-> momenta via `kAseFs`, which can under-scale files whose momenta are already in
-> `amu·Å/fs` (such as `li3po4_*.xyz`, which load at ~2.9 K). Always call
-> `bench_common.thermalize(sim, temperature_k=300.0, seed=1234 + rank)` before
-> warmup and verify finite `mean_temperature_k` (~200–350 K) in the output JSON.
+> **Velocity initialization (`SimulatorConfig.initial_temperature_K`):**
+> `Simulator.setup()` natively samples Maxwell-Boltzmann velocities at
+> `initial_temperature_K` (via `dynamis_state.sample_maxwell_boltzmann`) whenever
+> the input carries no velocities (e.g., `apoa1_vacuum_openmm.xyz`, `2w49_*.xyz`),
+> and preserves non-zero input velocities (e.g., `ch4_*_splited.xyz`, which stores
+> ASE-unit momenta at 298 K). The one exception is `li3po4_*.xyz`, whose bundled
+> `momenta` column is in `amu·Å/fs` rather than ASE units — `TrajectoryReader`
+> scales it by `kAseFs` down to ~2.9 K and keeps it non-zero. For `li3po4`, pass
+> `--resample-velocities` (zeroing file velocities before `sim.setup()`) so
+> Dynamis's native `Simulator.setup()` samples 300 K velocities. Always verify
+> finite `mean_temperature_k` (~200–350 K) in the output JSON.
 
 ---
 
@@ -123,7 +129,7 @@ bash experiments/exp_datasets/scripts/download_zenodo.sh --list      # all 8 Zen
   - `strong_vacuum` (`2w49_vacuum_openmm.xyz`, 138K): $W_{\min} \to 32$ GPUs (evaluates partition load balance on sparse filament geometry).
 
 ### 3.4 `apoa1` — ApoA1 Biomolecular Benchmark (`apoa1.zip`)
-- **Physics:** OpenMM-prepared ApoA1 biomolecular benchmark (`apoa1_vacuum_openmm.xyz`, **92,224 atoms**, cubic PBC box `108.861 Å`, `pbc="T T T"`). Note: the file contains positions only (`species`, `pos`) with no momenta column, so `bench_common.thermalize` is required to initialize 300 K velocities.
+- **Physics:** OpenMM-prepared ApoA1 biomolecular benchmark (`apoa1_vacuum_openmm.xyz`, **92,224 atoms**, cubic PBC box `108.861 Å`, `pbc="T T T"`). The file contains positions only (`species`, `pos`), so `Simulator.setup()` automatically samples 300 K velocities from `SimulatorConfig.initial_temperature_K`.
 - **Standard study:**
   - `strong_apoa1` (`apoa1_vacuum_openmm.xyz`, 92K): strong scaling across $W \in \{1, 2, 4, 8, 16, 32\}$ GPUs (or $W_{\min} \to 32$ if 92K exceeds a model's 1-GPU HBM ceiling).
 

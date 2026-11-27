@@ -4,8 +4,7 @@ Shared across all NNP scaling drivers (ORB, UMA, MACE, ...). Provides:
   - Base CLI argument parser (`build_base_parser`) that model drivers extend
   - TrajectoryReader-based cell/PBC loading (`load_system`)
   - Per-rank O(N/W) scalable halo wrapper (`ScalableHaloPartitioner`, `wrap_scalable_halo`)
-  - Cell/PBC injection (`inject_cell`), Maxwell-Boltzmann thermalization (`thermalize`),
-    and distributed kinetic temperature (`kinetic_temperature`)
+  - Cell/PBC injection (`inject_cell`) and distributed kinetic temperature (`kinetic_temperature`)
   - Wall-clock `TimedLoop`, SIGALRM `deadline`, OOM/error capture (`capture_oom`),
     and per-rank GPU memory / atom / ghost gathering (`gather_rank_metrics`)
   - Self-describing JSON result record (`BenchRecord`, `write_result`)
@@ -73,6 +72,17 @@ def build_base_parser(
     p.add_argument("--timed-steps", type=int, default=50)
     p.add_argument("--timestep-fs", type=float, default=0.5)
     p.add_argument("--temperature-k", type=float, default=300.0)
+    p.add_argument("--velocity-seed", type=int, default=1234)
+    p.add_argument(
+        "--resample-velocities",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Zero any file-provided velocities before Simulator.setup() so Dynamis "
+            "samples fresh Maxwell-Boltzmann velocities at --temperature-k "
+            "(needed for XYZ files whose momenta are not in ASE units, e.g. li3po4_*.xyz)"
+        ),
+    )
     p.add_argument("--friction-inv-fs", type=float, default=0.01)
     p.add_argument("--rebalance-interval", type=int, default=1000)
     p.add_argument("--cutoff-angstrom", type=float, default=6.0)
@@ -118,6 +128,7 @@ def load_system(
     cutoff_angstrom: float = 6.0,
     ghost_buffer_angstrom: float = 0.5,
     nonperiodic_pad: Optional[float] = None,
+    resample_velocities: bool = False,
 ) -> SystemSpec:
     import numpy as np
     import torch
@@ -127,6 +138,8 @@ def load_system(
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
     info, file_cell, file_pbc = TrajectoryReader.read(os.fspath(input_path))
+    if resample_velocities and info.atom_velocities is not None:
+        info.atom_velocities.zero_()
     n = int(info.num_atoms)
     pos = info.atom_positions.detach().cpu().to(torch.float32)
     extent = (pos.max(0).values - pos.min(0).values).numpy()
@@ -275,27 +288,6 @@ def wrap_scalable_halo(sim, rank: int, world_size: int) -> None:
         return ScalableHaloPartitioner(_orig(), rank, world_size)
 
     sim._get_partitioner = _patched
-
-
-def thermalize(sim, temperature_k: float, seed: int) -> None:
-    """Initialize local atom velocities from a Maxwell-Boltzmann distribution."""
-    import torch
-    from dynamis_state import ATOMIC_MASSES
-
-    local = sim.state.local_state
-    n_local = int(local.num_atoms)
-    dev = local.atom_velocities.device
-    masses = ATOMIC_MASSES.to(dev)[
-        local.atom_types[:n_local].reshape(-1).long()
-    ].unsqueeze(-1)
-    kb_native = BOLTZMANN_EV_PER_K * EV_TO_AMU_A2_PER_FS2
-    sigma = torch.sqrt(
-        torch.as_tensor(kb_native * temperature_k, device=dev) / masses
-    )
-    g = torch.Generator(device=dev).manual_seed(seed)
-    local.atom_velocities[:n_local] = (
-        torch.randn((n_local, 3), generator=g, device=dev) * sigma
-    )
 
 
 def kinetic_temperature(sim) -> float:
