@@ -5,7 +5,9 @@
 Dataset files are **not committed to git** — obtain them on demand:
 
 ```bash
-bash scripts/setup_data.sh      # generate CH4 + download PDB + fetch hosted archive
+bash scripts/setup_data.sh                 # generate CH4 + download PDB + fetch hosted archive
+bash scripts/download_zenodo.sh --scaling  # download Zenodo scaling suites (ch4_o2 + li3po4)
+bash scripts/download_zenodo.sh --list     # list all Zenodo record 24487955 archives
 ```
 
 Each dataset is obtained the most reproducible way available (see
@@ -20,6 +22,12 @@ Each dataset is obtained the most reproducible way available (see
   the HIV capsid rides along for convenience — see below). On Delta the archive
   is served from a shared cache so the ~23 MB download happens once per team.
 - **Tier 4 — large `*_density.xyz`**: external user data (`../data/` symlinks).
+- **Zenodo benchmark archives ([record 24487955](https://zenodo.org/records/24487955))**:
+  MD5-verified extended-XYZ scaling and end-to-end benchmark suites (`ch4_o2` up
+  to 10M atoms, `li3po4` 32k–1.01M atoms, `2w49`, `apoa1`, `CH4_*`, `RP3_1320`),
+  fetched on demand into `zenodo/<name>/` via `scripts/download_zenodo.sh` (or
+  `bash scripts/setup_data.sh --zenodo [names...]`). Shared by all models (ORB,
+  UMA, MACE, etc.).
 
 ## Directory Structure
 
@@ -31,7 +39,8 @@ exp_datasets/
 ├── protein_vacuum/      # Protein only, no water (tight box)
 ├── electrochemical/     # Pt(111) slab + explicit water
 ├── membrane/            # DPPC lipid bilayer + water
-└── capsid/              # HIV-1 capsid (3J3Q, ~2.4 M atoms) + shell subsets
+├── capsid/              # HIV-1 capsid (3J3Q, ~2.4 M atoms) + shell subsets
+└── zenodo/              # MD5-verified Zenodo record 24487955 archives (ch4_o2, li3po4, ...)
 ```
 
 ## All Datasets

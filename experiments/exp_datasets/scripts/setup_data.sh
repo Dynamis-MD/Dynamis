@@ -16,6 +16,9 @@
 #   bash setup_data.sh --from-scratch  # rebuild EVERYTHING with build_all.sh
 #                                        (needs rdkit/pdbfixer/openmm; version-
 #                                         dependent output — not recommended)
+#   bash setup_data.sh --zenodo [ARGS] # download Zenodo record 24487955 archives
+#                                        (defaults to --scaling: ch4_o2 + li3po4;
+#                                         e.g. --zenodo --all, --zenodo li3po4)
 #
 # The hosted archive needs a source; configure it before running Tier 3:
 #   export DYNAMIS_ARCHIVE_URL=<url>     or     export DYNAMIS_ARCHIVE_LOCAL=<path>
@@ -27,10 +30,19 @@ DATASETS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CHECKSUMS="$SCRIPT_DIR/checksums.txt"
 
 MODE="default"
+ZENODO_ARGS=()
 case "${1:-}" in
     --generate-only) MODE="generate" ;;
     --no-archive)    MODE="noarchive" ;;
     --from-scratch)  MODE="scratch" ;;
+    --zenodo)
+        MODE="zenodo"
+        shift
+        ZENODO_ARGS=("$@")
+        if [ ${#ZENODO_ARGS[@]} -eq 0 ]; then
+            ZENODO_ARGS=(--scaling)
+        fi
+        ;;
     "" )             ;;
     * ) echo "Unknown option: $1"; exit 2 ;;
 esac
@@ -38,6 +50,12 @@ esac
 echo "======================================================"
 echo "  Dynamis experiment data setup  (mode: $MODE)"
 echo "======================================================"
+
+if [[ "$MODE" == "zenodo" ]]; then
+    echo ">>> Zenodo benchmark datasets (record 24487955)"
+    bash "$SCRIPT_DIR/download_zenodo.sh" "${ZENODO_ARGS[@]}"
+    exit 0
+fi
 
 if [[ "$MODE" == "scratch" ]]; then
     echo ">>> Rebuilding all datasets from scratch (build_all.sh)"
@@ -78,7 +96,7 @@ echo ""
 echo "======================================================"
 echo "  Dataset summary"
 echo "======================================================"
-for d in baselines pdb protein_vacuum protein_solvated membrane electrochemical capsid; do
+for d in baselines pdb protein_vacuum protein_solvated membrane electrochemical capsid zenodo; do
     dir="$DATASETS_DIR/$d"
     if [[ -d "$dir" ]]; then
         n=$(find "$dir" \( -name '*.xyz' -o -name '*.pdb' -o -name '*.cif' \) 2>/dev/null | wc -l)

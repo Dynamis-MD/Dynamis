@@ -15,6 +15,10 @@
 # hosted archive (downloaded, then extracted + removed)
 *.tar.xz
 *.tar.gz
+*.zip
+
+# Zenodo benchmark archives & extracted trees (download_zenodo.sh)
+zenodo/
 
 # scratch
 temps/

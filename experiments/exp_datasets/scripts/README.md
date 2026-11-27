@@ -124,7 +124,8 @@ path.
 
 | Script | Tier | Description |
 |--------|------|-------------|
-| `setup_data.sh` | all | One-click: generate + download + verify |
+| `setup_data.sh` | all | One-click: generate + download + verify (pass `--zenodo` for Zenodo scaling archives) |
+| `download_zenodo.sh` | Zenodo | Download, MD5-verify, and extract Zenodo record 24487955 archives (`ch4_o2`, `li3po4`, `2w49`, `apoa1`, `CH4_*`, `RP3_1320`) into `../zenodo/` |
 | `03_generate_ch4.py` | 1 | **Version-independent** CH4/O2 generator (numpy only) |
 | `01_download_pdbs.sh` | 2 | Download raw PDB/CIF from RCSB + OpenMM |
 | `download_datasets.sh` | 2+3 | PDB + hosted archive, SHA256-verified |

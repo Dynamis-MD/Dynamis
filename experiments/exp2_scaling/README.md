@@ -1,79 +1,65 @@
-# Experiment 2: Scaling Analysis
+# Experiment 2: Multi-GPU Strong, Weak & Hero Scaling Harness
 
-## 2a. Strong Scaling (real data, fixed problem size)
+Shared, **model-agnostic** scaling benchmark infrastructure for **Dynamis**
+(supports ORB, UMA, MACE, and any other `dynamis_model` NNP backend) using the
+MD5-verified Zenodo benchmark datasets ([record 24487955](https://zenodo.org/records/24487955)).
 
-**Goal**: Fix the system size, increase GPU count, observe how communication fraction grows and where scaling breaks.
+## 1. Obtain Shared Datasets (Once, Login Node)
 
-### Configuration
+Datasets live centrally under `experiments/exp_datasets/zenodo/` so every model
+shares a single verified copy:
 
-| System | Atoms | GPU counts | Nodes |
-|--------|------:|-----------|-------|
-| 1AKI | 25,846 |  | |
-| ApoA1 | 92,224 |  | |
-| 2RIK | 112,727 |  | |
-| 9GMO | 1,536,442 |  | |
+```bash
+# Download both scaling suites (ch4_o2: 8k..10M atoms, li3po4: 32k..1.01M atoms)
+bash experiments/exp_datasets/scripts/download_zenodo.sh --scaling
 
-- Partition: SFC Morton (default)
-- Steps: 200 (skip episode 1, use steady-state)
-- Profiler: enabled, measure_bw=True
+# Or pick individual archives / list all 8 archives on Zenodo record 24487955
+bash experiments/exp_datasets/scripts/download_zenodo.sh --list
+bash experiments/exp_datasets/scripts/download_zenodo.sh ch4_o2
+bash experiments/exp_datasets/scripts/download_zenodo.sh li3po4
+```
 
-### Metrics
+On shared clusters, set `DYNAMIS_ZENODO_CACHE_DIR=/path/to/shared_cache` to avoid
+redundant downloads across teammates.
 
-| Metric | Definition |
-|--------|-----------|
-| Steps/s | Overall throughput |
-| Speedup | Steps/s(N) / Steps/s(1) |
-| Parallel efficiency | Speedup / N |
-| Comm fraction (%) | (halo_exchange + feature_exchange + grad_exchange + force_reduction) / total |
-| Compute fraction (%) | (model_forward + model_backward + graph_construction) / total |
+## 2. Cluster Configuration & Slurm Submission Rules
 
-### Output
+`cluster.env` and `scripts/sbatch_submit.sh` encode the default Empire AI `beta`
+(GB200 NVL72, 4× B200/node) rules and can be customized per user via an ignored
+`cluster.local.env`:
 
-- Steps/s vs. GPU count curves (one line per system, with ideal linear reference)
-- Parallel efficiency vs. GPU count
-- Stacked area chart: compute / communication / other vs. GPU count
-- Identify the scaling knee-point per system
+- Always passes `--account` (`su_kchiu_molecular` by default).
+- Always allocates all **4 GPUs/node** (`--gpus-per-node=4 --mem=0 --cpus-per-task=32`).
+- Automatically sets `--segment=<nodes>` so multi-node jobs (`N <= 18`) land in a
+  single NVL72 rack block for MNNVL `GPUDirectExchanger` Fabric handles.
+- Uses `--partition=beta --qos=priority` by default (`--test` targets `beta_test` / `test`).
+- Set `EXP2_DRY_RUN=1` to inspect exact `sbatch` commands without submitting.
 
----
+## 3. Shared Harness Components
 
-## 2b. Weak Scaling (synthetic data, fixed 1K atoms/GPU)
+| File | Purpose |
+|------|---------|
+| `experiments/exp_datasets/scripts/download_zenodo.sh` | MD5-verified Zenodo record 24487955 downloader (`ch4_o2`, `li3po4`, `2w49`, `apoa1`, `CH4_*`, `RP3_1320`) |
+| `cluster.env` + `scripts/_lib.sh` | Cluster/CUDA/NCCL/MNNVL bootstrap and dataset discovery (`EXP2_DATASETS_ROOT`) |
+| `scripts/sbatch_submit.sh` | Site-policy Slurm submission wrapper |
+| `drivers/bench_common.py` | Reusable CLI base parser, `TrajectoryReader` cell/PBC loader, `ScalableHaloPartitioner`, `thermalize`, `kinetic_temperature`, `TimedLoop`, OOM/timeout watchdogs, `gather_rank_metrics`, and `BenchRecord` JSON writer |
+| `analysis/summarize_scaling.py` | Aggregates `BenchRecord` JSONs + `TimingRegistry` JSONLs into `summary.csv`, `scaling_report.md`, `scaling_table.tex`, and strong/weak/memory/breakdown figures |
 
-**Goal**: Isolate communication overhead from partition quality effects by using uniform-density synthetic data with perfect load balance.
+## 4. Adding a New Model Driver (UMA, MACE, ORB, …)
 
-### Configuration
+1. Create `drivers/run_<model>_scaling.py` that imports `build_base_parser`,
+   `load_system`, `inject_cell`, `wrap_scalable_halo`, `thermalize`,
+   `kinetic_temperature`, `TimedLoop`, `capture_oom`, `gather_rank_metrics`,
+   `BenchRecord`, and `write_result` from `bench_common`.
+2. Add model-specific CLI arguments to `build_base_parser(...)`, instantiate your
+   model, and pass model-specific metadata via `BenchRecord(..., extra={...})`.
+3. Submit batches through `scripts/sbatch_submit.sh` (pointing `EXP2_DATA_DIR` at
+   `experiments/exp_datasets/zenodo/<dataset>`).
+4. Summarize any results directory with:
 
-Generated via `baseline/generate_xyz.py` — uniform CH4, 1K atoms/GPU:
-
-1k to 128k atoms
-
-- Partition: SFC Morton
-- Steps: 200 (steady-state)
-
-### Metrics
-
-| Metric | Definition |
-|--------|-----------|
-| Steps/s | Should remain constant under ideal scaling |
-| Weak scaling efficiency | T₁ / Tₙ (1.0 = perfect) |
-| Per-phase overhead | Time increase in each phase vs. single GPU |
-
-### Overhead Decomposition
-
-For each GPU count, record per-phase times and compute overhead vs. 1-GPU baseline:
-
-| Phase | 1 GPU | 4 GPU | 8 GPU | 16 GPU | 32 GPU |
-|-------|-------|-------|-------|--------|--------|
-| Partition | — | Δ | Δ | Δ | Δ |
-| Halo map build | — | Δ | Δ | Δ | Δ |
-| Halo exchange | — | Δ | Δ | Δ | Δ |
-| Feature exchange | — | Δ | Δ | Δ | Δ |
-| Force reduction | — | Δ | Δ | Δ | Δ |
-| Compute | ref | Δ | Δ | Δ | Δ |
-
-### Output
-
-- Steps/s vs. GPU count (with ideal horizontal reference line)
-- Weak scaling efficiency curve
-- Stacked bar: overhead breakdown per GPU count
-- Key insight: which communication phase dominates overhead at scale
-
+```bash
+python experiments/exp2_scaling/analysis/summarize_scaling.py \
+    --results-dir experiments/exp2_scaling/results \
+    --out-dir experiments/exp2_scaling/analysis \
+    --title "<Model> Scaling"
+```
