@@ -1,20 +1,35 @@
 """Model-agnostic benchmark harness for exp2_scaling (Dynamis distributed MD).
 
-Shared across all NNP scaling drivers (ORB, UMA, MACE, ...). Provides:
+Shared across all NNP scaling drivers (ORB, UMA, MACE, ...). Emits per-run
+outputs directly in the canonical ``Dynamis-experiments-log`` layout and
+``run.schema.json`` (v1.0) format so campaigns can be copied straight into
+``Dynamis-experiments-log/records/<model_family>/<system>/<campaign_id>/``
+for validation, summarization, tables, and publication plotting:
+
+    <output_dir>/<study>/<run_id>/
+        result.json                 # portable run.schema.json v1.0 (no abs paths)
+        timings/
+            timing_rank0.jsonl.gz   # gzipped TimingRegistry traces
+            ...
+
+Provides:
   - Base CLI argument parser (`build_base_parser`) that model drivers extend
   - TrajectoryReader-based cell/PBC loading (`load_system`)
   - Per-rank O(N/W) scalable halo wrapper (`ScalableHaloPartitioner`, `wrap_scalable_halo`)
   - Cell/PBC injection (`inject_cell`) and distributed kinetic temperature (`kinetic_temperature`)
   - Wall-clock `TimedLoop`, SIGALRM `deadline`, OOM/error capture (`capture_oom`),
     and per-rank GPU memory / atom / ghost gathering (`gather_rank_metrics`)
-  - Self-describing JSON result record (`BenchRecord`, `write_result`)
+  - Schema-compliant `BenchRecord`, `compress_timings`, `write_result`, and `write_stub_result`
 """
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import glob
+import gzip
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -29,6 +44,16 @@ from typing import Any, Callable, Iterable, Optional
 # ---------------------------------------------------------------------------
 BOLTZMANN_EV_PER_K = 8.617333262e-5
 EV_TO_AMU_A2_PER_FS2 = 0.0096485332  # exact ase.units.fs**2
+
+VALID_STUDIES = (
+    "strong",
+    "weak",
+    "hero",
+    "ablation",
+    "accuracy",
+    "baseline",
+    "case_study",
+)
 
 
 def kT_native(temperature_k: float) -> float:
@@ -101,10 +126,19 @@ def build_base_parser(
     p.add_argument(
         "--study",
         default="strong",
-        choices=["strong", "weak", "hero", "probe"],
+        choices=list(VALID_STUDIES),
+        help="Study category matching Dynamis-experiments-log run.schema.json",
     )
-    p.add_argument("--tag", default=None, help="Optional filename/grouping tag")
-    p.add_argument("--output-dir", default="results")
+    p.add_argument(
+        "--tag",
+        default=None,
+        help="Series grouping label within a study (e.g. strong1m, weak32k; defaults to --study)",
+    )
+    p.add_argument(
+        "--output-dir",
+        default="results",
+        help="Campaign output root; writes <output-dir>/<study>/<run_id>/{result.json,timings/}",
+    )
     return p
 
 
@@ -457,7 +491,7 @@ def TimedLoop(
 # ---------------------------------------------------------------------------
 @dataclass
 class RunOutcome:
-    status: str  # "ok" | "oom" | "error"
+    status: str  # "ok" | "oom" | "timeout" | "error"
     error: Optional[str] = None
     payload: Any = None
 
@@ -474,7 +508,7 @@ def capture_oom(fn: Callable[[], Any]) -> RunOutcome:
         payload = fn()
         return RunOutcome(status="ok", payload=payload)
     except StepTimeout as e:
-        return RunOutcome(status="oom", error=repr(e))
+        return RunOutcome(status="timeout", error=repr(e))
     except oom_types as e:  # type: ignore[misc]
         return RunOutcome(status="oom", error=repr(e))
     except RuntimeError as e:
@@ -508,7 +542,7 @@ def peak_mem_mb() -> float:
 
 
 # ---------------------------------------------------------------------------
-# Result record + JSON writer
+# Dynamis-experiments-log schema-compliant result record & writer
 # ---------------------------------------------------------------------------
 def _git_commit() -> str:
     try:
@@ -538,7 +572,7 @@ def env_versions(extra_modules: Iterable[str] = ()) -> dict[str, str]:
 
 
 def short_model_name(model_name: str) -> str:
-    """Compact filename-friendly model slug."""
+    """Compact filename-friendly model slug matching Dynamis-experiments-log run_id convention."""
     if model_name.startswith("orb_v3_direct_"):
         return "orb_direct_" + model_name[len("orb_v3_direct_") :]
     if model_name.startswith("orb_v3_conservative_"):
@@ -546,32 +580,76 @@ def short_model_name(model_name: str) -> str:
     return model_name.replace("/", "_").replace(" ", "_")
 
 
+def make_run_id(
+    model: str,
+    exchanger: str,
+    study: str,
+    num_atoms: int,
+    world_size: int,
+    tag: Optional[str] = None,
+) -> str:
+    """Build canonical Dynamis-experiments-log run_id."""
+    m = short_model_name(model)
+    rid = f"{m}_{exchanger}_{study}_{num_atoms}atoms_{world_size}gpu"
+    if tag:
+        rid += f"_{tag}"
+    return rid
+
+
+def run_directory(output_dir: str, study: str, run_id: str) -> str:
+    """Return canonical per-run directory: <output_dir>/<study>/<run_id>."""
+    return os.path.join(output_dir, study, run_id)
+
+
+def compress_timings(timings_path: str) -> bool:
+    """Gzip raw timing_rank*.jsonl traces in place to timing_rank*.jsonl.gz.
+
+    Matches Dynamis-experiments-log strict hygiene (no uncompressed .jsonl).
+    Returns True if at least one timing trace exists in timings_path.
+    """
+    if not os.path.isdir(timings_path):
+        return False
+    for raw_path in sorted(glob.glob(os.path.join(timings_path, "timing_rank*.jsonl"))):
+        gz_path = raw_path + ".gz"
+        tmp_path = gz_path + ".tmp"
+        with open(raw_path, "rb") as src, gzip.open(tmp_path, "wb", compresslevel=6) as dst:
+            shutil.copyfileobj(src, dst)
+        os.replace(tmp_path, gz_path)
+        os.remove(raw_path)
+    return bool(glob.glob(os.path.join(timings_path, "timing_rank*.jsonl.gz")))
+
+
 @dataclass
 class BenchRecord:
+    """Per-run record conforming directly to Dynamis-experiments-log run.schema.json (v1.0)."""
+
+    run_id: str
     study: str
+    tag: str
     model: str
-    model_family: str
-    precision: str
-    max_num_neighbors: int
-    exchanger: str
-    use_fabric: Optional[bool]
-    partition_algorithm: str
-    scalable_halo: bool
-    integrator: str
+    status: str  # "ok" | "oom" | "timeout" | "error"
     num_atoms: int
-    atoms_per_gpu: float
-    box_angstrom: float
     world_size: int
-    gpus_per_node: int
-    nodes: int
-    warmup_steps: int
-    timed_steps: int
-    timestep_fs: float
-    temperature_k: float
-    friction_inv_fs: float
-    status: str
-    input_file: str = ""
-    tag: Optional[str] = None
+    schema_version: str = "1.0"
+    engine: str = "dynamis"
+    precision: Optional[str] = None
+    max_num_neighbors: Optional[int] = None
+    exchanger: Optional[str] = None
+    use_fabric: Optional[bool] = None
+    partition_algorithm: Optional[str] = None
+    scalable_halo: Optional[bool] = None
+    integrator: Optional[str] = None
+    atoms_per_gpu: Optional[float] = None
+    box_angstrom: Optional[float] = None
+    gpus_per_node: Optional[int] = None
+    nodes: Optional[int] = None
+    warmup_steps: Optional[int] = None
+    timed_steps: Optional[int] = None
+    timestep_fs: Optional[float] = None
+    temperature_k: Optional[float] = None
+    friction_inv_fs: Optional[float] = None
+    dataset_file: Optional[str] = None  # basename only (never an absolute path)
+    timings_dir: Optional[str] = None  # run-relative "timings" (never an absolute path)
     elapsed_s: Optional[float] = None
     steps_per_sec: Optional[float] = None
     ns_per_day: Optional[float] = None
@@ -580,11 +658,11 @@ class BenchRecord:
     mean_temperature_k: Optional[float] = None
     local_atoms_per_rank: Optional[list[int]] = None
     ghost_atoms_per_rank: Optional[list[int]] = None
-    timing_dir: Optional[str] = None
+    metrics: dict[str, Any] = field(default_factory=dict)
     hostnames: Optional[list[str]] = None
     slurm_job_id: Optional[str] = None
     error: Optional[str] = None
-    extra: dict[str, Any] = field(default_factory=dict)
+    exit_code: Optional[int] = None
     env: dict[str, str] = field(default_factory=env_versions)
     git_commit: str = field(default_factory=_git_commit)
     timestamp: str = field(
@@ -598,39 +676,57 @@ class BenchRecord:
         return json.dumps(asdict(self), indent=2, sort_keys=True)
 
 
-def result_stem(
-    model: str,
-    exchanger: str,
-    num_atoms: int,
-    world_size: int,
-    study: str,
-    tag: Optional[str] = None,
-) -> str:
-    m = short_model_name(model)
-    stem = f"{m}_{exchanger}_{study}_{num_atoms}atoms_{world_size}gpu"
-    if tag:
-        stem += f"_{tag}"
-    return stem
-
-
-def result_filename(record: BenchRecord) -> str:
-    return (
-        result_stem(
-            record.model,
-            record.exchanger,
-            record.num_atoms,
-            record.world_size,
-            record.study,
-            record.tag,
-        )
-        + ".json"
-    )
-
-
 def write_result(output_dir: str, record: BenchRecord) -> str:
-    os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, result_filename(record))
-    with open(path, "w") as fh:
+    """Write <output_dir>/<study>/<run_id>/result.json."""
+    rdir = run_directory(output_dir, record.study, record.run_id)
+    os.makedirs(rdir, exist_ok=True)
+    path = os.path.join(rdir, "result.json")
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(record.to_json())
         fh.write("\n")
     return path
+
+
+def write_stub_result(
+    *,
+    output_dir: str,
+    model: str,
+    exchanger: str,
+    study: str,
+    num_atoms: int,
+    world_size: int,
+    nodes: int,
+    gpus_per_node: int,
+    tag: Optional[str],
+    status: str,
+    exit_code: int,
+    dataset_file: str,
+    precision: Optional[str] = None,
+) -> Optional[str]:
+    """Write a schema-compliant failure/timeout stub if the driver did not emit result.json."""
+    eff_tag = tag or study
+    rid = make_run_id(model, exchanger, study, num_atoms, world_size, tag)
+    rdir = run_directory(output_dir, study, rid)
+    path = os.path.join(rdir, "result.json")
+    if os.path.exists(path):
+        return None
+    rec = BenchRecord(
+        run_id=rid,
+        study=study,
+        tag=eff_tag,
+        model=model,
+        status=status,
+        num_atoms=int(num_atoms),
+        world_size=int(world_size),
+        precision=precision,
+        exchanger=exchanger,
+        atoms_per_gpu=int(num_atoms) / float(world_size),
+        gpus_per_node=int(gpus_per_node),
+        nodes=int(nodes),
+        dataset_file=os.path.basename(dataset_file),
+        timings_dir=None,
+        slurm_job_id=os.environ.get("SLURM_JOB_ID"),
+        error=f"wrapper caught {status} (exit {exit_code}) with no result.json",
+        exit_code=int(exit_code),
+    )
+    return write_result(output_dir, rec)

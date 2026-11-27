@@ -69,7 +69,7 @@ across models unless a deliberate ablation is being tested:
 | Integrator | `Langevin`, $\Delta t = 0.5\,\text{fs}$, $T = 300\,\text{K}$, $\gamma = 0.01\,\text{fs}^{-1}$ | Set `SimulatorConfig(initial_temperature_K=300.0, velocity_seed=1234)` so Dynamis natively samples Maxwell-Boltzmann velocities whenever input velocities are zero |
 | Cutoff & ghost buffer | Model native cutoff (`6.0 Å` for ORB / UMA / MACE-MP), ghost buffer `0.5 Å` | `rebalance_interval=1000`, `drift_watchdog=False` during timing |
 | Warmup / timed steps | `10` warmup + `50` timed steps (`20` timed for $\ge 4\text{M}$ hero runs) | `Timer.set_level(Level.Off)` during warmup; `Level.Basic` during timed window |
-| Outputs | `BenchRecord` JSON + `timings/<stem>/timing_rank*.jsonl` | Summarized by `analysis/summarize_scaling.py` |
+| Outputs | `<out>/<study>/<run_id>/{result.json, timings/timing_rank*.jsonl.gz}` | Emitted directly in `Dynamis-experiments-log` (`run.schema.json` v1.0) format; all post-analysis, tables, and plots live in `Dynamis-experiments-log` |
 
 > **Velocity initialization (`SimulatorConfig.initial_temperature_K`):**
 > `Simulator.setup()` natively samples Maxwell-Boltzmann velocities at
@@ -178,8 +178,22 @@ bash experiments/exp_datasets/scripts/download_zenodo.sh --list      # all 8 Zen
 
 ---
 
-## 6. Verification & Logging Checklist (Before Closing Any Campaign)
+## 6. Verification & Post-Analysis (`Dynamis-experiments-log`)
 
-1. Every completed cell has `status == "ok"`, `use_fabric == True` (for $W \ge 2$ `gpudirect`), and physical `mean_temperature_k` (no NaNs/explosions).
-2. Run `analysis/summarize_scaling.py` on the campaign results directory and inspect both wall-clock mean `steps_per_sec` and steady-state `med_steps_per_sec` (especially for small latency-bound systems where early-step allocator growth can add jitter).
-3. Ingest normalized `result.json` + gzipped `timing_rank*.jsonl.gz` records into `Dynamis-experiments-log` and pass `dynamis-log validate records/ --check-timings --strict` and `pytest`.
+All post-analysis, summary tables, and publication plots are centralized in
+**`Dynamis-experiments-log`** (do not add ad-hoc plotting scripts in `Dynamis`):
+
+1. Confirm every completed cell has `status == "ok"`, `use_fabric == True` (for
+   $W \ge 2$ `gpudirect`), and physical `mean_temperature_k` (no NaNs/explosions).
+2. Copy the emitted `<study>/<run_id>/` directories (already containing portable
+   `result.json` + gzipped `timings/timing_rank*.jsonl.gz`) into
+   `Dynamis-experiments-log/records/<model_family>/<system>/<campaign_id>/` and
+   add `campaign.yaml`.
+3. Run the `Dynamis-experiments-log` pipeline:
+   ```bash
+   dynamis-log compress  records/<model_family>/<system>/<campaign_id>   # if any raw .jsonl remain
+   dynamis-log validate  records/<model_family>/<system>/<campaign_id> --check-timings --strict
+   dynamis-log summarize records/<model_family>/<system>/<campaign_id>
+   ```
+4. Register any new model/exchanger/tag styles in `figures/registry.yaml` and
+   generate figures via `figures/scripts/` using `dynamis_log.viz`.

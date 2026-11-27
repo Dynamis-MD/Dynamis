@@ -18,10 +18,9 @@ shares a single verified copy:
 # Download both scaling suites (ch4_o2: 8k..10M atoms, li3po4: 32k..1.01M atoms)
 bash experiments/exp_datasets/scripts/download_zenodo.sh --scaling
 
-# Or pick individual archives / list all 8 archives on Zenodo record 24487955
+# Download biomolecular benchmarks or list all 8 archives on Zenodo record 24487955
+bash experiments/exp_datasets/scripts/download_zenodo.sh 2w49 apoa1
 bash experiments/exp_datasets/scripts/download_zenodo.sh --list
-bash experiments/exp_datasets/scripts/download_zenodo.sh ch4_o2
-bash experiments/exp_datasets/scripts/download_zenodo.sh li3po4
 ```
 
 On shared clusters, set `DYNAMIS_ZENODO_CACHE_DIR=/path/to/shared_cache` to avoid
@@ -48,24 +47,49 @@ redundant downloads across teammates.
 | `experiments/exp_datasets/scripts/download_zenodo.sh` | MD5-verified Zenodo record 24487955 downloader (`ch4_o2`, `li3po4`, `2w49`, `apoa1`, `CH4_*`, `RP3_1320`) |
 | `cluster.env` + `scripts/_lib.sh` | Cluster/CUDA/NCCL/MNNVL bootstrap and dataset discovery (`EXP2_DATASETS_ROOT`) |
 | `scripts/sbatch_submit.sh` | Site-policy Slurm submission wrapper |
-| `drivers/bench_common.py` | Reusable CLI base parser, `TrajectoryReader` cell/PBC loader, `ScalableHaloPartitioner`, `kinetic_temperature`, `TimedLoop`, OOM/timeout watchdogs, `gather_rank_metrics`, and `BenchRecord` JSON writer |
-| `analysis/summarize_scaling.py` | Aggregates `BenchRecord` JSONs + `TimingRegistry` JSONLs into `summary.csv`, `scaling_report.md`, `scaling_table.tex`, and strong/weak/memory/breakdown figures |
+| `drivers/bench_common.py` | Reusable CLI base parser, `TrajectoryReader` cell/PBC loader, `ScalableHaloPartitioner`, `kinetic_temperature`, `TimedLoop`, OOM/timeout watchdogs, `gather_rank_metrics`, and `Dynamis-experiments-log` (`run.schema.json` v1.0) record + gzipped timing writer |
 
-## 4. Adding a New Model Driver (UMA, MACE, ORB, …)
+## 4. Output Format & Post-Analysis (`Dynamis-experiments-log`)
 
-1. Create `drivers/run_<model>_scaling.py` that imports `build_base_parser`,
-   `load_system`, `inject_cell`, `wrap_scalable_halo`, `kinetic_temperature`,
-   `TimedLoop`, `capture_oom`, `gather_rank_metrics`, `BenchRecord`, and
-   `write_result` from `bench_common`.
-2. Add model-specific CLI arguments to `build_base_parser(...)`, instantiate your
-   model, and pass model-specific metadata via `BenchRecord(..., extra={...})`.
-3. Submit batches through `scripts/sbatch_submit.sh` (pointing `EXP2_DATA_DIR` at
-   `experiments/exp_datasets/zenodo/<dataset>`).
-4. Summarize any results directory with:
+All post-analysis, summary tables, and publication figures live in
+**`Dynamis-experiments-log`** (do not add ad-hoc plotting scripts here).
 
-```bash
-python experiments/exp2_scaling/analysis/summarize_scaling.py \
-    --results-dir experiments/exp2_scaling/results \
-    --out-dir experiments/exp2_scaling/analysis \
-    --title "<Model> Scaling"
+Drivers built on `bench_common.py` emit per-run directories directly matching
+`Dynamis-experiments-log`'s canonical layout and `run.schema.json` v1.0 (with
+portable `dataset_file` basenames, run-relative `"timings_dir": "timings"`,
+gzipped `timing_rank*.jsonl.gz`, and zero machine-local absolute paths):
+
+```text
+<output_dir>/<study>/<run_id>/
+├── result.json
+└── timings/
+    ├── timing_rank0.jsonl.gz
+    └── ...
 ```
+
+To record and analyze a completed campaign in `Dynamis-experiments-log`:
+
+1. Copy `<output_dir>/{strong,weak,hero,...}/` into
+   `Dynamis-experiments-log/records/<model_family>/<system>/<campaign_id>/`.
+2. Add `campaign.yaml` (conforming to `schemas/campaign.schema.json`).
+3. Validate, summarize, and generate figures in `Dynamis-experiments-log`:
+   ```bash
+   dynamis-log validate  records/<model_family>/<system>/<campaign_id> --check-timings --strict
+   dynamis-log summarize records/<model_family>/<system>/<campaign_id>
+   ```
+   Use `figures/scripts/` with `dynamis_log.viz` + `figures/registry.yaml` for
+   all plots and cross-model comparisons.
+
+## 5. Adding a New Model Driver (UMA, MACE, ORB, …)
+
+1. Create `drivers/run_<model>_scaling.py` importing `build_base_parser`,
+   `load_system`, `inject_cell`, `wrap_scalable_halo`, `kinetic_temperature`,
+   `TimedLoop`, `capture_oom`, `gather_rank_metrics`, `make_run_id`,
+   `run_directory`, `compress_timings`, `BenchRecord`, and `write_result` from
+   `bench_common`.
+2. Pass `output_dir=os.path.join(run_dir, "timings")` to `SimulatorConfig`,
+   call `compress_timings(...)` on rank 0 after `TimingRegistry.instance().close()`,
+   and store model-specific fields in `BenchRecord(..., metrics={...})`.
+3. Submit batches through `scripts/sbatch_submit.sh` (pointing `EXP2_DATA_DIR` at
+   `experiments/exp_datasets/zenodo/<dataset>`), then ingest the resulting
+   `<study>/<run_id>/` directories into `Dynamis-experiments-log`.
