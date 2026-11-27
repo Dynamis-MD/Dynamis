@@ -1,0 +1,8 @@
+datasets/
+results/
+results_*/
+*.out
+*.err
+cluster.local.env
+__pycache__/
+*.pyc
