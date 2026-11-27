@@ -93,3 +93,46 @@ To record and analyze a completed campaign in `Dynamis-experiments-log`:
 3. Submit batches through `scripts/sbatch_submit.sh` (pointing `EXP2_DATA_DIR` at
    `experiments/exp_datasets/zenodo/<dataset>`), then ingest the resulting
    `<study>/<run_id>/` directories into `Dynamis-experiments-log`.
+
+## 6. ORB Scaling Quick Start (CH₄:O₂ & Li₃PO₄)
+
+From `experiments/exp2_scaling/`:
+
+### Build the Python 3.12 ORB environment & pre-warm checkpoints (once, login node)
+```bash
+bash scripts/setup_orb_env.sh
+```
+
+### Run Preflight Gates
+```bash
+# Distributed parity + neighbor-cap tests (1 node, beta_test)
+scripts/sbatch_submit.sh --test --time=00:15:00 --job-name=orb-parity \
+    scripts/probe_orb_gate.sbatch parity
+
+# 1-GPU HBM ceiling probe (CH4:O2)
+scripts/sbatch_submit.sh --time=00:20:00 --job-name=orb-ceiling \
+    scripts/probe_orb_gate.sbatch ceiling-direct
+
+# 2-node MNNVL GPUDirect Fabric vs NCCL verification
+scripts/sbatch_submit.sh --nodes=2 --segment=2 --time=00:15:00 --job-name=orb-mnnvl \
+    scripts/probe_orb_gate.sbatch mnnvl
+
+# Li3PO4 chunked BF16 + Blackwell fused kernels gate (requires PRs #156 & #158)
+scripts/sbatch_submit.sh --test --time=00:20:00 --job-name=li3po4-gate \
+    scripts/probe_orb_gate.sbatch li3po4-fused
+```
+
+### Submit Scaling & Hero Sweeps (1 → 32 GPUs)
+```bash
+# Inspect exact sbatch commands without submitting
+scripts/submit_orb_scaling.sh --dry-run --dataset ch4_o2 --study all --model both
+scripts/submit_orb_scaling.sh --dry-run --dataset li3po4 --study all
+
+# CH4:O2 Orb-Direct strong, weak, and 10M-atom hero runs
+scripts/submit_orb_scaling.sh --dataset ch4_o2 --study strong --model both --exchanger gpudirect
+scripts/submit_orb_scaling.sh --dataset ch4_o2 --study weak   --model both --weak-density both
+scripts/submit_orb_scaling.sh --dataset ch4_o2 --study hero   --model both
+
+# Li3PO4 Orb-Direct k=20 (chunked BF16 + fused kernels) weak32k + strong1m + strong61k
+scripts/submit_orb_scaling.sh --dataset li3po4 --study all
+```
