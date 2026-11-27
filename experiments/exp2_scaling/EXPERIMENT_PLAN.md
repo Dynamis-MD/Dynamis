@@ -85,7 +85,7 @@ Download datasets once into the shared directory:
 
 ```bash
 bash experiments/exp_datasets/scripts/download_zenodo.sh --scaling   # ch4_o2 + li3po4
-bash experiments/exp_datasets/scripts/download_zenodo.sh 2w49        # protein (solvated + vacuum)
+bash experiments/exp_datasets/scripts/download_zenodo.sh 2w49 apoa1  # biomolecular systems
 bash experiments/exp_datasets/scripts/download_zenodo.sh --list      # all 8 Zenodo archives
 ```
 
@@ -122,8 +122,13 @@ bash experiments/exp_datasets/scripts/download_zenodo.sh --list      # all 8 Zen
   - `strong_solvated` (`2w49_solvated_openmm.xyz`, 1.15M): $W_{\min} \to 32$ GPUs.
   - `strong_vacuum` (`2w49_vacuum_openmm.xyz`, 138K): $W_{\min} \to 32$ GPUs (evaluates partition load balance on sparse filament geometry).
 
-### 3.4 Auxiliary Zenodo Archives
-`apoa1.zip` (ApoA1 vacuum), `CH4_{450,11250,1125000}.zip` (pure methane), and `RP3_1320.zip` (RP-3 jet fuel) are available via `download_zenodo.sh` for smaller domain checks, accuracy/conservation validation, or single-GPU profiling.
+### 3.4 `apoa1` — ApoA1 Biomolecular Benchmark (`apoa1.zip`)
+- **Physics:** OpenMM-prepared ApoA1 biomolecular benchmark (`apoa1_vacuum_openmm.xyz`, **92,224 atoms**, cubic PBC box `108.861 Å`, `pbc="T T T"`). Note: the file contains positions only (`species`, `pos`) with no momenta column, so `bench_common.thermalize` is required to initialize 300 K velocities.
+- **Standard study:**
+  - `strong_apoa1` (`apoa1_vacuum_openmm.xyz`, 92K): strong scaling across $W \in \{1, 2, 4, 8, 16, 32\}$ GPUs (or $W_{\min} \to 32$ if 92K exceeds a model's 1-GPU HBM ceiling).
+
+### 3.5 Auxiliary Zenodo Archives
+`CH4_{450,11250,1125000}.zip` (pure methane) and `RP3_1320.zip` (RP-3 jet fuel) are available via `download_zenodo.sh` for smaller domain checks, accuracy/conservation validation, or single-GPU profiling.
 
 ---
 
@@ -131,9 +136,9 @@ bash experiments/exp_datasets/scripts/download_zenodo.sh --list      # all 8 Zen
 
 | Model Family | Dynamis Class | Recommended Variants / Heads | Precision & Kernel Configs | Notes |
 |--------------|---------------|------------------------------|----------------------------|-------|
-| **ORB** | `ORBModel` | `orb_v3_direct_20_omat` ($k=20$), `orb_v3_direct_inf_omat` ($k=\infty$) | (a) Baseline unchunked `float32-high`; (b) Edge-chunked (`edge_chunk_size=524288`) + Blackwell fused `bf16` (PRs #156 & #158) | `omat` covers CH₄:O₂, Li₃PO₄, and biomolecular elements |
-| **UMA** | `UMAModel` | `uma-s-1p1` / `uma-s-1` (`dataset="omat"` for Li₃PO₄, `dataset="omol"` for CH₄:O₂ & 2W49) | Baseline vs. Blackwell `sm_100` fused edge-block kernels (PR #165) | Check 1-GPU ceiling first; expect smaller $N_{\max}^{(1)}$ than Orb-Direct |
-| **MACE** | `MACEModel` | `mace_mp` (`medium-mpa-0`) for Li₃PO₄ / CH₄:O₂; `mace_off` / `mace_omol` for 2W49 | `float32` + `enable_cueq=True` (CuEquivariance) where installed | Conservative autograd forces increase per-atom activation HBM; start 1M strong scaling from $W_{\min}$ found in ceiling probe |
+| **ORB** | `ORBModel` | `orb_v3_direct_20_omat` ($k=20$), `orb_v3_direct_inf_omat` ($k=\infty$) | (a) Baseline unchunked `float32-high`; (b) Edge-chunked (`edge_chunk_size=524288`) + Blackwell fused `bf16` (PRs #156 & #158) | `omat` covers CH₄:O₂, Li₃PO₄, 2W49, and ApoA1 |
+| **UMA** | `UMAModel` | `uma-s-1p1` / `uma-s-1` (`dataset="omat"` for Li₃PO₄, `dataset="omol"` for CH₄:O₂, 2W49 & ApoA1) | Baseline vs. Blackwell `sm_100` fused edge-block kernels (PR #165) | Check 1-GPU ceiling first; expect smaller $N_{\max}^{(1)}$ than Orb-Direct |
+| **MACE** | `MACEModel` | `mace_mp` (`medium-mpa-0`) for Li₃PO₄ / CH₄:O₂; `mace_off` / `mace_omol` for 2W49 & ApoA1 | `float32` + `enable_cueq=True` (CuEquivariance) where installed | Conservative autograd forces increase per-atom activation HBM; start 1M strong scaling from $W_{\min}$ found in ceiling probe |
 
 ---
 
@@ -150,17 +155,19 @@ bash experiments/exp_datasets/scripts/download_zenodo.sh --list      # all 8 Zen
 ### To Do (Remaining Campaigns)
 
 - [ ] **ORB — `li3po4` 32-GPU completion:** Ingest 8-node results once the queued job finishes and refresh figures/tables.
-- [ ] **ORB — `2w49` (solvated 1.15M & vacuum 138K):** Run strong scaling ($W = 1 \to 32$) with edge-chunked fused BF16 `orb_v3_direct_20_omat`.
+- [ ] **ORB — `apoa1` (92K) & `2w49` (solvated 1.15M, vacuum 138K):** Run strong scaling ($W = 1 \to 32$) with edge-chunked fused BF16 `orb_v3_direct_20_omat`.
 - [ ] **ORB — `ch4_o2` fused BF16 ablation (optional):** Re-run `1.02M` strong ($1 \to 32$) and `10M` hero with chunked fused BF16 for direct kernel-speedup comparison on the same fluid dataset.
 - [ ] **UMA (`uma-s-1p1` / `uma-s-1`, baseline + `sm_100` fused kernels):**
   - [ ] Implement `drivers/run_uma_scaling.py` using `bench_common.py` + run parity & 1-GPU HBM ceiling probe.
   - [ ] `li3po4` (`omat`): weak ladder + `strong1m` ($W_{\min} \to 32$) + latency-bound strong (`61K` or `32K`, $1 \to 32$).
   - [ ] `ch4_o2` (`omol`): strong (`64K`/`32K`, `256K`, `1.02M`), weak ladder at max feasible $N_0$, and 32-GPU hero.
+  - [ ] `apoa1` (`omol`): `apoa1_vacuum_openmm.xyz` (92K) strong scaling ($W_{\min} \to 32$).
   - [ ] `2w49` (`omol`): `2w49_solvated_openmm.xyz` (1.15M) and `2w49_vacuum_openmm.xyz` (138K) strong scaling ($W_{\min} \to 32$).
 - [ ] **MACE (`mace_mp` `medium-mpa-0` / `mace_off` / `mace_omol`, CuEq enabled):**
   - [ ] Implement `drivers/run_mace_scaling.py` using `bench_common.py` + run parity & 1-GPU HBM ceiling probe.
   - [ ] `li3po4`: ceiling-matched weak ladder + `strong1m` ($W_{\min} \to 32$) + latency-bound strong (`61K` or `32K`, $1 \to 32$).
   - [ ] `ch4_o2`: strong + ceiling-matched weak scaling ($W_{\min} \to 32$) + 32-GPU hero.
+  - [ ] `apoa1`: `apoa1_vacuum_openmm.xyz` (92K) strong scaling ($W_{\min} \to 32$).
   - [ ] `2w49`: `2w49_solvated_openmm.xyz` and `2w49_vacuum_openmm.xyz` strong scaling ($W_{\min} \to 32$).
 
 ---

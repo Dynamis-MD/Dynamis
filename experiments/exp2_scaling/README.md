@@ -6,7 +6,7 @@ MD5-verified Zenodo benchmark datasets ([record 24487955](https://zenodo.org/rec
 
 > **Experiment Plan & Status:** See [`EXPERIMENT_PLAN.md`](EXPERIMENT_PLAN.md)
 > for the cross-model scaling methodology, per-dataset run matrices (`ch4_o2`,
-> `li3po4`, `2w49`), per-model guidance (ORB, UMA, MACE), and the live
+> `li3po4`, `2w49`, `apoa1`), per-model guidance (ORB, UMA, MACE), and the live
 > completed vs. to-do tracker.
 
 ## 1. Obtain Shared Datasets (Once, Login Node)
