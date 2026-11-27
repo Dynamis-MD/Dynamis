@@ -27,7 +27,8 @@ Each dataset is obtained the most reproducible way available (see
   to 10M atoms, `li3po4` 32k–1.01M atoms, `2w49`, `apoa1`, `CH4_*`, `RP3_1320`),
   fetched on demand into `zenodo/<name>/` via `scripts/download_zenodo.sh` (or
   `bash scripts/setup_data.sh --zenodo [names...]`). Shared by all models (ORB,
-  UMA, MACE, etc.).
+  UMA, MACE, etc.); see [`../exp2_scaling/EXPERIMENT_PLAN.md`](../exp2_scaling/EXPERIMENT_PLAN.md)
+  for the recommended run configurations and status tracker.
 
 ## Directory Structure
 

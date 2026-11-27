@@ -4,6 +4,11 @@ Shared, **model-agnostic** scaling benchmark infrastructure for **Dynamis**
 (supports ORB, UMA, MACE, and any other `dynamis_model` NNP backend) using the
 MD5-verified Zenodo benchmark datasets ([record 24487955](https://zenodo.org/records/24487955)).
 
+> **Experiment Plan & Status:** See [`EXPERIMENT_PLAN.md`](EXPERIMENT_PLAN.md)
+> for the cross-model scaling methodology, per-dataset run matrices (`ch4_o2`,
+> `li3po4`, `2w49`), per-model guidance (ORB, UMA, MACE), and the live
+> completed vs. to-do tracker.
+
 ## 1. Obtain Shared Datasets (Once, Login Node)
 
 Datasets live centrally under `experiments/exp_datasets/zenodo/` so every model
@@ -39,6 +44,7 @@ redundant downloads across teammates.
 
 | File | Purpose |
 |------|---------|
+| `EXPERIMENT_PLAN.md` | Cross-model experiment plan, per-dataset matrices, model guidance, and done/to-do status tracker |
 | `experiments/exp_datasets/scripts/download_zenodo.sh` | MD5-verified Zenodo record 24487955 downloader (`ch4_o2`, `li3po4`, `2w49`, `apoa1`, `CH4_*`, `RP3_1320`) |
 | `cluster.env` + `scripts/_lib.sh` | Cluster/CUDA/NCCL/MNNVL bootstrap and dataset discovery (`EXP2_DATASETS_ROOT`) |
 | `scripts/sbatch_submit.sh` | Site-policy Slurm submission wrapper |
