@@ -363,6 +363,133 @@ def test_orb_distributed_parity(model_name, system):
     # re-initialising in the same process races NCCL's bootstrap between ranks.
 
 
+@pytest.mark.skipif(not HAS_ORB, reason="orb_models is not installed")
+@pytest.mark.parametrize(
+    "edge_chunk_size,mixed_precision,e_rtol,f_rtol",
+    [
+        (1024, None, ENERGY_RTOL, FORCE_RTOL),
+        (1024, "bf16", 5e-4, 5e-2),
+    ],
+)
+def test_orb_direct_edge_chunking_parity(
+    edge_chunk_size, mixed_precision, e_rtol, f_rtol
+):
+    """Verify multi-chunk direct inference matches unchunked ORBModel on 2 GPUs
+    and reduces peak CUDA memory when chunking across edges."""
+    rank, local_rank, world_size, nnodes = setup_distributed()
+    if world_size < 2 and os.environ.get("ORB_ALLOW_SINGLE_RANK") != "1":
+        pytest.skip("Parity test requires at least 2 GPUs. Run with torchrun.")
+
+    device = "cuda"
+    model_name = "orb_v3_direct_20_omat"
+    global_positions, global_atom_types, cell_length = make_system(
+        "lattice2744", device
+    )
+    total_atoms = global_positions.shape[0]
+    global_cell = torch.eye(3, device=device) * cell_length
+    global_pbc = torch.tensor([True, True, True], device=device)
+
+    env = DistEnvironment()
+    env.global_rank = rank
+    env.world_size = world_size
+    env.local_rank = local_rank
+    env.num_nodes = nnodes
+    env.gpus_per_node = world_size // nnodes
+
+    global_mol = MolecularInfo()
+    global_mol.num_atoms = total_atoms
+    global_mol.atom_vertex_numbers = torch.arange(
+        total_atoms, device=device, dtype=torch.long
+    )
+    global_mol.atom_types = global_atom_types
+    global_mol.atom_positions = global_positions
+    global_mol.atom_velocities = torch.zeros((total_atoms, 3), device=device)
+
+    unchunked = ORBModel(
+        model_name=model_name,
+        precision="float32-highest",
+        device=device,
+        edge_chunk_size=None,
+    )
+    chunked = ORBModel(
+        model_name=model_name,
+        precision="float32-highest",
+        device=device,
+        edge_chunk_size=edge_chunk_size,
+        mixed_precision=mixed_precision,
+    )
+
+    sim_config = SimulationConfig()
+    sim_config.cell = global_cell
+    sim_config.pbc = global_pbc
+    sim_config.cutoff = 6.0
+    sim_config.ghost_cutoff_buffer = 0.5
+    sim_config.max_num_neighbors = unchunked.max_num_neighbors
+    sim_config.enforce_max_strictly = unchunked.enforce_max_strictly
+
+    partitioner = KDTreePartitioner()
+    partition_info = partitioner.partition(global_mol, env)
+    partitioner.build_halo_maps(partition_info, global_mol, env, sim_config)
+    if dist.is_initialized() and world_size > 1:
+        dist.all_reduce(partition_info.global_send_recv_matrix, op=dist.ReduceOp.SUM)
+
+    local_mol = MolecularInfo()
+    local_mol.atom_positions = global_mol.atom_positions[
+        partition_info.partition_indices
+    ]
+    local_mol.atom_velocities = global_mol.atom_velocities[
+        partition_info.partition_indices
+    ]
+    local_mol.atom_types = global_mol.atom_types[partition_info.partition_indices]
+    local_mol.num_atoms = local_mol.atom_positions.shape[0]
+
+    state = DynamisState()
+    state.dist_env = env
+    state.local_molecular_info = local_mol
+    state.global_molecular_info = global_mol
+    state.local_partition_info = partition_info
+    state.sim_config = sim_config
+
+    unchunked.initialize_buffers(partition_info, device)
+    chunked.initialize_buffers(partition_info, device)
+
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    e_ref, f_ref = unchunked(state)
+    torch.cuda.synchronize()
+    peak_unchunked = torch.cuda.max_memory_allocated()
+
+    torch.cuda.reset_peak_memory_stats()
+    e_chk, f_chk = chunked(state)
+    torch.cuda.synchronize()
+    peak_chunked = torch.cuda.max_memory_allocated()
+
+    e_ref_sum = e_ref.to(torch.float64).clone()
+    e_chk_sum = e_chk.to(torch.float64).clone()
+    if world_size > 1:
+        dist.all_reduce(e_ref_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(e_chk_sum, op=dist.ReduceOp.SUM)
+
+    e_rel = ((e_chk_sum - e_ref_sum).abs() / e_ref_sum.abs()).item()
+    f_max_diff = (f_chk - f_ref).abs().max().item()
+    f_scale = f_ref.abs().max().item()
+    f_rel = f_max_diff / f_scale
+    if rank == 0:
+        print(
+            f"[chunking chunk={edge_chunk_size} mp={mixed_precision}] "
+            f"e_rel={e_rel:.3e} f_rel={f_rel:.3e} "
+            f"peak_unchunked={peak_unchunked / 1e6:.1f}MB "
+            f"peak_chunked={peak_chunked / 1e6:.1f}MB",
+            flush=True,
+        )
+    assert torch.isfinite(e_chk).all() and torch.isfinite(f_chk).all()
+    assert e_rel < e_rtol, f"chunked energy rel diff {e_rel:.3e} >= {e_rtol:.1e}"
+    assert f_rel < f_rtol, f"chunked force rel diff {f_rel:.3e} >= {f_rtol:.1e}"
+    assert peak_chunked < peak_unchunked, (
+        f"expected chunked peak ({peak_chunked}) < unchunked peak ({peak_unchunked})"
+    )
+
+
 if __name__ == "__main__":
     if int(os.environ.get("WORLD_SIZE", 1)) < 2:
         print(
