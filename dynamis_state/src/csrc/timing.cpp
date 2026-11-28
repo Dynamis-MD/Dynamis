@@ -866,6 +866,21 @@ void Timer::start(std::string_view key_, TimerClass cls_, Where where_, ParentSp
     if (where_ == Where::Device || where_ == Where::Both) {
         if (cuda_present()) {
             s = current_stream(-1);
+            // Inside a CUDA-graph capture an event record becomes a graph node, not a
+            // timestamp; the deferred read later fails (cudaErrorInvalidValue) and
+            // poisons the next CUDA call. Nothing executes during a capture anyway:
+            // keep only the host span.
+            cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+            cudaError_t qe = cudaStreamIsCapturing(s, &cap);
+            if (qe != cudaSuccess) {
+                // e.g. legacy stream queried during another stream's global capture:
+                // clear the (non-sticky) error so a later cudaGetLastError() does not see it,
+                // and do not record events from this thread.
+                (void)cudaGetLastError();
+                where_ = Where::Host;
+            } else if (cap != cudaStreamCaptureStatusNone) {
+                where_ = Where::Host;
+            }
         } else {
             // No GPU: degrade to a host measurement instead of failing outright.
             where_ = Where::Host;
